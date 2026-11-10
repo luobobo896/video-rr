@@ -34,9 +34,9 @@ chk() { if [ "$3" = "$2" ]; then ok "$1" "$3"; else bad "$1" "期望 $2，实际
 # chkin 标签 期望列表(逗号) 实际
 chkin() { case ",$2," in *",$3,"*) ok "$1" "$3";; *) bad "$1" "期望 $2 之一，实际 ${3:-空}";; esac; }
 # chkle 标签 上限 实际
-chkle() { if [ -n "$3" ] && [ "$3" -le "$2" ] 2>/dev/null; then ok "$1" "$3"; else bad "$1" "应 ≤ $2，实际 ${3:-空}"; fi; }
+chkle() { if [ -n "$3" ] && awk -v a="$3" -v b="$2" 'BEGIN{exit !(a<=b)}'; then ok "$1" "$3"; else bad "$1" "应 ≤ $2，实际 ${3:-空}"; fi; }
 # chkge 标签 下限 实际
-chkge() { if [ -n "$3" ] && [ "$3" -ge "$2" ] 2>/dev/null; then ok "$1" "$3"; else bad "$1" "应 ≥ $2，实际 ${3:-空}"; fi; }
+chkge() { if [ -n "$3" ] && awk -v a="$3" -v b="$2" 'BEGIN{exit !(a>=b)}'; then ok "$1" "$3"; else bad "$1" "应 ≥ $2，实际 ${3:-空}"; fi; }
 
 # ---------- 口令 ----------
 ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
@@ -56,7 +56,7 @@ chk "robots 禁抓 /api/" 1 "$("${CURL[@]}" "$BASE/video/robots.txt" | grep -c '
 
 echo "=== 2. 防盗链（未签名一律 403，含分片与源片） ==="
 chk "未签名 master" 403 "$(code "$BASE/video/media/hls/1/index.m3u8")"
-chk "未签名分片" 403 "$(code "$BASE/video/media/hls/1/720p/seg_000.ts")"
+chk "未签名分片" 403 "$(code "$BASE/video/media/hls/1/360p/seg_000.ts")"
 chk "源片目录已关闭" 403 "$(code "$BASE/video/media/uploads/x.mp4")"
 chk "路径穿越" 404 "$(code "$BASE/video/media/hls/../../etc/passwd")"
 
@@ -169,9 +169,15 @@ print(d['sections'][0]['items'][0]['dramaId'])")
       DIRECTORY=$(printf '%s' "$HLS" | sed 's#/index\.m3u8$##')
       "${CURL[@]}" -c /tmp/mh_cookie.txt -o /dev/null "$BASE/video/api/play/$DRAMA/1" -H "authorization: Bearer $USER"
       chk "带 Cookie 取 master" 200 "$(code -b /tmp/mh_cookie.txt "$BASE/video$HLS")"
-      REND=$(code -b /tmp/mh_cookie.txt "$BASE/video$DIRECTORY/720p/index.m3u8")
-      chkin "同集子播放列表（签名作用域）" "200,404" "$REND"
-      chk "带 Cookie 取分片" 200 "$(code -b /tmp/mh_cookie.txt "$BASE/video$DIRECTORY/720p/seg_000.ts")"
+      # 码率档位不再写死：从 master 播放列表里取实际存在的那一档
+      VARIANT=$("${CURL[@]}" -b /tmp/mh_cookie.txt "$BASE/video$HLS" | grep -v '^#' | grep -m1 'm3u8' | tr -d '\r')
+      [ -n "$VARIANT" ] || VARIANT="360p/index.m3u8"
+      chk "同集子播放列表（签名作用域）" 200 "$(code -b /tmp/mh_cookie.txt "$BASE/video$DIRECTORY/$VARIANT")"
+      SEG=$("${CURL[@]}" -b /tmp/mh_cookie.txt "$BASE/video$DIRECTORY/$VARIANT" | grep -v '^#' | grep -m1 '\.ts$' | tr -d '\r')
+      [ -n "$SEG" ] || SEG="seg_000.ts"
+      SEGPATH="$(dirname "$VARIANT")/$SEG"
+      [ "$SEGPATH" = "./$SEG" ] && SEGPATH="$SEG"
+      chk "带 Cookie 取分片" 200 "$(code -b /tmp/mh_cookie.txt "$BASE/video$DIRECTORY/$SEGPATH")"
       chk "无 Cookie 取 master" 403 "$(code "$BASE/video$HLS")"
       chk "换 UA 取 master" 403 "$(code -b /tmp/mh_cookie.txt -A 'Mozilla/5.0 (Different)' "$BASE/video$HLS")"
       chk "带 Cookie 取源片仍 403" 403 "$(code -b /tmp/mh_cookie.txt "$BASE/video/media/uploads/ep-1.mp4")"

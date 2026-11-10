@@ -104,10 +104,13 @@ function extOf(url) {
   return match ? match[1].toLowerCase() : 'mp4'
 }
 
-async function download(url, target) {
+async function download(url, target, expectedBytes = 0) {
   if (existsSync(target)) {
     const size = statSync(target).size
-    if (size > 1_000_000) return { skipped: true, bytes: size, file: target }
+    // 片源地址换了但文件名没变时会命中旧文件：必须比对 catalog 里声明的字节数
+    const matches = expectedBytes > 0 ? Math.abs(size - expectedBytes) <= Math.max(1024, expectedBytes * 0.001) : size > 1_000_000
+    if (size > 1_000_000 && matches) return { skipped: true, bytes: size, file: target }
+    if (size > 1_000_000 && !matches) log(`  片源已变更（本地 ${(size / 1048576).toFixed(1)}MB ≠ 期望 ${(expectedBytes / 1048576).toFixed(1)}MB），重新下载`)
     rmSync(target, { force: true })
   }
   const part = `${target}.part`
@@ -275,7 +278,7 @@ async function buildOne(drama, index, segmentSeconds) {
     db.prepare('DELETE FROM dramas WHERE id = ?').run(preexisting.id)
   }
 
-  const fetched = await download(url, target)
+  const fetched = await download(url, target, Number(drama.source?.bytes ?? 0))
   log(`  ${fetched.skipped ? '复用已有片源' : '下载完成'} ${(fetched.bytes / 1048576).toFixed(1)} MB`)
   const info = await probeFile(target)
   if (!info || !info.duration) throw new Error(`${drama.slug} 无法解析视频信息`)

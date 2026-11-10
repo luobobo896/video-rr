@@ -317,7 +317,8 @@ button { font-family: inherit; cursor: pointer; }
     display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden;
   }
   .sidebar .nav-group { padding: 0; margin: 0; display: flex; gap: 6px; align-items: center; }
-  .sidebar .nav-group:nth-child(n+2) { display: none; }
+  /* 移动端底部栏：保留频道与「我的」，榜单入口收到顶栏/首页；整栏可横向滑动 */
+  .sidebar .nav-group:nth-child(2) { display: none; }
   .sidebar .nav-title { display: none; }
   .sidebar .nav-item { white-space: nowrap; padding: 8px 12px; font-size: 13px; }
   .sidebar .nav-item.active::before { display: none; }

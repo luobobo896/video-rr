@@ -361,7 +361,7 @@ function openPaywall(detail, options = {}) {
       </div>
       <div class="paywall-coupon">
         <input id="coupon-input" placeholder="优惠券码（可选，如 WELCOME10）" />
-        <button class="btn-ghost" id="coupon-apply">校验</button>
+        <button class="btn-ghost" id="coupon-apply">使用</button>
       </div>
       <div class="paywall-channels" id="pay-channels"></div>
       <div class="paywall-foot">
@@ -762,7 +762,9 @@ async function renderDrama(id) {
   const episodes = detail.episodes ?? []
   const firstFree = episodes.find((episode) => episode.allow)
   const trialEp = episodes.find((episode) => !episode.allow && Number(episode.trialSeconds) > 0)
-  const trialMinutes = trialEp ? Math.max(1, Math.round(Number(trialEp.trialSeconds) / 60)) : 0
+  const trialText = !trialEp ? '' : (Number(trialEp.trialSeconds) < 60
+    ? `${Math.round(Number(trialEp.trialSeconds))} 秒`
+    : `${Math.max(1, Math.round(Number(trialEp.trialSeconds) / 60))} 分钟`)
   const hasSubscription = Boolean(detail.hasSubscription)
   const owned = episodes.some((episode) => episode.source === 'purchase')
   const entitled = hasSubscription || owned
@@ -777,7 +779,7 @@ async function renderDrama(id) {
         // 首集免费是拉新的唯一钩子：先让人看到内容，再谈付费
         ? `<button class="btn-primary" id="play-free">▶ 免费看第 ${firstFree.no} 集</button>${payCta}`
         : trialEp
-          ? `<button class="btn-primary" id="play-trial" data-no="${trialEp.no}">▶ 试看 ${trialMinutes} 分钟</button>${payCta}`
+          ? `<button class="btn-primary" id="play-trial" data-no="${trialEp.no}">▶ 试看 ${trialText}</button>${payCta}`
           : `<button class="btn-primary" id="open-paywall">${canSingle ? '购买本片 ¥' + priceText : '开通会员'}</button>`
 
   view.innerHTML = `
