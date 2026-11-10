@@ -9,7 +9,7 @@
 import { createServer } from 'node:http'
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join, normalize, resolve } from 'node:path'
-import { db, seedIfEmpty, ROOT, ensureUserSchema, migratePayChannels, syncMenuCatalog } from './db.mjs'
+import { db, seedIfEmpty, ROOT, ensureSettings, ensureUserSchema, migratePayChannels, syncMenuCatalog } from './db.mjs'
 import { cleanupCodes } from './otp.mjs'
 import { handlePublic } from './api-public.mjs'
 import { handleAdmin } from './api-admin.mjs'
@@ -22,6 +22,7 @@ mkdirSync(HLS_DIR, { recursive: true })
 
 const seed = seedIfEmpty()
 ensureUserSchema()
+ensureSettings()
 syncMenuCatalog()
 const channelMigration = migratePayChannels()
 const PORT = Number(process.env.PORT ?? 8787)

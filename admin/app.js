@@ -20,6 +20,7 @@ const NAV = [
   ['roles', '角色权限', 'admin.read'],
   ['audit', '审计日志', 'audit.read'],
   ['pay', '支付渠道', 'payment.channel.read'],
+  ['email', '邮件设置', 'email.read'],
 ]
 
 const state = { token: localStorage.getItem('mh-admin-token') ?? '', page: 'dashboard', params: {}, timers: [] }
@@ -122,6 +123,7 @@ async function route() {
     else if (key === 'roles') await pageRoles()
     else if (key === 'audit') await pageAudit()
     else if (key === 'pay') await pagePay()
+    else if (key === 'email') await pageEmail()
   } catch (error) {
     view.innerHTML = `<div class="panel">加载失败：${esc(error.message)}</div>`
   }
@@ -1029,6 +1031,106 @@ async function pagePay() {
       await api(`/admin/api/pay-channels/${button.dataset.del}`, { method: 'DELETE', body: { reason } })
       await pagePay()
     })
+  })
+}
+
+/* ---------------- 邮件设置（多 Provider 可配置） ---------------- */
+async function pageEmail() {
+  const data = await api('/admin/api/email-settings')
+  const s = data.settings
+  const smtp = s.smtp ?? {}
+  view.innerHTML = panel('邮件设置', `
+    <p class="muted">验证码通过邮件发送。支持 SMTP / Resend / SendGrid；口令与 API Key 均 AES-256-GCM 加密入库，保存即生效。</p>
+    <div class="cards">
+      <div class="card"><div class="k">当前渠道</div><div class="v">${s.provider === 'dev' ? '<span class="pill">开发模式（验证码回显）</span>' : '<span class="pill ok">' + esc(s.provider) + '</span>'}</div></div>
+      <div class="card"><div class="k">发件人</div><div class="v">${esc(s.from || '—')}</div></div>
+      <div class="card"><div class="k">凭据</div><div class="v">${smtp.passSet || s.resend?.keySet || s.sendgrid?.keySet ? '已加密保存' : '未设置'}</div></div>
+    </div>
+
+    <div class="form-row" style="margin-top:16px">
+      <label>发送渠道
+        <select id="em-provider">
+          ${[['dev', '开发模式（不真实发信）'], ['smtp', 'SMTP'], ['resend', 'Resend API'], ['sendgrid', 'SendGrid API']]
+            .map(([value, label]) => `<option value="${value}" ${s.provider === value ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+      </label>
+      <label>发件邮箱 <input id="em-from" value="${esc(s.from ?? '')}" placeholder="no-reply@example.com" style="width:260px" /></label>
+      <label>发件人名称 <input id="em-fromname" value="${esc(s.fromName ?? '影巢')}" style="width:120px" /></label>
+    </div>
+
+    <div class="panel" style="background:var(--panel-2);margin-top:12px" data-block="smtp">
+      <h3>SMTP 参数</h3>
+      <div class="form-row">
+        <label>主机 <input id="em-host" value="${esc(smtp.host ?? '')}" placeholder="smtp.example.com" style="width:230px" /></label>
+        <label>端口 <input id="em-port" type="number" value="${smtp.port ?? 465}" style="width:90px" /></label>
+        <label><input id="em-secure" type="checkbox" ${smtp.secure ? 'checked' : ''} /> SSL/TLS（465 勾选；587 不勾走 STARTTLS）</label>
+      </div>
+      <div class="form-row">
+        <label>账号 <input id="em-user" value="${esc(smtp.user ?? '')}" placeholder="完整邮箱地址" style="width:280px" /></label>
+        <label>口令 / 授权码 <input id="em-pass" type="password" placeholder="${smtp.passSet ? '已保存，留空不修改' : 'SMTP 密码或应用专用密码'}" style="width:240px" /></label>
+      </div>
+    </div>
+
+    <div class="panel" style="background:var(--panel-2);margin-top:12px" data-block="resend">
+      <h3>Resend</h3>
+      <div class="form-row"><label>API Key <input id="em-resend" type="password" placeholder="${s.resend?.keySet ? '已保存，留空不修改' : 're_...'}" style="width:320px" /></label></div>
+    </div>
+
+    <div class="panel" style="background:var(--panel-2);margin-top:12px" data-block="sendgrid">
+      <h3>SendGrid</h3>
+      <div class="form-row"><label>API Key <input id="em-sendgrid" type="password" placeholder="${s.sendgrid?.keySet ? '已保存，留空不修改' : 'SG....'}" style="width:320px" /></label></div>
+    </div>
+
+    <div class="form-row" style="margin-top:14px">
+      <button class="btn primary" id="em-save">保存</button>
+      <input id="em-test-to" placeholder="测试收件邮箱（默认发件账号）" style="width:260px" />
+      <button class="btn" id="em-test">连接测试 + 发测试邮件</button>
+    </div>
+    <div id="em-msg" class="muted" style="min-height:20px;margin-top:10px"></div>
+    <p class="muted">${data.devMode ? '当前是开发模式：验证码只写日志并回显 devCode。切到 smtp/resend/sendgrid 并保存后，验证码将只发送到邮箱。' : ''}</p>`)
+
+  const syncBlocks = () => {
+    const provider = $('#em-provider').value
+    for (const block of view.querySelectorAll('[data-block]')) {
+      block.style.display = block.dataset.block === provider ? 'block' : 'none'
+    }
+  }
+  syncBlocks()
+  $('#em-provider').addEventListener('change', syncBlocks)
+
+  $('#em-save').addEventListener('click', async () => {
+    const payload = {
+      provider: $('#em-provider').value,
+      from: $('#em-from').value.trim(),
+      fromName: $('#em-fromname').value.trim(),
+      smtp: {
+        host: $('#em-host').value.trim(),
+        port: Number($('#em-port').value || 465),
+        secure: $('#em-secure').checked,
+        user: $('#em-user').value.trim(),
+        pass: $('#em-pass').value,
+      },
+      resend: { apiKey: $('#em-resend').value },
+      sendgrid: { apiKey: $('#em-sendgrid').value },
+    }
+    try {
+      await api('/admin/api/email-settings', { method: 'PUT', body: payload })
+      $('#em-msg').textContent = '已保存并生效'
+      toast('邮件配置已保存')
+      await pageEmail()
+    } catch (error) { $('#em-msg').textContent = error.message }
+  })
+
+  $('#em-test').addEventListener('click', async () => {
+    const to = $('#em-test-to').value.trim()
+    $('#em-msg').textContent = '正在连接并发信…'
+    try {
+      const result = await api('/admin/api/email-settings/test', { method: 'POST', body: { to } })
+      $('#em-msg').textContent = `成功：${result.provider ?? 'smtp'}${result.host ? ' ' + result.host + ':' + result.port : ''}，测试邮件已发往 ${result.to}`
+      toast('测试邮件已发送')
+    } catch (error) {
+      $('#em-msg').textContent = error.message
+    }
   })
 }
 

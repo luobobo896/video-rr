@@ -10,6 +10,7 @@ import {
 } from './commerce.mjs'
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
 import { policyOf } from './entitlements.mjs'
+import { emailConfig, saveEmailConfig, sendMail, verifySmtp } from './mailer.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -53,6 +54,8 @@ const PERM = {
   rolesWrite: 'admin.write',
   payChannelRead: 'payment.channel.read',
   payChannelWrite: 'payment.channel.write',
+  emailRead: 'email.read',
+  emailWrite: 'email.write',
   audit: 'audit.read',
   analytics: 'analytics.read',
   paySettings: 'admin.write',
@@ -588,6 +591,50 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     const result = deleteChannel({ channelId: seg[1] })
     log('payment.channel.delete', 'pay_channel', seg[1], null, null, body.reason)
     return send(res, result)
+  }
+
+  if (pathname === '/admin/api/email-settings' && method === 'GET') {
+    if (!guard(PERM.emailRead)) return deny(PERM.emailRead)
+    const config = emailConfig()
+    return send(res, {
+      settings: {
+        provider: config.provider,
+        from: config.from,
+        fromName: config.fromName,
+        smtp: { host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure, user: config.smtp.user, passSet: config.smtp.passSet },
+        resend: { keySet: config.resend.keySet },
+        sendgrid: { keySet: config.sendgrid.keySet },
+      },
+      devMode: config.provider === 'dev',
+    })
+  }
+
+  if (pathname === '/admin/api/email-settings' && method === 'PUT') {
+    if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
+    const before = emailConfig()
+    const next = saveEmailConfig(body ?? {})
+    setSetting('email', next)
+    log('admin.email.settings', 'settings', 'email',
+      { provider: before.provider, host: before.smtp.host, user: before.smtp.user },
+      { provider: next.provider, host: next.smtp.host, user: next.smtp.user })
+    return send(res, { ok: true, provider: next.provider })
+  }
+
+  if (pathname === '/admin/api/email-settings/test' && method === 'POST') {
+    if (!guard(PERM.emailRead)) return deny(PERM.emailRead)
+    const config = emailConfig()
+    const to = String(body?.to ?? config.smtp.user ?? config.from ?? '').trim()
+    if (!to) return send(res, {}, '0400', '请填写收件邮箱', 400)
+    const verify = await verifySmtp()
+    if (!verify.ok) return send(res, verify, '0502', `连接失败：${verify.error}`, 502)
+    try {
+      const result = await sendMail({ to, subject: '影巢 · 邮件通道测试', text: `这是一封测试邮件，收到即表示发信配置可用。\n时间：${new Date().toLocaleString('zh-CN')}\n渠道：${config.provider}` })
+      log('admin.email.test', 'settings', 'email', null, { to, provider: config.provider, delivered: result.delivered })
+      return send(res, { ...verify, to, delivered: result.delivered, dev: result.dev })
+    } catch (error) {
+      log('admin.email.test', 'settings', 'email', null, { to, provider: config.provider, error: error.message })
+      return send(res, { verify, error: error.message }, '0502', `发送失败：${error.message}`, 502)
+    }
   }
 
   if (pathname === '/admin/api/pay-settings' && method === 'GET') {

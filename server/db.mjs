@@ -414,6 +414,9 @@ export const MENU_TREE = [
   { code: 'system.paychannel', name: '支付渠道', type: 'menu', parent: 'dir:system', sort: 30, path: '/pay', icon: '💳' },
   { code: 'payment.channel.read', name: '查看支付渠道', type: 'button', parent: 'system.paychannel', sort: 10 },
   { code: 'payment.channel.write', name: '管理支付渠道（含密钥）', type: 'button', parent: 'system.paychannel', sort: 20 },
+  { code: 'system.email', name: '邮件设置', type: 'menu', parent: 'dir:system', sort: 35, path: '/email', icon: '✉️' },
+  { code: 'email.read', name: '查看邮件配置', type: 'button', parent: 'system.email', sort: 10 },
+  { code: 'email.write', name: '修改邮件配置（含口令）', type: 'button', parent: 'system.email', sort: 20 },
   { code: 'system.analytics', name: '经营数据', type: 'menu', parent: 'dir:system', sort: 40, path: '/analytics', icon: '📈' },
   { code: 'analytics.read', name: '查看经营数据', type: 'button', parent: 'system.analytics', sort: 10 },
 ]
@@ -599,6 +602,9 @@ export function seedIfEmpty() {
 
     db.prepare("INSERT INTO settings (key, value) VALUES ('site', ?)").run(JSON.stringify({ name: '影巢', currency: 'CNY', usdtRate: 7.2, linkSecret: process.env.MH_LINK_SECRET ?? 'dev-link-secret' }))
     db.prepare("INSERT INTO settings (key, value) VALUES ('pay', ?)").run(JSON.stringify({ alipay: { enabled: false }, usdt: { enabled: true, network: 'TRC20', address: 'TDemoAddressForLocalTesting', minConfirmations: 19 }, mock: { enabled: true } }))
+    db.prepare("INSERT INTO settings (key, value) VALUES ('smtp', ?)").run(JSON.stringify({
+      enabled: false, host: '', port: 465, secure: true, user: '', pass: '', from: '', fromName: '影巢',
+    }))
     db.exec('COMMIT')
   } catch (error) {
     db.exec('ROLLBACK')
@@ -741,6 +747,17 @@ export function getSetting(key, fallback) {
 export function setSetting(key, value) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .run(key, JSON.stringify(value))
+}
+
+/** 补齐缺失的默认设置行（老库升级用）。 */
+export function ensureSettings() {
+  const defaults = {
+    smtp: { enabled: false, host: '', port: 465, secure: true, user: '', pass: '', from: '', fromName: '影巢' },
+  }
+  for (const [key, value] of Object.entries(defaults)) {
+    const row = db.prepare('SELECT 1 AS x FROM settings WHERE key = ?').get(key)
+    if (!row) setSetting(key, value)
+  }
 }
 
 export { DB_PATH }

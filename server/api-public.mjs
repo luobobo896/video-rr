@@ -135,7 +135,7 @@ export async function handlePublic(pathname, url, req, res) {
           ttlSeconds: 300,
           resendSeconds: 60,
           maxAttempts: 3,
-          devCode: process.env.MH_EMAIL_DEV === '1',
+          devCode: process.env.MH_EMAIL_DEV === '1' && isDevMail(),
         },
       })
     }
