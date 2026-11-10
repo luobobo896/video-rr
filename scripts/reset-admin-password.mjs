@@ -37,10 +37,17 @@ if (!row) {
 }
 
 const password = process.argv[3] || randomPassword()
-if (password.length < 12) {
-  console.error('口令至少 12 位（后台策略要求含字母与数字）')
+// 与 server/api-admin.mjs checkAdminPassword 同口径：≥8 位、字母+数字、不含用户名、不重复
+const weak = ['12345678', 'password', 'password1', 'admin1234', 'qwertyui', '11111111']
+const reject = (message) => {
+  console.error(`${message}（后台策略：≥8 位，含字母与数字，不含用户名）`)
   process.exit(1)
 }
+if (password.length < 8) reject('口令至少 8 位')
+if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) reject('口令需同时包含字母与数字')
+if (password.toLowerCase().includes(username.toLowerCase())) reject('口令不能包含用户名')
+if (weak.includes(password.toLowerCase())) reject('口令过于常见')
+if (new Set(password).size < 4) reject('口令重复字符过多')
 // --no-force：本次不强制改密（本地联调/自动化验收用；生产请保持强制）
 const force = !process.argv.includes('--no-force')
 const salt = randomBytes(16).toString('hex')

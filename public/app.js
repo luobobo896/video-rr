@@ -496,10 +496,10 @@ function toast(text) {
 }
 
 function posterCard(item, options = {}) {
-  // badge 默认保留（榜单/分类/收藏沿用价格与会员标识）；
-  // 首页楼层传 { badge: false, score: true } —— 首页是"逛"的场景，
-  // 首屏挂满 ¥6/"会员" 会把内容页变成价目表，价格留给详情页与付费墙。
-  const badge = options.badge === false ? '' : badgeOf(item)
+  // 游览类卡片（首页/分类/榜单/搜索/收藏）默认不挂价格与会员标，
+  // 首屏挂满 ¥6 /「会员」会把内容展示变成价目表；价格只在详情页与付费墙出现。
+  // 需要角标时显式传 { badge: true }。
+  const badge = options.badge === true ? badgeOf(item) : ''
   const rank = options.rank ? `<span class="rank-no">${options.rank}</span>` : ''
   const score = options.score && Number(item.score) > 0 ? `<span class="card-score">★ ${Number(item.score).toFixed(1)}</span>` : ''
   // playCount 由 cardOf 提供；只在明确要求的地方显示（分类列表），避免每张卡都塞满数字
