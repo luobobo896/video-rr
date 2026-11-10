@@ -80,7 +80,7 @@ test('渠道自检返回签名校验结果', () => {
   if (result.signatureCheck) assert.equal(result.signatureCheck.ok, true)
 })
 
-test('登录门禁：未登录访问详情/播放接口被拒', async () => {
+test('登录门禁：浏览公开、播放与个人数据需登录', async () => {
   const { createServer } = await import('node:http')
   const { handlePublic } = await import('../server/api-public.mjs')
   const server = createServer((req, res) => {
@@ -90,15 +90,23 @@ test('登录门禁：未登录访问详情/播放接口被拒', async () => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address()
   const base = `http://127.0.0.1:${port}`
+  try {
+    const home = await fetch(`${base}/api/home`)
+    assert.equal(home.status, 200)
 
-  const home = await fetch(`${base}/api/home`)
-  assert.equal(home.status, 200)
-
-  for (const path of ['/api/drama/1', '/api/play/1/1', '/api/rank?type=HOT', '/api/me']) {
-    const res = await fetch(base + path)
-    assert.equal(res.status, 401, path)
-    const json = await res.json()
-    assert.equal(json.code, '0401')
+    // 浏览类接口对未登录开放（分享链接不能撞登录墙）
+    for (const path of ['/api/drama/1', '/api/rank?type=HOT', '/api/category?type=TV']) {
+      const res = await fetch(base + path)
+      assert.equal(res.status, 200, path)
+    }
+    // 播放与个人数据仍需登录
+    for (const path of ['/api/play/1/1', '/api/me']) {
+      const res = await fetch(base + path)
+      assert.equal(res.status, 401, path)
+      const json = await res.json()
+      assert.equal(json.code, '0401')
+    }
+  } finally {
+    server.close()
   }
-  server.close()
 })

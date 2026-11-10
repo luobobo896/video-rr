@@ -276,6 +276,14 @@ button { font-family: inherit; cursor: pointer; }
 .me-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 6px 0; border-bottom: 1px dashed #232833; }
 .me-row:last-child { border-bottom: 0; }
 .me-row a { color: #cfd6e4; text-decoration: none; }
+/* 订单行：单号可截断、状态按语义着色、待支付时才出现"继续支付" */
+.order-row { align-items: center; flex-wrap: wrap; }
+.order-no { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #8b94a5; overflow: hidden; text-overflow: ellipsis; max-width: 46%; }
+.order-status { font-size: 12px; color: #9aa3b2; }
+.order-status.order-created, .order-status.order-pending { color: #ffb86b; }
+.order-status.order-paid, .order-status.order-fulfilled { color: #4ade80; }
+.order-status.order-closed, .order-status.order-failed { color: #8b94a5; }
+.order-status.order-refunded, .order-status.order-refunding { color: #7dd3fc; }
 
 /* 播放器工具条：清晰度 / 弹幕 / 分享 */
 .player-tools { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center;

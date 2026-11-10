@@ -83,6 +83,15 @@ MH_TRON_API_BASE=https://api.trongrid.io
 MH_USDT_WATCH=1
 EOF
 fi
+if ! grep -q '^MH_BASE_PATH=' "$APP/.env"; then
+  printf '# nginx 已剥掉子路径前缀（proxy_pass 带尾斜杠），Node 侧回跳地址需要它\nMH_BASE_PATH=/video\n' >> "$APP/.env"
+fi
+if ! grep -q '^MH_PLAY_TTL_MAX=' "$APP/.env"; then
+  printf '# 播放签名最长有效期（秒），需覆盖单集时长；nginx HLS 缓存必须短于它\nMH_PLAY_TTL_MAX=7200\n' >> "$APP/.env"
+fi
+if ! grep -q '^MH_UPLOAD_MAX_BYTES=' "$APP/.env"; then
+  printf '# 上传单文件上限（字节），流式写盘不再整块驻内存\nMH_UPLOAD_MAX_BYTES=2147483648\n' >> "$APP/.env"
+fi
 # 旧版本曾写入 MH_EMAIL_DEV=1（验证码回显），本版本一律移除
 if grep -q '^MH_EMAIL_DEV=' "$APP/.env"; then
   sed -i '/^MH_EMAIL_DEV=/d' "$APP/.env"

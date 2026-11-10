@@ -104,25 +104,33 @@ export async function handlePublic(pathname, url, req, res) {
   const method = req.method
 
   /**
-   * 登录门禁（新需求）：未登录只能看首页。
-   * 例外：常量、首页、登录、支付回调（渠道服务器直接调，没有用户 token）。
+   * 登录门禁：浏览类接口公开（分享链接、搜索、榜单是免费流量入口），
+   * 播放/权益/订单/个人中心必须登录。未登录用户看详情→点播放时才撞登录墙。
    */
-  const OPEN_PATHS = new Set(['/api/constants', '/api/home', '/api/auth/login', '/api/auth/email/send', '/api/auth/email/login'])
+  const OPEN_PATHS = new Set([
+    '/api/constants', '/api/home', '/api/feed', '/api/auth/login', '/api/category', '/api/rank',
+    '/api/search', '/api/tags', '/api/auth/email/send', '/api/auth/email/login', '/api/auth/email/password',
+  ])
+  const OPEN_PREFIXES = ['/api/drama/', '/api/category/', '/api/tags/']
   // 只有支付宝服务端回调是公开的（自带 RSA2 验签）；其余回调一律留在内网/进程内
-  const isOpen = OPEN_PATHS.has(pathname) || pathname === '/api/notify/alipay'
+  const isOpen = OPEN_PATHS.has(pathname) || OPEN_PREFIXES.some((p) => pathname.startsWith(p)) || pathname === '/api/notify/alipay'
   if (!isOpen && !userId) {
-    return fail(res, '0401', '请先登录后再浏览和播放', 401)
+    return fail(res, '0401', '登录后才可播放与查看个人内容', 401)
   }
 
   try {
     /* ---------- 基础 ---------- */
     if (pathname === '/api/constants') {
       const channels = paymentOptions('all')
+      const site = getSetting('site', {}) ?? {}
       return send(res, {
         site: { name: '影巢' },
+        supportEmail: process.env.MH_SUPPORT_EMAIL || site.supportEmail || '',
+        vipPrice: site.vipPrice ?? '',
+        vipUnit: site.vipUnit ?? '元/月',
         categories: [
           { code: 'TV', name: '电视剧' }, { code: 'MOVIE', name: '电影' },
-          { code: 'PLAYLET', name: '短剧' }, { code: 'ANIME', name: '动漫' },
+          { code: 'PLAYLET', name: '短剧' }, { code: 'VARIETY', name: '综艺' },
         ],
         pay: {
           channels,
@@ -170,12 +178,27 @@ export async function handlePublic(pathname, url, req, res) {
 
     if (pathname === '/api/rank') {
       const type = url.searchParams.get('type') ?? 'HOT'
+      const lists = all('SELECT name, type FROM rank_lists ORDER BY sort').map((row) => ({ name: row.name, type: row.type }))
       const list = one('SELECT * FROM rank_lists WHERE type = ? ORDER BY sort LIMIT 1', type)
-      if (!list) return send(res, { listName: '', items: [] })
+      if (!list) return send(res, { type, listName: '', lists, items: [] })
       const items = all(`SELECT d.*, ri.rank_no FROM rank_items ri JOIN dramas d ON d.id = ri.drama_id
         WHERE ri.list_id = ? ORDER BY ri.rank_no`, list.id)
         .map((drama) => ({ ...cardOf(drama, userId, context), rankNo: drama.rank_no }))
-      return send(res, { listName: list.name, items })
+      return send(res, { type, listName: list.name, lists, items })
+    }
+
+    /* 「换一换」：按分区随机重排；无分区参数时全站随机 */
+    if (pathname === '/api/feed') {
+      const sectionId = Number(url.searchParams.get('section') ?? 0)
+      if (sectionId) {
+        const items = all(`SELECT d.* FROM section_items si JOIN dramas d ON d.id = si.drama_id
+          WHERE si.section_id = ? AND d.status = 'published' ORDER BY RANDOM() LIMIT 12`, sectionId)
+          .map((drama) => cardOf(drama, userId, context))
+        if (items.length > 1) return send(res, { sectionId, items })
+      }
+      const items = all("SELECT * FROM dramas WHERE status = 'published' ORDER BY RANDOM() LIMIT 12")
+        .map((drama) => cardOf(drama, userId, context))
+      return send(res, { sectionId, items })
     }
 
     if (pathname === '/api/search') {
@@ -274,12 +297,17 @@ export async function handlePublic(pathname, url, req, res) {
       if (hlsPath) setLinkCookies(res, link, playTtl, req)
       recordPlay({ userId, dramaId, episodeId: episode.id, episodeNo: no, source: 'play', ip: clientIp(req), ua: req.headers['user-agent'] })
       const danmu = all("SELECT time_ms, content FROM danmus WHERE episode_id = ? AND status = 'approved' ORDER BY time_ms", episode.id)
+      // 续播：该用户在该集的已看进度；连播：下一集集号（同剧存在即给）
+      const resume = one('SELECT position FROM history WHERE user_id = ? AND drama_id = ? AND episode_no = ?', userId, dramaId, no)
+      const nextEp = one('SELECT no FROM episodes WHERE drama_id = ? AND no > ? ORDER BY no LIMIT 1', dramaId, no)
       return send(res, {
         dramaId, title: drama.title, episode: { id: episode.id, no: episode.no, title: episode.title },
         source: access.source,
         hls: hlsPath,
         expiresIn: playTtl,
         trialSeconds: 0,
+        resumePosition: Number(resume?.position ?? 0),
+        nextEpisodeNo: nextEp ? nextEp.no : null,
         danmu: danmu.map((row) => ({ time: row.time_ms, text: row.content })),
       })
     }

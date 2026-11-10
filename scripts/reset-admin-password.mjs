@@ -9,7 +9,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import { db, ensureAdminSchema } from '../server/db.mjs'
-import { hashPassword } from '../server/auth.mjs'
+import { hashPassword, revokeSessions, verifyPassword } from '../server/auth.mjs'
 
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
 function randomPassword(length = 16) {
@@ -41,10 +41,26 @@ if (password.length < 12) {
   console.error('口令至少 12 位（后台策略要求含字母与数字）')
   process.exit(1)
 }
+// --no-force：本次不强制改密（本地联调/自动化验收用；生产请保持强制）
+const force = !process.argv.includes('--no-force')
 const salt = randomBytes(16).toString('hex')
-db.prepare('UPDATE admins SET password_hash = ?, salt = ?, must_change_password = 1, password_updated_at = ? WHERE id = ?')
-  .run(hashPassword(password, salt), salt, new Date().toISOString(), row.id)
+const info = db.prepare('UPDATE admins SET password_hash = ?, salt = ?, must_change_password = ?, password_updated_at = ? WHERE id = ?')
+  .run(hashPassword(password, salt), salt, force ? 1 : 0, new Date().toISOString(), row.id)
+if (info.changes !== 1) {
+  console.error(`更新失败（changes=${info.changes}），口令未变更`)
+  process.exit(1)
+}
+// 读回自检：占位符与参数错位时 UPDATE 会静默改 0 行，必须验一次才敢说"已重置"
+const check = db.prepare('SELECT password_hash, salt FROM admins WHERE id = ?').get(row.id)
+if (!check || check.salt !== salt || !verifyPassword(password, check.salt, check.password_hash)) {
+  console.error('自检失败：写入的口令无法通过校验，请检查脚本与 auth.mjs')
+  process.exit(1)
+}
+
+// 旧 token 必须立刻失效：口令被重置的场景（离职/泄露）不能留着 7 天会话
+const killed = revokeSessions(row.id, 'admin')
 
 console.log(`已重置 ${row.username}（${row.display_name ?? ''}）`)
 console.log(`新口令：${password}`)
-console.log('下次登录会被要求立即修改。')
+console.log(`已吊销该账号 ${killed} 个会话。`)
+console.log(force ? '下次登录会被要求立即修改。' : '已跳过强制改密（--no-force）。')

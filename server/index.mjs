@@ -18,6 +18,12 @@ import { verifyLink } from './entitlements.mjs'
 import { closeExpiredOrders } from './commerce.mjs'
 import { inspect, sweep } from './ratelimit.mjs'
 import { connectRedis, redisStatus } from './redis.mjs'
+
+/**
+ * 站点子路径（如 /video）。nginx 会把前缀剥掉再反代，服务端渲染的支付页必须自己拼回去，
+ * 否则 fetch('/api/pay/mock')、location.href='/#/me' 会跳到同域其它项目的根目录。
+ */
+const BASE_PATH = (process.env.MH_BASE_PATH ?? '').replace(/\/+$/, '')
 import { scanOnce } from './usdt-watch.mjs'
 
 mkdirSync(UPLOAD_DIR, { recursive: true })
@@ -131,13 +137,15 @@ button{margin-top:16px;padding:12px 24px;border:0;border-radius:10px;background:
 <h1>模拟支付（演示渠道）</h1><p>订单号 ${outTradeNo}</p>
 <p>生产环境请关闭 mock 渠道，接入支付宝 / USDT</p>
 <button id="pay">模拟支付成功</button>
+<a id="back" href="${BASE_PATH}/#/me" style="display:none;margin-top:14px;color:#ff7a59;font-size:14px">返回站点查看订单</a>
 <div id="result" style="margin-top:14px;font-size:13px;color:#4ade80"></div>
 </div>
 <script>
 document.getElementById('pay').addEventListener('click', async () => {
-  const res = await fetch('/api/pay/mock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}' }) })
+  const res = await fetch('${BASE_PATH}/api/pay/mock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}' }) })
   const json = await res.json()
   document.getElementById('result').textContent = json.code === '0000' ? '支付成功，权益已到账，可回到站点观看' : ('失败：' + json.msg)
+  if (json.code === '0000') document.getElementById('back').style.display = 'inline-block'
 })
 </script></body></html>`
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
@@ -176,16 +184,16 @@ ${missing}
 <p class="muted" style="margin-top:16px">本页用于未接入真实商户前的联调：点击付款后，服务端用模拟私钥签名异步通知，再用对应公钥验签入账。</p>
 </div>
 <script>
-document.getElementById('cancel').addEventListener('click', () => history.length > 1 ? history.back() : location.href = '/')
+document.getElementById('cancel').addEventListener('click', () => history.length > 1 ? history.back() : location.href = '${BASE_PATH}/')
 document.getElementById('pay').addEventListener('click', async () => {
   const button = document.getElementById('pay')
   button.disabled = true
   button.textContent = '支付中…'
-  const res = await fetch('/api/pay/alipay-sim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}' }) })
+  const res = await fetch('${BASE_PATH}/api/pay/alipay-sim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}' }) })
   const json = await res.json()
   if (json.code === '0000') {
     document.getElementById('msg').textContent = '支付成功，权益已到账，正在返回…'
-    setTimeout(() => { location.href = '/#/me' }, 1200)
+    setTimeout(() => { location.href = '${BASE_PATH}/#/me' }, 1200)
   } else {
     document.getElementById('msg').style.color = '#d93025'
     document.getElementById('msg').textContent = '支付失败：' + json.msg

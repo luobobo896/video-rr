@@ -51,12 +51,17 @@ test('口令加固：仍在用 admin123 的账号被轮换并强制改密', asyn
   db.prepare("UPDATE admins SET password_hash = ?, salt = ?, password_updated_at = NULL, must_change_password = 0 WHERE username = 'admin'")
     .run(auth.hashPassword('admin123', salt), salt)
 
+  // 测试夹具默认 MH_ADMIN_INIT_PASSWORD=admin123；轮换用例必须走随机口令，否则"轮换"回同一弱口令
+  const savedInit = process.env.MH_ADMIN_INIT_PASSWORD
+  delete process.env.MH_ADMIN_INIT_PASSWORD
   const result = dbModule.ensureAdminCredentials()
+  if (savedInit === undefined) delete process.env.MH_ADMIN_INIT_PASSWORD
+  else process.env.MH_ADMIN_INIT_PASSWORD = savedInit
   assert.ok(result.rotated >= 1, '应轮换至少一个账号')
 
   const row = db.prepare("SELECT * FROM admins WHERE username = 'admin'").get()
   assert.equal(row.must_change_password, 1, '轮换后必须强制改密')
-  assert.equal(auth.verifyPassword('admin123', row.password_hash, row.salt), false, 'admin123 必须失效')
+  assert.equal(auth.verifyPassword('admin123', row.salt, row.password_hash), false, 'admin123 必须失效')
   assert.equal(auth.verifyPassword('admin123', 'x', 'y'), false)
 })
 

@@ -166,3 +166,41 @@
 | P1-4/S-8 | Cookie 与响应头 | 链接 Cookie 加 `HttpOnly`，HTTPS 下加 `Secure`；nginx 补 `nosniff` / `X-Frame-Options` / `Referrer-Policy`，HLS 缓存降到 60 秒 |
 
 回归：`npm test` 73/73、`verify-system.mjs` 78/78、`verify-hk.sh` 带断言与退出码（含分片 200、伪造签名 403、源片 403、未改密 403、匿名模拟支付 404）。
+
+## 12. 产品评审闭环（PM / UX / 架构三方，2026-11-10）
+
+评审结论：功能量不是瓶颈，**主链路有两个零点**——邮件通道未配导致新用户注册成功率≈0、723 集里仅 1 集有真实片源。因此本轮只闭合主链路，不新增功能模块。
+
+### 12.1 契约类缺陷（前后端字段对不上，登录后必崩）
+
+| 位置 | 症状 | 处置 |
+| --- | --- | --- |
+| 首页 hero CTA | 读 `banner.targetUrl` 并兜底 `60535`（库内 id 只有 1–33）→ 全部 404 | 改读 `targetDramaId`，兜底取首屏第一个剧集 |
+| 首页 hero 收藏 | 只弹 toast「已加入收藏（本地）」，假按钮 | 改调 `/api/me/favorite`，未登录先登录 |
+| 「换一换」 | 调 `/api/feed`，服务端无此路由 | 新增 `GET /api/feed?section=`，按分区随机 12 条，不足回退全站 |
+| 分类页 | 读 `data.content`，服务端返回 `list` | 客户端改读 `list` |
+| 榜单页 | 读 `containerList/topList`，服务端返回 `{listName, items}` | 服务端补 `lists` 字段，客户端重写渲染 |
+| 频道常量 | 前端 `COMIC`、服务端 `ANIME`，库内只有 TV/MOVIE/PLAYLET/VARIETY | 两侧统一为四类，导航去掉动漫/纪录片 |
+| 支付渠道 | 前端硬编码 `PAY={mock:true}`，`/api/constants` 失败还 catch 成 `{}` → 收银台静默空转 | 渠道完全由 `/api/constants` 下发，失败显式提示 |
+
+### 12.2 转化链路
+
+- **未登录可浏览**：分类/搜索/榜单/详情/标签改为公开接口，播放与个人中心仍要登录。此前分享链接给朋友必撞登录墙，C 端唯一的免费流量入口被门禁掐死。
+- **免费首集入口**：详情页在 `free_episodes>0` 时主按钮是「▶ 免费看第 N 集」，付费降为次按钮；未登录点它先登录、登录后自动跳回该集（`pendingRoute`）。
+- **续播/连播**：播放接口下发 `resumePosition` 与 `nextEpisodeNo`；播放器 `loadedmetadata` 时 seek 回上次位置，`ended` 自动播下一集。
+- **订单可见性**：状态中文化（`created/pending/paid/fulfilled/closed/refunded…`），列表 12 条，`created/pending` 显示「继续支付」；轮询覆盖订单 15 分钟有效期（原 40×2 秒就判失败，用户已付款却看到「未完成」）。
+- **收银台**：弹窗在 `createOrder` 之前打开（iOS Safari/微信拦截），失败自动关闭；超时文案改为「USDT 需 19 个确认，可在「我的」继续支付」。
+- **支付页回跳**：`mockPayPage`/`alipaySimPage` 的 `fetch` 与 `location.href` 统一加 `MH_BASE_PATH`（默认 `/video`），不再跳到同域其它项目根目录。
+
+### 12.3 诚实性
+
+- 删除全部「复刻演示 / 沙箱 / 双11钜惠 / 权益判定接口 / 剧集 #N」文案与页脚。
+- 弹幕删除「无命中时随机取一条」的兜底（伪造"很多人在看"），改为时间窗内去重匹配。
+- 分享改为真实 `navigator.share` / 复制链接（原为只 toast）。
+- 播放器 hls.js 本地化到 `public/vendor/hls.mjs`（原运行时拉 jsDelivr，被墙即黑屏）。
+
+### 12.4 顺带修掉的运维脚本缺陷
+
+`scripts/reset-admin-password.mjs` 的 UPDATE 有 5 个占位符但只传 4 个参数（漏 `salt`）→ `WHERE id = NULL` → 改 0 行却打印「已重置」。已补参数、加 `changes !== 1` 非零退出、加读回自检（`verifyPassword` 复核），并在重置后吊销该账号全部会话。
+
+回归口径：`npm test` 73/73、`verify-system.mjs` 79/79（1.3/1.4/1.8/1.9 由「未登录必须 401」改为「未登录必须可浏览」）。

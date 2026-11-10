@@ -55,8 +55,10 @@ export function revokeToken(token) {
 
 /** 吊销某个账号的全部会话（改密 / 封号时调用）。 */
 export function revokeSessions(subjectId, role) {
-  if (role) db.prepare('DELETE FROM sessions WHERE subject_id = ? AND role = ?').run(subjectId, role)
-  else db.prepare('DELETE FROM sessions WHERE subject_id = ?').run(subjectId)
+  const info = role
+    ? db.prepare('DELETE FROM sessions WHERE subject_id = ? AND role = ?').run(subjectId, role)
+    : db.prepare('DELETE FROM sessions WHERE subject_id = ?').run(subjectId)
+  return Number(info?.changes ?? 0)
 }
 
 export function loginAdmin(username, password) {
