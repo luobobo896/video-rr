@@ -706,7 +706,9 @@ async function pageOrders() {
     <td class="muted">${esc(order.paid_at ?? order.created_at)}</td>
     <td>${['paid', 'fulfilled'].includes(order.status)
       ? `<button class="btn sm danger" data-refund="${order.id}">发起退款</button>`
-      : `<button class="btn sm" data-confirm="${order.id}">确认到账</button>`}</td>
+      : ['created', 'pending'].includes(order.status)
+        ? `<button class="btn sm" data-confirm="${order.id}">确认到账</button>`
+        : '—'}</td>
   </tr>`)
   view.innerHTML = panel('订单', `
     <p class="muted">已支付合计 ¥${total.toFixed(2)}（最近 100 笔）</p>
