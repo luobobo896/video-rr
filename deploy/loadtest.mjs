@@ -20,6 +20,7 @@ for (let i = 0; i < argv.length; i++) {
 const TARGET = args.url ?? 'http://127.0.0.1:8787/media/hls/1/index.m3u8'
 const CONCURRENCY = Number(args.concurrent ?? 1000)
 const SECONDS = Number(args.seconds ?? 30)
+const WARMUP = Number(args.warmup ?? 0)
 const HOST = args.host
 const INSECURE = args.insecure === 'true'
 const BASE = TARGET.slice(0, TARGET.lastIndexOf('/') + 1)
@@ -35,7 +36,8 @@ const doRequest = isHttps ? httpsRequest : httpRequest
 const tlsOptions = INSECURE ? { rejectUnauthorized: false } : {}
 
 const metrics = { requests: 0, bytes: 0, errors: 0, latency: [], statuses: {}, active: 0, peak: 0, samples: [] }
-const deadline = Date.now() + SECONDS * 1000
+const goAt = Date.now() + WARMUP * 1000
+const deadline = goAt + SECONDS * 1000
 
 function fetchText(url) {
   return new Promise((resolve) => {
@@ -93,6 +95,10 @@ async function viewer() {
   const variants = playlistLines(master)
   const variant = variants.find((line) => line.includes('480p')) ?? variants[0]
   const variantUrl = variant ? new URL(variant, BASE).toString() : TARGET
+
+  if (WARMUP > 0) {
+    while (Date.now() < goAt) await new Promise((resolve) => setTimeout(resolve, 100))
+  }
 
   while (Date.now() < deadline) {
     const playlist = await fetchText(variantUrl)
