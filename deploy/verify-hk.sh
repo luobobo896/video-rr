@@ -135,6 +135,13 @@ if [ -z "$USER_ID" ]; then
 else
   ISSUE=$("${CURL[@]}" -X POST "$BASE/video-admin/api/users/$USER_ID/login-code" -H "authorization: Bearer $TOKEN" \
     -H 'content-type: application/json' -d '{"reason":"线上验收"}')
+  # 代发码有 60 秒冷却：命中冷却就等一会儿再签一次（重跑脚本时的常态）
+  if printf '%s' "$ISSUE" | grep -q send_too_frequent; then
+    WAIT=$(printf '%s' "$ISSUE" | sed -n 's/.*请 \([0-9]\+\) 秒.*/\1/p')
+    sleep "${WAIT:-30}"
+    ISSUE=$("${CURL[@]}" -X POST "$BASE/video-admin/api/users/$USER_ID/login-code" -H "authorization: Bearer $TOKEN" \
+      -H 'content-type: application/json' -d '{"reason":"线上验收"}')
+  fi
   EMAIL=$(printf '%s' "$ISSUE" | json data.email)
   CODE=$(printf '%s' "$ISSUE" | json data.code)
   chk "代发登录码" 6 "${#CODE}"
