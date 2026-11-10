@@ -119,6 +119,22 @@ const server = createServer(async (req, res) => {
   const pathname = url.pathname
 
   try {
+    // nginx auth_request：校验播放签名（Cookie 或 query），命中返回 204
+    if (pathname === '/media-auth') {
+      const original = String(req.headers['x-original-uri'] ?? '')
+      const mediaPath = original.replace(/^\/video/, '').split('?')[0]
+      const cookies = Object.fromEntries(String(req.headers.cookie ?? '').split(';').map((part) => {
+        const [key, ...rest] = part.trim().split('=')
+        return [key, rest.join('=')]
+      }))
+      const sign = url.searchParams.get('sign') ?? cookies.mh_link
+      const expires = url.searchParams.get('expires') ?? cookies.mh_exp
+      const ok = ALLOW_UNSIGNED || verifyLink(mediaPath, sign, expires)
+      res.writeHead(ok ? 204 : 403, { 'cache-control': 'no-store' })
+      res.end()
+      return
+    }
+
     if (pathname.startsWith('/media/hls/')) {
       const cookies = Object.fromEntries(String(req.headers.cookie ?? '').split(';').map((part) => {
         const [key, ...rest] = part.trim().split('=')
