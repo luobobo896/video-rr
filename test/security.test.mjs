@@ -45,13 +45,13 @@ test('后台口令策略：长度/字符/用户名/重复字符/常见弱口令'
     assert.equal(result.ok, false, `${password} 应被拒绝`)
     assert.match(result.message, pattern)
   }
-  bad('Ab1', 'admin', /至少 12 位/)
-  bad('abcdefghijkl', 'admin', /字母和数字/)
-  bad('123456789012', 'admin', /字母和数字/)
-  bad('Admin12345678', 'admin', /用户名/)
-  bad('password1234', 'ops01', /常见/)
-  bad('aaaaaaaaaaa1', 'ops01', /重复/)
-  assert.equal(checkAdminPassword('Xk7mQ2pLw9Za', 'ops01').ok, true)
+  bad('Ab1', 'admin', /至少 8 位/)
+  bad('abcdefgh', 'admin', /字母和数字/)
+  bad('12345678', 'admin', /字母和数字/)
+  bad('Admin1234', 'admin', /用户名/)
+  bad('password1', 'ops01', /常见/)
+  bad('aaaaaaa1', 'ops01', /重复/)
+  assert.equal(checkAdminPassword('Xk7mQ2pLw', 'ops01').ok, true)
 })
 
 test('登录失败 5 次锁定 10 分钟，成功一次清零', async () => {

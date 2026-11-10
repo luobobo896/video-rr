@@ -38,6 +38,45 @@ const scopeMatches = (scope, drama) => {
   return false
 }
 
+/** 按集定价规则：优先级高于内容级策略（VIP 免费但最后 2 集单独收费就靠它）。 */
+export function rulesOfDrama(dramaId) {
+  return all('SELECT * FROM episode_price_rules WHERE drama_id = ? ORDER BY from_no, sort, id', Number(dramaId))
+}
+
+export function ruleFor(rules, episodeNo) {
+  const no = Number(episodeNo)
+  if (!Number.isFinite(no)) return null
+  return rules.find((rule) => no >= Number(rule.from_no) && (rule.to_no === null || rule.to_no === undefined || no <= Number(rule.to_no))) ?? null
+}
+
+/** 写入某部剧的规则集合（整体替换，后台保存用）。 */
+export function setEpisodeRules(dramaId, rules) {
+  const id = Number(dramaId)
+  const rows = (rules ?? []).map((rule, index) => ({
+    from: Math.max(1, Number(rule.fromNo ?? rule.from_no ?? 1) || 1),
+    to: rule.toNo ?? rule.to_no ?? null,
+    mode: ['free', 'vip', 'single'].includes(rule.mode) ? rule.mode : 'vip',
+    price: Math.max(0, Number(rule.price ?? rule.price_cny ?? 0) || 0),
+    note: rule.note ?? null,
+    sort: index,
+  }))
+  for (const row of rows) {
+    if (row.to !== null && Number(row.to) < row.from) throw Object.assign(new Error(`第 ${row.from} 集的结束集数不能小于起始集数`), { status: 400 })
+  }
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.prepare('DELETE FROM episode_price_rules WHERE drama_id = ?').run(id)
+    const insert = db.prepare(`INSERT INTO episode_price_rules (drama_id, from_no, to_no, mode, price_cny, note, sort)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    for (const row of rows) insert.run(id, row.from, row.to === null ? null : Number(row.to), row.mode, row.price, row.note, row.sort)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+  return rulesOfDrama(id)
+}
+
 /** 内容级支付方式摘要（给前端渲染角标与购买入口）。 */
 export function priceInfo(drama) {
   const policy = policyOf(drama.id) ?? { access_mode: 'subscription', free_episodes: 0, trial_seconds: 0, single_price_cny: 0, purchase_kind: 'single' }
@@ -63,23 +102,56 @@ export function resolveAccess(userId, dramaId, episodeNo) {
   if (!drama) return { allow: false, reason: 'content_not_found' }
   const policy = policyOf(drama.id) ?? { access_mode: 'subscription', free_episodes: 0, trial_seconds: 0, single_price_cny: 0, purchase_kind: 'single' }
 
-  // 1) 单片所有权
+  // 1) 单片所有权（买断整部：优先于一切规则）
   const purchase = activePurchase(userId, drama.id)
   if (purchase) return { allow: true, source: 'purchase', purchase }
 
-  // 2) 订阅（覆盖 scope）；会员「全场畅看」包含单片付费库，单片价格只对非会员生效
+  // 2) 按集规则（VIP 免费但某几集单独卖，就靠这里覆盖内容级策略）
+  const rules = rulesOfDrama(drama.id)
+  const rule = ruleFor(rules, episodeNo)
   const subscription = activeSubscription(userId)
-  if (subscription && scopeMatches(subscription.scope, drama)) {
+  const subCovers = Boolean(subscription) && scopeMatches(subscription.scope, drama)
+
+  if (rule) {
+    if (rule.mode === 'free') return { allow: true, source: 'free', rule }
+    if (rule.mode === 'vip') {
+      if (subCovers) return { allow: true, source: 'subscription', subscription, rule }
+      return {
+        allow: false,
+        reason: 'vip_required',
+        trialSeconds: policy.trial_seconds,
+        price: 0,
+        purchaseKind: policy.purchase_kind,
+        plans: priceInfo(drama).plans,
+        membership: false,
+        rule,
+      }
+    }
+    // mode === 'single'：会员也要单独买
+    return {
+      allow: false,
+      reason: 'single_purchase_required',
+      trialSeconds: policy.trial_seconds,
+      price: Number(rule.price_cny) || Number(policy.single_price_cny) || 0,
+      purchaseKind: policy.purchase_kind,
+      plans: priceInfo(drama).plans,
+      membership: subCovers,
+      rule,
+    }
+  }
+
+  // 3) 订阅（覆盖 scope）；会员「全场畅看」包含单片付费库，单片价格只对非会员生效
+  if (subCovers) {
     return { allow: true, source: 'subscription', subscription }
   }
 
-  // 3) 免费集 / 免费库（免费集是拉新钩子，与 access_mode 无关：单片剧也常放前 1–2 集）
+  // 4) 免费集 / 免费库（免费集是拉新钩子，与 access_mode 无关：单片剧也常放前 1–2 集）
   if (policy.access_mode === 'free') return { allow: true, source: 'free' }
   if (Number(policy.free_episodes) > 0 && Number(episodeNo) <= Number(policy.free_episodes)) {
     return { allow: true, source: 'free' }
   }
 
-  // 4) 拒绝 + 引导信息（含单片价格与试看时长）
+  // 5) 拒绝 + 引导信息（含单片价格与试看时长）
   const info = priceInfo(drama)
   return {
     allow: false,
@@ -127,21 +199,47 @@ export function revokeByOrder(orderId) {
 }
 
 /** 批量判定某部剧的分集状态（一次查询，避免 N+1）。 */
-export function decideEpisodes({ drama, policy, subscription, purchase, episodes }) {
+export function decideEpisodes({ drama, policy, subscription, purchase, episodes, rules }) {
   const subscriptionCovers = Boolean(subscription) && scopeMatches(subscription.scope, drama)
+  const ruleList = rules ?? rulesOfDrama(drama.id)
   return episodes.map((episode) => {
+    const rule = ruleFor(ruleList, episode.no)
     let allow = false
     let source = null
-    if (purchase) { allow = true; source = 'purchase' }
-    else if (subscriptionCovers) { allow = true; source = 'subscription' }
-    else if (policy.access_mode === 'free') { allow = true; source = 'free' }
-    else if (Number(policy.free_episodes) > 0 && Number(episode.no) <= Number(policy.free_episodes)) { allow = true; source = 'free' }
+    let reason = null
+    let price = 0
+    if (purchase) {
+      allow = true
+      source = 'purchase'
+    } else if (rule) {
+      if (rule.mode === 'free') { allow = true; source = 'free' }
+      else if (rule.mode === 'vip') {
+        if (subscriptionCovers) { allow = true; source = 'subscription' }
+        else reason = 'vip_required'
+      } else {
+        reason = 'single_purchase_required'
+        price = Number(rule.price_cny) || Number(policy.single_price_cny) || 0
+      }
+    } else if (subscriptionCovers) {
+      allow = true
+      source = 'subscription'
+    } else if (policy.access_mode === 'free') {
+      allow = true
+      source = 'free'
+    } else if (Number(policy.free_episodes) > 0 && Number(episode.no) <= Number(policy.free_episodes)) {
+      allow = true
+      source = 'free'
+    } else {
+      reason = policy.access_mode === 'paid' ? 'single_purchase_required' : 'subscription_required'
+    }
     return {
       ...episode,
       allow,
       source,
+      reason,
+      rule,
       trialSeconds: allow ? 0 : policy.trial_seconds,
-      price: allow ? 0 : policy.single_price_cny,
+      price: allow ? 0 : price || policy.single_price_cny,
     }
   })
 }

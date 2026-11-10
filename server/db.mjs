@@ -479,6 +479,8 @@ export const MENU_TREE = [
   { code: 'ops.section.write', name: '管理首页楼层', type: 'button', parent: 'ops.section', sort: 10 },
   { code: 'ops.rank', name: '榜单', type: 'menu', parent: 'dir:ops', sort: 30, path: '/ranks', icon: '🏆' },
   { code: 'ops.rank.write', name: '管理榜单', type: 'button', parent: 'ops.rank', sort: 10 },
+  { code: 'ops.events', name: '埋点数据', type: 'menu', parent: 'dir:ops', sort: 40, path: '/events', icon: '📡' },
+  { code: 'ops.events.read', name: '查看埋点明细', type: 'button', parent: 'ops.events', sort: 10 },
 
   { code: 'dir:user', name: '用户中心', type: 'dir', parent: null, sort: 50, path: '/user', icon: '👤' },
   { code: 'user.list', name: '用户管理', type: 'menu', parent: 'dir:user', sort: 10, path: '/users', icon: '👥' },
@@ -489,6 +491,7 @@ export const MENU_TREE = [
   { code: 'cs.toolkit.grant', name: '补发权益', type: 'button', parent: 'cs.toolkit', sort: 10 },
 
   { code: 'dir:system', name: '系统管理', type: 'dir', parent: null, sort: 60, path: '/system', icon: '⚙️' },
+  { code: 'system.admin', name: '管理员账号', type: 'menu', parent: 'dir:system', sort: 5, path: '/admins', icon: '🧑‍💼' },
   { code: 'system.role', name: '角色权限', type: 'menu', parent: 'dir:system', sort: 10, path: '/roles', icon: '🔐' },
   { code: 'admin.read', name: '查看角色/管理员', type: 'button', parent: 'system.role', sort: 10 },
   { code: 'admin.write', name: '管理角色/管理员', type: 'button', parent: 'system.role', sort: 20 },
@@ -514,7 +517,7 @@ export const ROLES = [
   ['content_ops', '内容运营', '剧集/分集/付费策略/审核', [
     'dashboard', 'content.drama', 'content.drama.read', 'content.drama.write', 'content.drama.publish',
     'content.episode', 'content.episode.write', 'content.policy', 'content.policy.write',
-    'content.review', 'content.review.write',
+    'content.review', 'content.review.write', 'content.tag', 'tag.read', 'tag.write',
   ]],
   ['finance', '财务', '订单、退款、对账、经营数据', [
     'dashboard', 'commerce.order', 'finance.order.read', 'commerce.refund',
@@ -529,7 +532,8 @@ export const ROLES = [
   ]],
   ['analyst', '数据分析', '只读经营数据', [
     'dashboard', 'system.analytics', 'analytics.read', 'commerce.order', 'finance.order.read',
-  ]],
+    'ops.events', 'ops.events.read',
+  ]]
 ]
 
 const BY_CODE = new Map(MENU_TREE.map((node) => [node.code, node]))
@@ -598,6 +602,88 @@ function writeInitialAdminPasswords(list) {
 /**
  * 老库结构升级：admins 增加强制改密标记与改密时间。
  */
+/**
+ * 运营侧的表结构增量：标签层级、按集定价规则、榜单自动分、素材搜刮缓存。
+ * 逐列判断后再 ALTER，重复执行安全（线上老库也走同一条路径）。
+ */
+export function ensureOpsSchema() {
+  const has = (table) => Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
+  const cols = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name)
+
+  if (has('tags')) {
+    const columns = cols('tags')
+    if (!columns.includes('parent_id')) db.exec('ALTER TABLE tags ADD COLUMN parent_id INTEGER REFERENCES tags(id) ON DELETE SET NULL')
+    if (!columns.includes('updated_at')) db.exec('ALTER TABLE tags ADD COLUMN updated_at TEXT')
+  }
+
+  if (has('rank_lists')) {
+    const columns = cols('rank_lists')
+    if (!columns.includes('auto')) db.exec('ALTER TABLE rank_lists ADD COLUMN auto INTEGER NOT NULL DEFAULT 1')
+    if (!columns.includes('updated_at')) db.exec('ALTER TABLE rank_lists ADD COLUMN updated_at TEXT')
+  }
+
+  if (has('rank_items')) {
+    const columns = cols('rank_items')
+    if (!columns.includes('locked')) db.exec('ALTER TABLE rank_items ADD COLUMN locked INTEGER NOT NULL DEFAULT 0')
+    if (!columns.includes('score')) db.exec('ALTER TABLE rank_items ADD COLUMN score REAL NOT NULL DEFAULT 0')
+  }
+
+  for (const table of ['plans', 'coupons']) {
+    if (!has(table)) continue
+    const columns = cols(table)
+    if (!columns.includes('updated_at')) db.exec(`ALTER TABLE ${table} ADD COLUMN updated_at TEXT`)
+  }
+
+  // 按集定价：VIP 免费但最后两集单独收费、前 N 集免费、中间集单片价，都靠这张表表达
+  db.exec(`
+CREATE TABLE IF NOT EXISTS episode_price_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  drama_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  from_no INTEGER NOT NULL,
+  to_no INTEGER,
+  mode TEXT NOT NULL,                                   -- free | vip | single
+  price_cny REAL NOT NULL DEFAULT 0,
+  note TEXT,
+  sort INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_episode_rules_drama ON episode_price_rules(drama_id, from_no);
+`)
+
+  db.exec(`
+CREATE TABLE IF NOT EXISTS scrape_cache (
+  keyword TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`)
+
+}
+
+/** 雪花风格不可重复编码（时间戳 + 进程号 + 自增），给套餐/优惠券用。 */
+let codeSeq = 0
+export function genCode(prefix = '') {
+  const now = BigInt(Date.now())
+  codeSeq = (codeSeq + 1) % 4096
+  const pid = BigInt(process.pid % 1024)
+  const value = (now << 22n) | (pid << 12n) | BigInt(codeSeq)
+  return `${prefix}${value.toString()}`
+}
+
+/** 把历史遗留的英文编码（starter/quarter/SAVE10…）迁成数字编码，幂等。 */
+export function migrateCodesToNumeric() {
+  let changed = 0
+  for (const table of ['plans', 'coupons']) {
+    const rows = db.prepare(`SELECT id, code FROM ${table}`).all()
+    for (const row of rows) {
+      if (/^\d{12,}$/.test(String(row.code ?? ''))) continue
+      db.prepare(`UPDATE ${table} SET code = ? WHERE id = ?`).run(genCode(), row.id)
+      changed += 1
+    }
+  }
+  return changed
+}
+
 export function ensureAdminSchema() {
   const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'admins'").get()
   if (!exists) return
@@ -973,5 +1059,9 @@ export function ensureSettings() {
     if (!row) setSetting(key, value)
   }
 }
+
+// 模块加载即补齐运营侧增量表（幂等）：标签层级 / 按集定价 / 榜单自动分 / 搜刮缓存。
+// 放在这里而不是只在 index.mjs 调，是为了测试与脚本（导入、探针）导入 db 时也有一致的表结构。
+ensureOpsSchema()
 
 export { DB_PATH }

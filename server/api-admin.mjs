@@ -1,6 +1,6 @@
 /** 后台接口：RBAC 保护 + 审计 + 内容/付费策略/套餐/优惠券/订单/退款/对账/权限。 */
 import { randomBytes } from 'node:crypto'
-import { db, getSetting, setSetting } from './db.mjs'
+import { db, genCode, getSetting, setSetting } from './db.mjs'
 import { authOf, checkPasswordStrength, hashPassword, issueToken, loginAdmin, revokeSessions, verifyPassword } from './auth.mjs'
 import { send } from './api-public.mjs'
 import { hasPermission, listAdmins, listAudit, listPermissionCatalog, listRoles, loadPrincipal, menuTree, roleMenuBinding, setAdminRoles, updateRoleMenus } from './rbac.mjs'
@@ -10,13 +10,15 @@ import {
   listChannels, upsertChannel, setChannelStatus, setDefaultChannel, deleteChannel, testChannel, paymentOptions, channelConfig,
 } from './commerce.mjs'
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
-import { policyOf } from './entitlements.mjs'
+import { policyOf, rulesOfDrama, setEpisodeRules } from './entitlements.mjs'
 import {
   PRESETS, channelList, emailSettings, mailUnavailable, markTest, removeChannel, saveEmailSettings, upsertChannel as upsertMailChannel, verifyChannel,
 } from './mail-channels.mjs'
 import { pollDeviceFlow, startDeviceFlow } from './mailer-oauth.mjs'
 import { analyticsReport } from './analytics.mjs'
-import { createTag, deleteTag, listTags, setDramaTags, tagsOfDrama, updateTag } from './tags.mjs'
+import { createTag, deleteTag, listTags, setDramaTags, setTagStatus, tagTree, tagsOfDrama, updateTag } from './tags.mjs'
+import { refreshAutoRanks, refreshRank, RANK_STRATEGIES } from './rank.mjs'
+import { completenessOf, scrapeTitle } from './scrape.mjs'
 import { clearLoginFailures, clientIpOf, guardStats, loginLockSeconds, noteLoginFailure } from './ratelimit.mjs'
 import { issueAssistCode } from './otp.mjs'
 import { usdtWatchStatus } from './usdt-watch.mjs'
@@ -26,6 +28,63 @@ const one = (sql, ...args) => db.prepare(sql).get(...args)
 const run = (sql, ...args) => db.prepare(sql).run(...args)
 
 const ipOf = (req) => clientIpOf(req)
+const safeJson = (text) => { try { return JSON.parse(text) } catch { return null } }
+
+const MISSING_LABEL = {
+  title: '标题', category: '内容类型', coverUrl: '封面', year: '年份',
+  area: '地区', score: '评分', accessMode: '付费模式',
+}
+const labelMissing = (keys) => keys.map((key) => MISSING_LABEL[key] ?? key).join('、')
+
+/** 剧集上架前的必填校验：标题 / 内容类型 / 付费模式 / 封面 / 年份 / 地区 / 评分。 */
+function dramaCompleteness(row) {
+  const policy = row?.id ? policyOf(row.id) : null
+  return completenessOf({
+    title: row?.title,
+    category: row?.category,
+    coverUrl: row?.cover_url,
+    year: row?.year,
+    area: row?.area,
+    score: row?.score,
+    access: policy ? { mode: policy.access_mode } : null,
+  })
+}
+
+/** 后台下拉选项与中文标签（前端不再自己维护一套翻译）。 */
+export const ADMIN_OPTIONS = {
+  categories: [
+    { value: 'MOVIE', label: '电影' },
+    { value: 'TV', label: '电视剧' },
+    { value: 'PLAYLET', label: '短剧 / 漫剧' },
+    { value: 'VARIETY', label: '综艺' },
+  ],
+  accessModes: [
+    { value: 'free', label: '免费' },
+    { value: 'subscription', label: '会员免费' },
+    { value: 'paid', label: '单独收费' },
+  ],
+  ruleModes: [
+    { value: 'free', label: '免费观看' },
+    { value: 'vip', label: '需会员' },
+    { value: 'single', label: '需单集购买' },
+  ],
+  dramaStatus: [
+    { value: 'draft', label: '草稿 / 待补全' },
+    { value: 'published', label: '已上架' },
+    { value: 'offline', label: '已下架' },
+  ],
+  orderStatus: [
+    { value: 'created', label: '待支付' },
+    { value: 'pending', label: '支付确认中' },
+    { value: 'paid', label: '已支付' },
+    { value: 'fulfilled', label: '已完成' },
+    { value: 'closed', label: '已关闭' },
+    { value: 'failed', label: '支付失败' },
+    { value: 'refunded', label: '已退款' },
+    { value: 'refunding', label: '退款中' },
+    { value: 'refund_pending', label: '退款待审' },
+  ],
+}
 const readBody = (req) => new Promise((resolve) => {
   let raw = ''
   req.on('data', (chunk) => { raw += chunk; if (raw.length > 2e6) req.destroy() })
@@ -38,14 +97,14 @@ const readBody = (req) => new Promise((resolve) => {
 const WEAK_ADMIN_PASSWORDS = new Set(['admin123', 'admin', '12345678', 'password', '123456789', 'qwerty123', 'admin1234'])
 const WEAK_ADMIN_PATTERN = /(password|qwerty|asdfgh|123456|654321|888888|abc123|iloveyou|letmein|welcome)/i
 
-/** 后台口令策略：>=12 位，含字母与数字，不得包含用户名，不得是常见弱口令。 */
+/** 后台口令策略：>=8 位，含字母与数字，不得包含用户名，不得是常见弱口令。 */
 export function checkAdminPassword(password, username) {
   const value = String(password ?? '')
-  if (value.length < 12) return { ok: false, message: '后台密码至少 12 位' }
+  if (value.length < 8) return { ok: false, message: '后台密码至少 8 位' }
   if (!/[A-Za-z]/.test(value) || !/\d/.test(value)) return { ok: false, message: '后台密码需同时包含字母和数字' }
   if (username && value.toLowerCase().includes(String(username).toLowerCase())) return { ok: false, message: '密码不能包含用户名' }
   if (WEAK_ADMIN_PASSWORDS.has(value.toLowerCase()) || WEAK_ADMIN_PATTERN.test(value)) return { ok: false, message: '该密码过于常见，请更换' }
-  if (/^(.)\1+$/.test(value) || /(.)\1{5,}/.test(value) || new Set(value).size < 5) return { ok: false, message: '密码重复字符过多，请更换' }
+  if (/^(.)\1+$/.test(value) || /(.)\1{5,}/.test(value) || new Set(value).size < 4) return { ok: false, message: '密码重复字符过多，请更换' }
   return { ok: true }
 }
 
@@ -64,8 +123,11 @@ const PERM = {
   coupons: 'commerce.coupon.write',
   orders: 'finance.order.read',
   orderConfirm: 'finance.order.confirm',
+  tags: 'tag.read',
   tagRead: 'tag.read',
   tagWrite: 'tag.write',
+  events: 'ops.events.read',
+  adminAccounts: 'system.admin',
   analytics: 'analytics.read',
   refundCreate: 'finance.refund.create',
   refundApprove: 'finance.refund.approve',
@@ -175,21 +237,25 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     return send(res, { ok: true, message: '密码已更新，其他设备需重新登录', token: fresh.token, expiresAt: fresh.expiresAt })
   }
 
-  if (pathname === '/admin/api/stats') {    if (!guard(PERM.stats)) return deny(PERM.stats)
+  if (pathname === '/admin/api/stats') {
+    if (!guard(PERM.stats)) return deny(PERM.stats)
+    // 概览只讲"平台资产与内容健康度"：剧集/集数/可播/用户/待审/转码队列/邮件通道。
+    // 收款、订阅、退款等经营口径统一放 /admin/api/analytics，避免运营看概览时被营收噪音分散。
     return send(res, {
       dramas: one('SELECT COUNT(*) AS n FROM dramas').n,
+      publishedDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'published'").n,
+      draftDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status <> 'published'").n,
       episodes: one('SELECT COUNT(*) AS n FROM episodes').n,
-      readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE status = 'ready'").n,
+      readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE status = 'ready' AND hls_path IS NOT NULL").n,
+      tags: one("SELECT COUNT(*) AS n FROM tags WHERE status = 'active'").n,
       users: one('SELECT COUNT(*) AS n FROM users').n,
+      activeUsers7d: one("SELECT COUNT(DISTINCT user_id) AS n FROM play_events WHERE created_at >= datetime('now','-7 days')").n,
       pendingDanmu: one("SELECT COUNT(*) AS n FROM danmus WHERE status = 'pending'").n,
       pendingComments: one("SELECT COUNT(*) AS n FROM comments WHERE status = 'pending'").n,
       queue: queueState(),
-      commerce: commerceStats(),
       mailReady: !mailUnavailable(),
-      pay: (() => {
-        const pay = getSetting('pay', {})
-        return { alipay: Boolean(pay.alipay?.enabled), usdt: Boolean(pay.usdt?.enabled), mock: Boolean(pay.mock?.enabled) }
-      })(),
+      categories: all(`SELECT category, COUNT(*) AS n FROM dramas GROUP BY category ORDER BY n DESC`)
+        .map((row) => ({ ...row, label: ADMIN_OPTIONS.categories.find((item) => item.value === row.category)?.label ?? row.category })),
     })
   }
 
@@ -204,8 +270,11 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
       list: rows.map((drama) => ({
         ...drama,
         episodeCount: one('SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ?', drama.id).n,
+        readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ? AND status = 'ready' AND hls_path IS NOT NULL", drama.id).n,
         policy: policyOf(drama.id) ?? null,
+        completeness: dramaCompleteness(drama),
       })),
+      options: ADMIN_OPTIONS,
     })
   }
 
@@ -222,16 +291,31 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
 
   if (seg[0] === 'dramas' && seg.length === 1 && method === 'POST') {
     if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
+    const title = String(body.title ?? '').trim()
+    if (!title) return send(res, {}, '0400', '请先填写剧集标题', 400)
+    const wanted = body.status === 'published' ? 'published' : 'draft'
     const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, score, status, sort)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    body.title ?? '未命名', body.subTitle ?? '', body.coverUrl ?? '', body.description ?? '',
-    Number(body.year ?? 2026), body.area ?? '', body.category ?? 'TV', Number(body.score ?? 8), body.status ?? 'draft', Number(body.sort ?? 0))
+    title, body.subTitle ?? '', body.coverUrl ?? '', body.description ?? '',
+    Number(body.year ?? 0) || 0, body.area ?? '', body.category ?? '', Number(body.score ?? 0) || 0, 'draft', Number(body.sort ?? 0))
     const dramaId = Number(info.lastInsertRowid)
     run(`INSERT INTO content_policies (drama_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
       VALUES (?, ?, ?, ?, ?, ?, ?)`, dramaId, body.accessMode ?? 'subscription', Number(body.freeEpisodes ?? 1),
     Number(body.trialSeconds ?? 0), Number(body.singlePrice ?? 0), body.purchaseKind ?? 'single', Number(body.rentalHours ?? 72))
-    log('content.drama.create', 'drama', dramaId, null, body)
-    return send(res, one('SELECT * FROM dramas WHERE id = ?', dramaId))
+    if (Array.isArray(body.tagIds) && body.tagIds.length) setDramaTags(dramaId, body.tagIds)
+    const created = one('SELECT * FROM dramas WHERE id = ?', dramaId)
+    const check = dramaCompleteness(created)
+    let statusNote = ''
+    if (wanted === 'published') {
+      if (check.complete) {
+        run("UPDATE dramas SET status = 'published' WHERE id = ?", dramaId)
+        statusNote = '已上架'
+      } else {
+        statusNote = `信息未补全（${labelMissing(check.missing)}），已保存为草稿`
+      }
+    }
+    log('content.drama.create', 'drama', dramaId, null, { title, wanted, missing: check.missing })
+    return send(res, { drama: one('SELECT * FROM dramas WHERE id = ?', dramaId), completeness: check, statusNote })
   }
 
   if (seg[0] === 'dramas' && seg[1] && seg.length === 2 && method === 'PUT') {
@@ -263,10 +347,18 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   if (seg[0] === 'dramas' && seg[1] && seg[2] === 'publish' && method === 'POST') {
     if (!guard(PERM.dramaPublish)) return deny(PERM.dramaPublish)
     const dramaId = Number(seg[1])
-    const before = one('SELECT status FROM dramas WHERE id = ?', dramaId)
+    const before = one('SELECT * FROM dramas WHERE id = ?', dramaId)
+    if (!before) return send(res, {}, '0404', '剧集不存在', 404)
     const status = body.status === 'published' ? 'published' : 'draft'
+    if (status === 'published') {
+      const check = dramaCompleteness(before)
+      if (!check.complete) {
+        return send(res, { missing: check.missing, fields: check.fields }, '0400',
+          `以下信息未补全，无法上架：${labelMissing(check.missing)}`, 400)
+      }
+    }
     run('UPDATE dramas SET status = ? WHERE id = ?', status, dramaId)
-    log('content.drama.publish', 'drama', dramaId, before, { status }, body.reason)
+    log('content.drama.publish', 'drama', dramaId, { status: before.status }, { status }, body.reason)
     return send(res, { status })
   }
 
@@ -288,6 +380,113 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   if (seg[0] === 'dramas' && seg[1] && seg[2] === 'policy' && method === 'GET') {
     if (!guard(PERM.dramas)) return deny(PERM.dramas)
     return send(res, policyOf(Number(seg[1])) ?? {})
+  }
+
+  /* ---------- 按集定价规则（VIP 免费 + 最后两集单独收费） ---------- */
+  if (seg[0] === 'dramas' && seg[1] && seg[2] === 'pricing-rules' && method === 'GET') {
+    if (!guard(PERM.dramas)) return deny(PERM.dramas)
+    const dramaId = Number(seg[1])
+    const policy = policyOf(dramaId) ?? {}
+    const episodes = all('SELECT no, title FROM episodes WHERE drama_id = ? ORDER BY no', dramaId)
+    return send(res, {
+      rules: rulesOfDrama(dramaId),
+      episodeCount: episodes.length,
+      lastNo: episodes.length ? Number(episodes[episodes.length - 1].no) : 0,
+      defaults: {
+        accessMode: policy.access_mode ?? 'subscription',
+        freeEpisodes: Number(policy.free_episodes ?? 0),
+        trialSeconds: Number(policy.trial_seconds ?? 0),
+        singlePrice: Number(policy.single_price_cny ?? 0),
+      },
+    })
+  }
+
+  if (seg[0] === 'dramas' && seg[1] && seg[2] === 'pricing-rules' && method === 'PUT') {
+    if (!guard(PERM.policy)) return deny(PERM.policy)
+    const dramaId = Number(seg[1])
+    if (!one('SELECT id FROM dramas WHERE id = ?', dramaId)) return send(res, {}, '0404', '剧集不存在', 404)
+    const before = rulesOfDrama(dramaId)
+    let rules
+    try {
+      rules = setEpisodeRules(dramaId, body?.rules ?? [])
+    } catch (error) {
+      return send(res, {}, '0400', error.message ?? '规则校验失败', 400)
+    }
+    log('content.pricing.rules', 'drama', dramaId, before, rules)
+    return send(res, { rules })
+  }
+
+  /* ---------- 自动搜刮 ---------- */
+  if (seg[0] === 'scrape' && method === 'GET') {
+    if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
+    try {
+      return send(res, await scrapeTitle(url.searchParams.get('title') ?? ''))
+    } catch (error) {
+      return send(res, {}, '0400', error.message ?? '搜刮失败', error.status ?? 400)
+    }
+  }
+
+  /* ---------- 下拉选项 ---------- */
+  if (seg[0] === 'options' && method === 'GET') {
+    return send(res, ADMIN_OPTIONS)
+  }
+
+  /* ---------- 埋点数据 ---------- */
+  if (seg[0] === 'events' && method === 'GET') {
+    if (!guard(PERM.events)) return deny(PERM.events)
+    const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days') ?? 7)))
+    const type = url.searchParams.get('type')
+    const page = Math.max(1, Number(url.searchParams.get('page') ?? 1))
+    const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get('pageSize') ?? 20)))
+    const since = `-${days} days`
+    const where = ["te.created_at >= datetime('now', ?)"]
+    const args = [since]
+    if (type) { where.push('te.type = ?'); args.push(type) }
+    const clause = where.join(' AND ')
+    const total = one(`SELECT COUNT(*) AS n FROM track_events te WHERE ${clause}`, ...args).n
+    const list = all(`SELECT te.*, d.title AS dramaTitle, u.email AS userEmail
+      FROM track_events te
+      LEFT JOIN dramas d ON d.id = te.drama_id
+      LEFT JOIN users u ON u.id = te.user_id
+      WHERE ${clause} ORDER BY te.id DESC LIMIT ? OFFSET ?`, ...args, pageSize, (page - 1) * pageSize)
+    return send(res, {
+      total, page, pageSize,
+      byType: all(`SELECT te.type, COUNT(*) AS n FROM track_events te WHERE ${clause} GROUP BY te.type ORDER BY n DESC`, ...args),
+      byDay: all(`SELECT date(te.created_at) AS day, te.type, COUNT(*) AS n FROM track_events te
+        WHERE ${clause} GROUP BY day, te.type ORDER BY day DESC`, ...args),
+      list: list.map((row) => ({ ...row, meta: row.meta_json ? safeJson(row.meta_json) : null })),
+    })
+  }
+
+  /* ---------- 榜单刷新 ---------- */
+  if (seg[0] === 'ranks' && seg[1] === 'refresh' && method === 'POST') {
+    if (!guard(PERM.ranks)) return deny(PERM.ranks)
+    const all_ = refreshAutoRanks({ limit: Number(body?.limit ?? 20) })
+    log('ops.rank.refresh', 'rank', null, null, all_)
+    return send(res, { results: all_, strategies: RANK_STRATEGIES })
+  }
+
+  if (seg[0] === 'ranks' && seg[1] && seg[2] === 'refresh' && method === 'POST') {
+    if (!guard(PERM.ranks)) return deny(PERM.ranks)
+    try {
+      const result = refreshRank(Number(seg[1]), { limit: Number(body?.limit ?? 20) })
+      log('ops.rank.refresh', 'rank', Number(seg[1]), null, result)
+      return send(res, result)
+    } catch (error) {
+      return send(res, {}, '0400', error.message ?? '刷新失败', error.status ?? 400)
+    }
+  }
+
+  if (seg[0] === 'ranks' && seg[1] && seg[2] === 'lock' && method === 'POST') {
+    if (!guard(PERM.ranks)) return deny(PERM.ranks)
+    const listId = Number(seg[1])
+    const dramaId = Number(body?.dramaId)
+    const locked = body?.locked === false ? 0 : 1
+    const row = one('SELECT * FROM rank_items WHERE list_id = ? AND drama_id = ?', listId, dramaId)
+    if (!row) return send(res, {}, '0404', '该榜单里没有这部剧', 404)
+    run('UPDATE rank_items SET locked = ? WHERE id = ?', locked, row.id)
+    log('ops.rank.lock', 'rank', listId, { locked: row.locked }, { locked, dramaId })
+    return send(res, { locked: Boolean(locked) })
   }
 
   if (seg[0] === 'dramas' && seg[1] && seg[2] === 'policy' && method === 'PUT') {
@@ -349,10 +548,11 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   }
   if (seg[0] === 'plans' && method === 'POST') {
     if (!guard(PERM.plans)) return deny(PERM.plans)
+    // 编码由服务端生成（雪花风格纯数字，12 位以上），不接受人工输入，避免重复与英文码。
     const info = run('INSERT INTO plans (code, name, price_cny, duration_days, scope, description, sort, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      body.code ?? `plan-${Date.now()}`, body.name ?? '新套餐', Number(body.price ?? 0), Number(body.days ?? 30),
+      genCode(''), body.name ?? '新套餐', Number(body.price ?? 0), Number(body.days ?? 30),
       body.scope ?? 'all', body.description ?? '', Number(body.sort ?? 0), body.status ?? 'active')
-    log('commerce.plan.create', 'plan', Number(info.lastInsertRowid), null, body)
+    log('commerce.plan.create', 'plan', Number(info.lastInsertRowid), null, { ...body, code: 'auto' })
     return send(res, one('SELECT * FROM plans WHERE id = ?', Number(info.lastInsertRowid)))
   }
   if (seg[0] === 'plans' && seg[1] && method === 'PUT') {
@@ -374,12 +574,14 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   }
   if (seg[0] === 'coupons' && method === 'POST') {
     if (!guard(PERM.coupons)) return deny(PERM.coupons)
+    const explicit = String(body.code ?? '').trim().toUpperCase()
+    const code = explicit || genCode('')
     const info = run(`INSERT INTO coupons (code, name, discount_type, discount_value, min_amount, total, valid_from, valid_to, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    String(body.code ?? '').toUpperCase(), body.name ?? '优惠券', body.discountType ?? 'amount',
+    code, body.name ?? '优惠券', body.discountType ?? 'amount',
     Number(body.discountValue ?? 0), Number(body.minAmount ?? 0), Number(body.total ?? 0),
     body.validFrom ?? null, body.validTo ?? null, body.status ?? 'active')
-    log('commerce.coupon.create', 'coupon', Number(info.lastInsertRowid), null, body)
+    log('commerce.coupon.create', 'coupon', Number(info.lastInsertRowid), null, { ...body, code })
     return send(res, one('SELECT * FROM coupons WHERE id = ?', Number(info.lastInsertRowid)))
   }
   if (seg[0] === 'coupons' && seg[1] && method === 'PUT') {
@@ -555,7 +757,7 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
         (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS order_count,
         (SELECT COALESCE(SUM(amount_cny),0) FROM orders o WHERE o.user_id = u.id AND o.status IN ('paid','fulfilled')) AS paid_total,
         (SELECT datetime(valid_to) FROM subscriptions s WHERE s.user_id = u.id AND s.status = 'active' ORDER BY datetime(valid_to) DESC LIMIT 1) AS vip_until
-        FROM users u ORDER BY u.id DESC LIMIT 200`),
+        FROM users u ORDER BY u.id DESC LIMIT 200`).map((row) => ({ ...row, kind: 'user', kindLabel: 'C 端用户' })),
     })
   }
   if (seg[0] === 'users' && seg[1] && seg[2] === 'status' && method === 'POST') {
@@ -624,7 +826,15 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   }
   if (pathname === '/admin/api/admins' && method === 'GET') {
     if (!guard(PERM.roles)) return deny(PERM.roles)
-    return send(res, { list: listAdmins() })
+    return send(res, {
+      list: listAdmins().map((admin) => ({
+        ...admin,
+        kind: 'admin',
+        kindLabel: 'B 端账号',
+        lastAuditAt: one('SELECT created_at FROM audit_logs WHERE actor_id = ? ORDER BY id DESC LIMIT 1', admin.id)?.created_at ?? null,
+      })),
+      users: one('SELECT COUNT(*) AS n FROM users').n,
+    })
   }
   if (seg[0] === 'admins' && seg[1] && seg[2] === 'roles' && method === 'PUT') {
     if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
@@ -789,11 +999,19 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     }
   }
 
-  /* ---------------- 经营数据（播放/用户/订单/订阅多维） ---------------- */
+  /* ---------------- 经营数据（播放 / 用户 / 订单 / 订阅 / 收款） ---------------- */
   if (pathname === '/admin/api/analytics' && method === 'GET') {
     if (!guard(PERM.analytics)) return deny(PERM.analytics)
     const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days') ?? 7)))
-    return send(res, analyticsReport({ days }))
+    // 收款/订阅/退款这些经营口径归到这里，概览页不再显示支付数据。
+    return send(res, {
+      ...analyticsReport({ days }),
+      commerce: commerceStats(),
+      pay: (() => {
+        const pay = getSetting('pay', {})
+        return { alipay: Boolean(pay.alipay?.enabled), usdt: Boolean(pay.usdt?.enabled), mock: Boolean(pay.mock?.enabled) }
+      })(),
+    })
   }
 
   /* ---------------- 风控 / 安全事件 ---------------- */
@@ -806,13 +1024,34 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   /* ---------------- 标签管理 ---------------- */
   if (pathname === '/admin/api/tags' && method === 'GET') {
     if (!guard(PERM.tagRead)) return deny(PERM.tagRead)
-    return send(res, { list: listTags({ withCount: true }) })
+    const page = url.searchParams.get('page')
+    const includeDisabled = url.searchParams.get('includeDisabled') === '1'
+    const keyword = url.searchParams.get('keyword') ?? ''
+    const level = url.searchParams.get('level') ?? 'all'
+    const paged = page ? listTags({ withCount: true, includeDisabled, page: Number(page), pageSize: Number(url.searchParams.get('pageSize') ?? 20), keyword, level }) : null
+    const list = paged ? paged.list : listTags({ withCount: true, includeDisabled, keyword, level })
+    return send(res, {
+      list,
+      total: paged ? paged.total : list.length,
+      page: paged ? paged.page : 1,
+      pageSize: paged ? paged.pageSize : list.length,
+      tree: tagTree({ includeDisabled: true, withCount: true }),
+    })
   }
 
   if (pathname === '/admin/api/tags' && method === 'POST') {
     if (!guard(PERM.tagWrite)) return deny(PERM.tagWrite)
     const tag = body?.id ? updateTag(body.id, body) : createTag(body ?? {})
-    log('admin.tag.save', 'tag', tag.id, null, { name: tag.name })
+    log('admin.tag.save', 'tag', tag.id, null, { name: tag.name, parentId: tag.parent_id ?? null })
+    return send(res, { tag })
+  }
+
+  if (/^\/admin\/api\/tags\/\d+\/status$/.test(pathname) && method === 'POST') {
+    if (!guard(PERM.tagWrite)) return deny(PERM.tagWrite)
+    const id = Number(pathname.split('/')[4])
+    const enabled = body?.enabled !== false && body?.status !== 'disabled'
+    const tag = setTagStatus(id, enabled)
+    log('admin.tag.status', 'tag', id, null, { enabled })
     return send(res, { tag })
   }
 

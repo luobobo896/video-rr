@@ -21,6 +21,7 @@ export function recordPlay({ userId, dramaId, episodeId, episodeNo, source = 'pl
 /** 行为埋点白名单：只收已知类型，避免被当成任意写入的口子 */
 export const TRACK_TYPES = new Set([
   'impression', 'detail_view', 'paywall_view', 'paywall_click', 'play_end', 'search', 'share',
+  'category_filter', 'rank_view', 'login_open',
 ])
 
 /**

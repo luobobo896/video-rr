@@ -8,7 +8,7 @@ import {
 } from './auth.mjs'
 import { OtpError, normalizeEmail, sendCode, verifyCode } from './otp.mjs'
 import {
-  LINK_TTL, decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, secureLink,
+  LINK_TTL, decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, rulesOfDrama, secureLink,
   signPayTicket, verifyPayTicket,
 } from './entitlements.mjs'
 import { recordEvent, recordPlay } from './analytics.mjs'
@@ -66,7 +66,18 @@ function cardOf(drama, userId, context = {}) {
     freeEpisodes: policy.free_episodes,
     trialSeconds: policy.trial_seconds,
     singlePrice: policy.single_price_cny,
+    playCount: Number(drama.play_count ?? 0),
   }
+}
+
+/** 批量补播放量（列表排序与"最多播放"筛选要用，避免 N+1）。 */
+function withPlayCounts(rows) {
+  if (!rows.length) return rows
+  const ids = rows.map((row) => row.id)
+  const marks = ids.map(() => '?').join(',')
+  const counts = new Map(all(`SELECT drama_id, COUNT(*) AS n FROM play_events WHERE drama_id IN (${marks}) GROUP BY drama_id`, ...ids)
+    .map((row) => [row.drama_id, Number(row.n)]))
+  return rows.map((row) => ({ ...row, play_count: counts.get(row.id) ?? 0 }))
 }
 
 /** 资料完整度（个人中心引导用）。 */
@@ -174,8 +185,8 @@ export async function handlePublic(pathname, url, req, res) {
       const sections = all('SELECT * FROM sections WHERE enabled = 1 ORDER BY sort').map((section) => ({
         id: section.id,
         title: section.title,
-        items: all(`SELECT d.* FROM section_items si JOIN dramas d ON d.id = si.drama_id
-          WHERE si.section_id = ? AND d.status = 'published' ORDER BY si.sort LIMIT 30`, section.id)
+        items: withPlayCounts(all(`SELECT d.* FROM section_items si JOIN dramas d ON d.id = si.drama_id
+          WHERE si.section_id = ? AND d.status = 'published' ORDER BY si.sort LIMIT 30`, section.id))
           .map((drama) => cardOf(drama, userId, context)),
       }))
       const hot = all("SELECT title FROM dramas ORDER BY score DESC LIMIT 8").map((row) => row.title)
@@ -183,13 +194,34 @@ export async function handlePublic(pathname, url, req, res) {
     }
 
     if (pathname === '/api/category') {
-      const type = url.searchParams.get('type') ?? 'TV'
+      // 服务端筛选：type / year / area / sort（new|score|play）+ 分页；total 为筛选后的真实总数
+      const type = (url.searchParams.get('type') ?? 'TV').trim()
       const page = Math.max(1, Number(url.searchParams.get('page') ?? 1))
-      const pageSize = Math.min(60, Number(url.searchParams.get('pageSize') ?? 24))
-      const rows = all("SELECT * FROM dramas WHERE status = 'published' AND category = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-        type, pageSize, (page - 1) * pageSize)
-      const total = one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'published' AND category = ?", type).n
-      return send(res, { page, pageSize, total, list: rows.map((drama) => cardOf(drama, userId, context)) })
+      const pageSize = Math.min(60, Math.max(1, Number(url.searchParams.get('pageSize') ?? 24)))
+      const where = ["d.status = 'published'"]
+      const params = []
+      // 前端默认路由是 #/category/ALL（大写），这里统一按不区分大小写处理，避免筛成 category='ALL' 返回 0 条
+      if (type && type.toLowerCase() !== 'all') { where.push('d.category = ?'); params.push(type.toUpperCase()) }
+      const year = Number(url.searchParams.get('year') ?? 0)
+      if (year > 1900) { where.push('d.year = ?'); params.push(year) }
+      const area = (url.searchParams.get('area') ?? '').trim()
+      if (area) { where.push('d.area = ?'); params.push(area) }
+      const sort = url.searchParams.get('sort') ?? 'new'
+      const orderBy = sort === 'score' ? 'd.score DESC, d.id DESC'
+        : sort === 'play' ? 'play_count DESC, d.id DESC' : 'd.id DESC'
+      const clause = where.join(' AND ')
+      const rows = all(`SELECT d.*, (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id) AS play_count
+        FROM dramas d WHERE ${clause} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
+      ...params, pageSize, (page - 1) * pageSize)
+      const total = one(`SELECT COUNT(*) AS n FROM dramas d WHERE ${clause}`, ...params).n
+      // 筛选项（年份倒序、地区按数量）供前端渲染筛选条；不受当前筛选影响，始终是全集
+      const facets = {
+        years: all("SELECT year, COUNT(*) AS n FROM dramas WHERE status = 'published' AND year > 1900 GROUP BY year ORDER BY year DESC")
+          .map((row) => ({ value: Number(row.year), label: `${row.year} 年`, count: Number(row.n) })),
+        areas: all("SELECT area, COUNT(*) AS n FROM dramas WHERE status = 'published' AND TRIM(COALESCE(area,'')) <> '' GROUP BY area ORDER BY n DESC")
+          .map((row) => ({ value: row.area, label: row.area, count: Number(row.n) })),
+      }
+      return send(res, { page, pageSize, total, list: rows.map((drama) => cardOf(drama, userId, context)), facets })
     }
 
     if (pathname === '/api/rank') {
@@ -197,8 +229,8 @@ export async function handlePublic(pathname, url, req, res) {
       const lists = all('SELECT name, type FROM rank_lists ORDER BY sort').map((row) => ({ name: row.name, type: row.type }))
       const list = one('SELECT * FROM rank_lists WHERE type = ? ORDER BY sort LIMIT 1', type)
       if (!list) return send(res, { type, listName: '', lists, items: [] })
-      const items = all(`SELECT d.*, ri.rank_no FROM rank_items ri JOIN dramas d ON d.id = ri.drama_id
-        WHERE ri.list_id = ? ORDER BY ri.rank_no`, list.id)
+      const items = withPlayCounts(all(`SELECT d.*, ri.rank_no FROM rank_items ri JOIN dramas d ON d.id = ri.drama_id
+        WHERE ri.list_id = ? ORDER BY ri.rank_no`, list.id))
         .map((drama) => ({ ...cardOf(drama, userId, context), rankNo: drama.rank_no }))
       return send(res, { type, listName: list.name, lists, items })
     }
@@ -207,12 +239,12 @@ export async function handlePublic(pathname, url, req, res) {
     if (pathname === '/api/feed') {
       const sectionId = Number(url.searchParams.get('section') ?? 0)
       if (sectionId) {
-        const items = all(`SELECT d.* FROM section_items si JOIN dramas d ON d.id = si.drama_id
-          WHERE si.section_id = ? AND d.status = 'published' ORDER BY RANDOM() LIMIT 12`, sectionId)
+        const items = withPlayCounts(all(`SELECT d.* FROM section_items si JOIN dramas d ON d.id = si.drama_id
+          WHERE si.section_id = ? AND d.status = 'published' ORDER BY RANDOM() LIMIT 12`, sectionId))
           .map((drama) => cardOf(drama, userId, context))
         if (items.length > 1) return send(res, { sectionId, items })
       }
-      const items = all("SELECT * FROM dramas WHERE status = 'published' ORDER BY RANDOM() LIMIT 12")
+      const items = withPlayCounts(all("SELECT * FROM dramas WHERE status = 'published' ORDER BY RANDOM() LIMIT 12"))
         .map((drama) => cardOf(drama, userId, context))
       return send(res, { sectionId, items })
     }
@@ -262,9 +294,20 @@ export async function handlePublic(pathname, url, req, res) {
         episodes: decided.map((episode) => ({
           id: episode.id, no: episode.no, title: episode.title, duration: episode.duration,
           status: episode.status, allow: episode.allow, source: episode.source,
+          reason: episode.reason ?? null,
+          rule: episode.rule ? { mode: episode.rule.mode, price: Number(episode.rule.price_cny ?? 0) } : null,
           trialSeconds: episode.trialSeconds, price: episode.price,
         })),
-        priceInfo: priceInfo(drama),
+        priceInfo: {
+          ...priceInfo(drama),
+          rules: rulesOfDrama(drama.id).map((rule) => ({
+            fromNo: Number(rule.from_no),
+            toNo: rule.to_no === null || rule.to_no === undefined ? null : Number(rule.to_no),
+            mode: rule.mode,
+            price: Number(rule.price_cny ?? 0),
+            note: rule.note ?? '',
+          })),
+        },
         tags: tagsOfDrama(drama.id).map((tag) => ({ id: tag.id, name: tag.name })),
         hasSubscription: Boolean(context.subscription),
         favorited: Boolean(favorite),

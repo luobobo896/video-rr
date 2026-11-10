@@ -21,11 +21,22 @@ const topbar = $('#topbar')
 
 const NAV_MAIN = [
   ['精选', '#/home'],
+  // 「全部」指向分类页的 ALL：服务端 type=all 时不加 d.category 条件，
+  // 返回全站已上架内容 + 真实 total + facets，是筛选条唯一能覆盖全集入口
+  ['全部', '#/category/ALL'],
   ['电影', '#/category/MOVIE'],
   ['电视剧', '#/category/TV'],
   ['短剧', '#/category/PLAYLET'],
   ['综艺', '#/category/VARIETY'],
 ]
+
+// 内容类型的中文名（服务端 dramaType 是 MOVIE/TV/PLAYLET/VARIETY 这类枚举，
+// 详情页 meta 行直接渲染会露出英文，C 端读起来像内部字段）
+const DRAMA_CATEGORY_LABEL = {
+  MOVIE: '电影', TV: '电视剧', PLAYLET: '短剧', VARIETY: '综艺',
+  COMIC: '动漫', DOCUMENTARY: '纪录片',
+}
+const categoryLabel = (value) => DRAMA_CATEGORY_LABEL[value] ?? value ?? ''
 const NAV_RANK = [
   ['热播榜', '#/rank?type=HOT'],
   ['飙升榜', '#/rank?type=RISE'],
@@ -468,6 +479,14 @@ const fmtDuration = (seconds) => {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
+/** 播放量等计数：1234 / 1.2万 / 3.4亿（列表里要短，不做千分位） */
+function fmtCount(value) {
+  const n = Number(value) || 0
+  if (n >= 100000000) return `${(n / 100000000).toFixed(1)}亿`
+  if (n >= 10000) return `${(n / 10000).toFixed(1)}万`
+  return String(n)
+}
+
 function toast(text) {
   const node = $('#toast')
   node.textContent = text
@@ -477,8 +496,16 @@ function toast(text) {
 }
 
 function posterCard(item, options = {}) {
-  const badge = badgeOf(item)
+  // badge 默认保留（榜单/分类/收藏沿用价格与会员标识）；
+  // 首页楼层传 { badge: false, score: true } —— 首页是"逛"的场景，
+  // 首屏挂满 ¥6/"会员" 会把内容页变成价目表，价格留给详情页与付费墙。
+  const badge = options.badge === false ? '' : badgeOf(item)
   const rank = options.rank ? `<span class="rank-no">${options.rank}</span>` : ''
+  const score = options.score && Number(item.score) > 0 ? `<span class="card-score">★ ${Number(item.score).toFixed(1)}</span>` : ''
+  // playCount 由 cardOf 提供；只在明确要求的地方显示（分类列表），避免每张卡都塞满数字
+  const plays = options.plays && Number(item.playCount) > 0 ? `<span class="card-plays">▶ ${fmtCount(item.playCount)}</span>` : ''
+  // 三块都为空时整行不渲染：留空 div 会让卡片的 title→图 间距塌掉，多行卡片高度不齐
+  const sub = `${score}${plays}${escapeHtml(item.subTitle || (item.labels ?? []).slice(0, 2).join(' · '))}`
   return `
     <div class="card">
       <a class="poster" href="#/drama/${escapeHtml(item.dramaId)}" title="${escapeHtml(item.title)}">
@@ -487,8 +514,29 @@ function posterCard(item, options = {}) {
         <span class="play-hint">▶</span>
       </a>
       <div class="card-title">${escapeHtml(item.title)}</div>
-      <div class="card-sub">${escapeHtml(item.subTitle || (item.labels ?? []).slice(0, 2).join(' · '))}</div>
+      ${sub ? `<div class="card-sub">${sub}</div>` : ''}
     </div>`
+}
+
+/**
+ * 侧栏/频道高亮判定。
+ * 旧写法用 `hash.startsWith(href.split('?')[0])` 且榜单组用 `hash.includes('rank')`，
+ * 结果只要进了 #/rank，四个榜单项（HOT/RISE/CLASSIC/SEARCH 共用 #/rank 路径）全部点亮，
+ * 用户无法判断当前在看哪个榜。这里改成「路径精确相等 + query 里 type 精确相等」，
+ * 缺省 type 视为 HOT（与服务端 /api/rank 默认值一致）。
+ */
+function navIsActive(href, hash) {
+  const normalizePath = (value) => {
+    const path = String(value ?? '').split('?')[0]
+    return !path || path === '#' || path === '#/' ? '#/home' : path
+  }
+  const [hrefPath, hrefQuery] = String(href ?? '').split('?')
+  if (!hrefPath) return false
+  if (normalizePath(hrefPath) !== normalizePath(hash)) return false
+  const wanted = new URLSearchParams(hrefQuery ?? '').get('type')
+  if (!wanted) return true
+  const current = new URLSearchParams(String(hash ?? '').split('?')[1] ?? '').get('type')
+  return (current ?? 'HOT') === wanted
 }
 
 function renderChrome() {
@@ -498,14 +546,12 @@ function renderChrome() {
   if (topbarNode && renderChrome.authKey === authKey) {
     // 只更新高亮与按钮文案：整块重建 topbar 会清掉用户正在输入的搜索词
     const loginBtn = $('#login-btn')
-    if (loginBtn) loginBtn.textContent = state.user ? (state.user.nickname ?? '我的账号') : '登录'
+    if (loginBtn) {
+      loginBtn.textContent = state.user ? (state.user.nickname ?? '我的账号') : '登录'
+      loginBtn.title = state.user ? '进入个人中心' : '登录 / 注册'
+    }
     sidebar.querySelectorAll('.nav-item').forEach((node) => {
-      const target = (node.getAttribute('href') ?? '').split('?')[0]
-      node.classList.toggle('active', Boolean(target) && hash.startsWith(target))
-    })
-    sidebar.querySelectorAll('.nav-group').forEach((group) => {
-      if (group.querySelector('.nav-title')?.textContent !== '榜单') return
-      group.querySelectorAll('.nav-item').forEach((node) => node.classList.toggle('active', hash.includes('rank')))
+      node.classList.toggle('active', navIsActive(node.getAttribute('href'), hash))
     })
     return
   }
@@ -513,15 +559,15 @@ function renderChrome() {
   sidebar.innerHTML = `
     <div class="nav-group">
       <div class="nav-title">频道</div>
-      ${NAV_MAIN.map(([label, href]) => `<a class="nav-item ${hash.startsWith(href.split('?')[0]) ? 'active' : ''}" href="${href}">${label}</a>`).join('')}
+      ${NAV_MAIN.map(([label, href]) => `<a class="nav-item ${navIsActive(href, hash) ? 'active' : ''}" href="${href}">${label}</a>`).join('')}
     </div>
     <div class="nav-group">
       <div class="nav-title">榜单</div>
-      ${NAV_RANK.map(([label, href]) => `<a class="nav-item ${hash.includes('rank') ? 'active' : ''}" href="${href}">${label}</a>`).join('')}
+      ${NAV_RANK.map(([label, href]) => `<a class="nav-item ${navIsActive(href, hash) ? 'active' : ''}" href="${href}">${label}</a>`).join('')}
     </div>
     <div class="nav-group">
       <div class="nav-title">我的</div>
-      <a class="nav-item" href="#/me">历史 / 收藏</a>
+      <a class="nav-item ${navIsActive('#/me', hash) ? 'active' : ''}" href="#/me">历史 / 收藏</a>
     </div>`
 
   topbar.innerHTML = `
@@ -535,14 +581,23 @@ function renderChrome() {
       <a class="top-action" href="#/me"><span class="ico">⭐</span>收藏</a>
       <a class="top-action" href="#/me"><span class="ico">✉️</span>消息</a>
       <a class="top-action" href="#/me"><span class="ico">💎</span>会员</a>
-      <button class="btn-login" id="login-btn">${state.user ? escapeHtml(state.user.nickname ?? '我的账号') : '登录'}</button>
+      <button class="btn-login" id="login-btn" title="${state.user ? '进入个人中心' : '登录 / 注册'}" aria-label="${state.user ? `进入个人中心（当前账号 ${escapeHtml(state.user.nickname ?? '我的账号')}）` : '登录或注册'}">${state.user ? escapeHtml(state.user.nickname ?? '我的账号') : '登录'}</button>
     </div>`
   $('#search-form').addEventListener('submit', (event) => {
     event.preventDefault()
     const keyword = $('#search-input').value.trim()
     location.hash = `#/search?q=${encodeURIComponent(keyword)}`
   })
-  $('#login-btn').addEventListener('click', () => { state.token ? logout() : openLogin() })
+  // 用户名/头像 = 进个人中心（旧行为是点一下就退出登录，误触即掉会话）。
+  // 退出登录已挪到「我的」页内，只有明确进入个人中心才能执行。
+  $('#login-btn').addEventListener('click', () => {
+    if (!state.token) {
+      openLogin()
+      return
+    }
+    if (location.hash === '#/me') route()
+    else location.hash = '#/me'
+  })
 }
 
 function openModal(title, body) {
@@ -618,7 +673,7 @@ async function renderHome() {
           <button class="section-refresh" data-refresh="${section.id}">换一换 ⟳</button>
         </div>
         <div class="grid" data-grid="${section.id}">
-          ${(section.items ?? []).map((item) => posterCard(item)).join('')}
+          ${(section.items ?? []).map((item) => posterCard(item, { badge: false, score: true })).join('')}
         </div>
       </section>`).join('')}
     <div class="footer"><span>© 2026 影巢</span><span>客服邮箱：${escapeHtml(state.constants.supportEmail ?? '')}</span></div>`
@@ -647,7 +702,7 @@ async function renderHome() {
       try {
         const shuffled = await api(`/api/feed?section=${encodeURIComponent(id)}`)
         if (!shuffled.items?.length) return toast('该分区内容不足，无法换一批')
-        grid.innerHTML = shuffled.items.map((item) => posterCard(item)).join('')
+        grid.innerHTML = shuffled.items.map((item) => posterCard(item, { badge: false, score: true })).join('')
         toast('已换一批')
       } catch (error) { toast(error.message) }
     })
@@ -655,47 +710,153 @@ async function renderHome() {
   vipFloat()
 }
 
+// 分类页排序：服务端 sort=new|score|play
+const CATEGORY_SORTS = [['new', '最新'], ['score', '评分'], ['play', '最多播放']]
+
 async function renderCategory(type) {
   const pageSize = 24
-  let page = 1
-  const first = await api(`/api/category?type=${encodeURIComponent(type)}&page=1&pageSize=${pageSize}`)
-  const label = { MOVIE: '电影', TV: '电视剧', PLAYLET: '短剧', VARIETY: '综艺' }[type] ?? type
+  // type=ALL 是「全站」入口，映射漏了会让标题直接显示 "ALL · 影巢"
+  const label = type === 'ALL' ? '全部' : categoryLabel(type)
   document.title = `${label} · 影巢`
-  const list = first.list ?? []
-  const total = Number(first.total ?? list.length)
+  // 服务端筛选：/api/category 支持 year/area/sort，total 是「筛选后的真实总数」，
+  // facets 是与当前筛选无关的全集，所以筛选项一次拿到即可，不需要再靠已加载条目聚合。
+  const query = { year: '', area: '', sort: 'new' }
+  let page = 1
+  let total = 0
+  let baselineTotal = 0   // 首次（无 year/area）请求的 total = 本分类全量，用于"筛选命中 N / 共 M"
+  let exhausted = false
+  let facets = { years: [], areas: [] }
+  let items = []
+
+  const fetchPage = (nextPage) => {
+    const params = new URLSearchParams({ type, page: String(nextPage), pageSize: String(pageSize), sort: query.sort })
+    if (query.year) params.set('year', query.year)
+    if (query.area) params.set('area', query.area)
+    return api(`/api/category?${params.toString()}`)
+  }
+
+  const first = await fetchPage(1)
+  total = Number(first.total ?? 0)
+  baselineTotal = total
+  items = first.list ?? []
+  facets = first.facets ?? facets
+  exhausted = items.length < pageSize
+
   view.innerHTML = `
     <div class="section-head" style="margin-top:26px">
       <div class="section-title">${escapeHtml(label)}</div>
-      <div class="section-hint">共 ${total} 部 · 按更新时间</div>
+      <div class="section-hint" id="cat-hint"></div>
     </div>
-    ${list.length === 0
-      ? '<div class="empty">该分类暂无内容</div>'
-      : `<div class="grid" id="cat-grid">${list.map((item) => posterCard(item)).join('')}</div>
-         ${total > list.length ? '<div style="text-align:center;margin:24px 0"><button class="btn-ghost" id="cat-more">加载更多</button></div>' : ''}`}`
-  const more = $('#cat-more')
-  if (more) {
+    <div class="cat-filters" id="cat-filters"></div>
+    <div class="grid" id="cat-grid"></div>
+    <div id="cat-more-wrap" style="text-align:center;margin:24px 0"></div>`
+
+  // year/area 才是"筛选"（会减少结果）；sort 只改顺序，文案上要分开说，否则用户以为排序把片筛掉了
+  const hasFilter = () => Boolean(query.year || query.area)
+  const sortText = () => (CATEGORY_SORTS.find(([value]) => value === query.sort) ?? CATEGORY_SORTS[0])[1]
+
+  // facets 由服务端给（{value,label,count}，与当前筛选无关的全集），前端不再自行聚合
+  const facetRow = (title, key, list) => {
+    if (!list.length) return ''
+    const pill = (value, text, count) => {
+      const active = String(value) === String(query[key] ?? '')
+      const tail = count === undefined ? '' : `<em>${fmtCount(count)}</em>`
+      return `<button class="pill ${active ? 'active' : ''}" data-facet="${key}" data-value="${escapeHtml(String(value))}" aria-pressed="${active}">${escapeHtml(text)}${tail}</button>`
+    }
+    return `<div class="filter-row"><span class="filter-label">${title}</span>
+      <div class="subtabs">${pill('', '全部')}${list.map((facet) => pill(facet.value, facet.label ?? facet.value, facet.count)).join('')}</div></div>`
+  }
+
+  const paintFilters = () => {
+    const bar = $('#cat-filters')
+    if (!bar) return
+    const sortHtml = CATEGORY_SORTS.map(([value, text]) => {
+      const active = query.sort === value
+      return `<button class="pill ${active ? 'active' : ''}" data-facet="sort" data-value="${value}" aria-pressed="${active}">${text}</button>`
+    }).join('')
+    bar.innerHTML = `${facetRow('年份', 'year', facets.years ?? [])}${facetRow('地区', 'area', facets.areas ?? [])}
+      <div class="filter-row"><span class="filter-label">排序</span><div class="subtabs">${sortHtml}</div></div>`
+  }
+
+  const paintGrid = () => {
+    const hint = $('#cat-hint')
+    if (hint) {
+      // total 是服务端返回的「筛选后真实总数」，baselineTotal 是本分类全量（首次无筛选请求）
+      hint.textContent = hasFilter()
+        ? `筛选命中 ${total} 部 / 本分类 ${baselineTotal} 部 · 按${sortText()}`
+        : `共 ${total} 部 · 按${query.sort === 'new' ? '更新时间' : sortText() + '排序'}`
+    }
+    const grid = $('#cat-grid')
+    if (!grid) return
+    grid.innerHTML = items.length
+      ? items.map((item) => posterCard(item, { plays: true })).join('')
+      : `<div class="empty" style="grid-column:1 / -1">${hasFilter() ? `当前筛选没有内容 · 本分类共 ${baselineTotal} 部` : '该分类暂无内容'}</div>`
+    const wrap = $('#cat-more-wrap')
+    if (!wrap) return
+    wrap.innerHTML = items.length < total && !exhausted ? '<button class="btn-ghost" id="cat-more">加载更多</button>' : ''
+    const more = $('#cat-more')
+    if (!more) return
     more.addEventListener('click', async () => {
       more.disabled = true
       more.textContent = '加载中…'
       try {
         page += 1
-        const next = await api(`/api/category?type=${encodeURIComponent(type)}&page=${page}&pageSize=${pageSize}`)
-        const grid = $('#cat-grid')
-        grid.insertAdjacentHTML('beforeend', (next.list ?? []).map((item) => posterCard(item)).join(''))
-        const shown = grid.querySelectorAll('.card').length
-        if (shown >= total || (next.list ?? []).length === 0) { more.parentNode.remove() } else { more.disabled = false; more.textContent = '加载更多' }
+        const next = await fetchPage(page)
+        const list = next.list ?? []
+        if (list.length < pageSize) exhausted = true
+        total = Number(next.total ?? total)
+        items = items.concat(list)
+        paintGrid()
       } catch (error) {
+        page -= 1
         more.disabled = false
         more.textContent = '加载更多'
         toast(error.message)
       }
     })
   }
+
+  $('#cat-filters').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-facet]')
+    if (!button || button.disabled) return
+    const key = button.dataset.facet
+    const value = button.dataset.value ?? ''
+    const previous = { ...query }
+    const before = { year: query.year, area: query.area, sort: query.sort }
+    query[key] = key === 'sort' ? (value || 'new') : value
+    if (before.year === query.year && before.area === query.area && before.sort === query.sort) return
+    paintFilters()
+    const hint = $('#cat-hint')
+    if (hint) hint.textContent = '筛选中…'
+    // 筛选变化 = 从第 1 页重新取，不复用旧累积：服务端 total 已是筛选后的真实总数，
+    // 分页语义必须重新从 page=1 开始，否则"加载更多"会跳过区间。
+    try {
+      const data = await fetchPage(1)
+      page = 1
+      total = Number(data.total ?? 0)
+      items = data.list ?? []
+      facets = data.facets ?? facets
+      exhausted = items.length < pageSize
+    } catch (error) {
+      Object.assign(query, previous)
+      paintFilters()
+      paintGrid()
+      toast(error.message)
+      return
+    }
+    paintGrid()
+    // 埋点：value 传命中数（筛选后的 total），meta 带完整筛选维度，便于后台做筛选漏斗
+    track('category_filter', { dramaId: null, value: total, meta: { year: query.year, area: query.area, sort: query.sort, type } })
+  })
+  paintFilters()
+  paintGrid()
   vipFloat()
 }
 
 async function renderRank(params) {
   const activeType = params.get('type') ?? 'HOT'
+  // 榜单浏览埋点：哪个榜被看了（四榜共用 #/rank，只能靠 type 区分）
+  track('rank_view', { meta: { type: activeType } })
   const data = await api(`/api/rank?type=${encodeURIComponent(activeType)}`)
   document.title = `${data.listName ?? '榜单'} · 影巢`
   const lists = data.lists ?? []
@@ -791,7 +952,7 @@ async function renderDrama(id) {
           <span>⭐ ${detail.score ?? '—'}</span>
           <span>${escapeHtml(String(detail.year ?? ''))}</span>
           <span>${escapeHtml(detail.area ?? '')}</span>
-          <span>${escapeHtml(detail.dramaType ?? '')}</span>
+          <span>${escapeHtml(categoryLabel(detail.dramaType))}</span>
           <span>全 ${detail.episodes.length} 集</span>
           <span>${detail.freeEpisodes > 0 ? `首 ${detail.freeEpisodes} 集免费` : (canSingle ? '单片付费' : '会员专享')}</span>
         </div>
@@ -806,12 +967,20 @@ async function renderDrama(id) {
         </div>
       </div>
     </div>
-    <div class="section-head"><div class="section-title">选集</div><div class="section-hint">${detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费，其余需${canSingle ? '购买' : '会员'}` : '需开通权益后观看'}</div></div>
+    <div class="section-head"><div class="section-title">选集</div><div class="section-hint">${(detail.priceInfo?.rules ?? []).length > 0 ? '部分集数单独定价，点开可见具体规则' : detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费，其余需${canSingle ? '购买' : '会员'}` : '需开通权益后观看'}</div></div>
     <div class="episodes">
       ${episodes.map((episode) => {
         // 可试看的集必须带 ?trial=1，服务端只认这个参数（否则直接 402）
         const trial = !episode.allow && episode.trialSeconds > 0 ? '?trial=1' : ''
-        return `<a class="ep ${episode.allow ? '' : 'locked'}" data-no="${episode.no}" href="#/play/${detail.dramaId}/${episode.no}${trial}">
+        // 未放行的集要说清「为什么不能看」：会员可看 / 单集多少钱 / 需开通。
+        // 服务端已经给出 reason 与 rule（按集定价），前端不猜价格。
+        const rulePrice = Number(episode.rule?.price ?? 0)
+        const flatPrice = Number(episode.price ?? 0)
+        const hint = episode.allow ? ''
+          : episode.reason === 'vip_required' ? '需会员'
+            : rulePrice > 0 ? `¥${rulePrice.toFixed(2)}`
+              : flatPrice > 0 ? `¥${flatPrice.toFixed(2)}` : '需开通'
+        return `<a class="ep ${episode.allow ? '' : 'locked'}" data-no="${episode.no}" title="${escapeHtml(`第 ${episode.no} 集${hint ? ` · ${hint}` : ''}`)}" href="#/play/${detail.dramaId}/${episode.no}${trial}">
         ${episode.no}${episode.allow ? '' : ' 🔒'}${episode.trialSeconds > 0 ? ' · 试看' : ''}
       </a>`
       }).join('')}
@@ -926,7 +1095,7 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
         <span style="margin-left:auto">${sourceLabel}${data.hls ? ' · HLS' : ' · 未上传片源'}</span>
       </div>
       <div class="player" id="player">
-        <video id="video" playsinline controls style="width:100%;height:100%;background:#000"></video>
+        <video id="video" playsinline controls style="width:100%;height:100%;object-fit:contain;background:#000"></video>
         <div class="danmu-layer" id="danmu-layer" aria-hidden="true"></div>
         <div class="notice" id="player-notice">${data.hls ? expiredNotice : '该集片源正在处理中'}</div>
         <div class="player-tools">
@@ -1235,6 +1404,7 @@ async function renderMe() {
         <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
           <button class="btn-primary" id="edit-profile">编辑资料</button>
           <button class="btn-ghost" id="change-password">修改密码</button>
+          <button class="btn-ghost" id="me-logout" title="退出后需重新验证邮箱登录">退出登录</button>
           ${(data.completion?.missing ?? []).length ? `<span class="me-sub">待完善：${escapeHtml(data.completion.missing.join('、'))}</span>` : ''}
         </div>
       </div>
@@ -1298,6 +1468,8 @@ async function renderMe() {
     })
   })
   $('#change-password').addEventListener('click', () => openChangePassword(data.user))
+  // 退出登录只在这里出现：顶栏点用户名是「进个人中心」，避免误触掉会话
+  $('#me-logout').addEventListener('click', () => logout())
   $('#change-email').addEventListener('click', () => openChangeEmail(data.user))
   $('#avatar-file').addEventListener('change', async (event) => {
     const file = event.target.files?.[0]

@@ -9,13 +9,14 @@
 import { createServer } from 'node:http'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { extname, join, normalize, resolve, sep } from 'node:path'
-import { db, seedIfEmpty, ROOT, ensureSettings, ensurePaySafety, ensureUserSchema, ensureAdminSchema, ensureAdminCredentials, ensureLinkSecret, migratePayChannels, syncMenuCatalog } from './db.mjs'
+import { db, seedIfEmpty, ROOT, ensureSettings, ensurePaySafety, ensureUserSchema, ensureAdminSchema, ensureAdminCredentials, ensureLinkSecret, ensureOpsSchema, migrateCodesToNumeric, migratePayChannels, syncMenuCatalog } from './db.mjs'
 import { cleanupCodes } from './otp.mjs'
 import { handlePublic } from './api-public.mjs'
 import { handleAdmin } from './api-admin.mjs'
 import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
 import { verifyLink } from './entitlements.mjs'
 import { closeExpiredOrders, reconcile } from './commerce.mjs'
+import { refreshAutoRanks } from './rank.mjs'
 import { inspect, sweep } from './ratelimit.mjs'
 import { connectRedis, redisStatus } from './redis.mjs'
 
@@ -35,6 +36,8 @@ ensureUserSchema()
 ensureAdminSchema()
 ensureSettings()
 ensureAdminCredentials()   // 老库弱口令轮换（与 seed 解耦）
+ensureOpsSchema()          // 标签层级 / 按集定价 / 榜单自动分 / 搜刮缓存（幂等补列补表）
+const codeMigration = migrateCodesToNumeric()  // 套餐/优惠券英文编码迁成雪花数字码
 ensureLinkSecret()         // 播放签名密钥自检
 ensurePaySafety()          // 模拟支付渠道默认关闭 + USDT 确认数口径统一
 syncMenuCatalog()
@@ -335,7 +338,13 @@ const server = createServer(async (req, res) => {
       return await handlePublic(pathname, url, req, res)
     }
 
-    if (pathname === '/admin' || pathname.startsWith('/admin/')) {
+    if (pathname === '/admin') {
+      // 少了尾斜杠会让页面里的 ./app.js 解析到站点根（/app.js 是 C 端脚本），必须重定向
+      res.writeHead(301, { location: `${BASE_PATH}/admin/` })
+      res.end()
+      return
+    }
+    if (pathname.startsWith('/admin/')) {
       return serveStatic(ADMIN, pathname.replace(/^\/admin\/?/, '') || 'index.html', res)
     }
 
@@ -391,6 +400,20 @@ setInterval(async () => {
   }
 }, 6 * 3600_000).unref()
 
+// 榜单按用户行为自动更新：启动 60 秒后跑一次，之后每 6 小时一次（locked=1 的人工条目原位保留）
+const runRankRefresh = () => {
+  try {
+    const results = refreshAutoRanks({ limit: 20 })
+    const failed = results.filter((row) => row.error)
+    if (failed.length) console.warn('[rank-refresh] 部分榜单失败', failed)
+    else console.log(`[rank-refresh] ${results.length} 个自动榜单已更新`)
+  } catch (error) {
+    console.error('[rank-refresh]', error.message)
+  }
+}
+setTimeout(runRankRefresh, 60_000).unref()
+setInterval(runRankRefresh, 6 * 3600_000).unref()
+
 connectRedis().catch(() => {})
 // 复位上次进程中断的转码任务
 {
@@ -408,6 +431,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`  C 端      http://127.0.0.1:${PORT}/`)
   console.log(`  后台      http://127.0.0.1:${PORT}/admin   （账号见部署生成的管理员凭据文件）`)
   console.log(`  数据库    ${seed.seeded ? '已按种子初始化' : '沿用现有'}：${stats.dramas} 部剧 / ${stats.episodes} 集 / ${stats.plans} 个套餐`)
+  if (codeMigration > 0) console.log(`  套餐/优惠券编码已迁移为数字码：${codeMigration} 条`)
   const rd = redisStatus()
   console.log(`  限流存储  ${rd.connected ? `Redis ${rd.url}` : '进程内内存（未连接 Redis）'}`)
   const debugFlags = ['MH_ALLOW_UNSIGNED', 'MH_OTP_TEST', 'MH_ALLOW_SIM_PAY', 'MH_ADMIN_INIT_PASSWORD', 'MH_SKIP_ADMIN_ROTATION']

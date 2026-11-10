@@ -5,25 +5,56 @@ const $ = (selector, root = document) => root.querySelector(selector)
 const view = $('#view')
 const nav = $('#nav')
 
-const NAV = [
-  ['dashboard', '概览', 'dashboard.read'],
-  ['analytics', '经营数据', 'analytics.read'],
-  ['dramas', '剧集管理', 'content.drama.read'],
-  ['tags', '标签管理', 'tag.read'],
-  ['policies', '付费策略', 'content.drama.read'],
-  ['plans', '套餐定价', 'commerce.plan.write'],
-  ['coupons', '优惠券', 'commerce.coupon.write'],
-  ['orders', '订单', 'finance.order.read'],
-  ['refunds', '退款审核', 'finance.refund.create'],
-  ['ops', '首页运营', 'ops.banner.write'],
-  ['ranks', '榜单', 'ops.rank.write'],
-  ['review', '内容审核', 'content.review'],
-  ['users', '用户', 'user.read'],
-  ['roles', '角色权限', 'admin.read'],
-  ['audit', '审计日志', 'audit.read'],
-  ['pay', '支付渠道', 'payment.channel.read'],
-  ['email', '邮件设置', 'email.read'],
+/* 菜单分组：后台按「看 / 内容 / 交易 / 用户 / 系统」分区，默认折叠非当前区，避免 18 项平铺。 */
+const NAV_GROUPS = [
+  {
+    id: 'overview', title: '数据概览',
+    items: [
+      ['dashboard', '概览', 'dashboard.read'],
+      ['analytics', '经营数据', 'analytics.read'],
+      ['events', '埋点数据', 'ops.events.read'],
+    ],
+  },
+  {
+    id: 'content', title: '内容运营',
+    items: [
+      ['dramas', '剧集管理', 'content.drama.read'],
+      ['policies', '付费策略', 'content.drama.read'],
+      ['tags', '标签管理', 'tag.read'],
+      ['ops', '首页运营', 'ops.banner.write'],
+      ['ranks', '榜单', 'ops.rank.write'],
+      ['review', '内容审核', 'content.review'],
+    ],
+  },
+  {
+    id: 'commerce', title: '交易与财务',
+    items: [
+      ['plans', '套餐定价', 'commerce.plan.write'],
+      ['coupons', '优惠券', 'commerce.coupon.write'],
+      ['orders', '订单', 'finance.order.read'],
+      ['refunds', '退款审核', 'finance.refund.create'],
+    ],
+  },
+  {
+    id: 'users', title: '用户',
+    items: [
+      ['users', 'C 端用户', 'user.read'],
+    ],
+  },
+  {
+    id: 'system', title: '系统设置',
+    items: [
+      ['roles', '角色权限', 'admin.read'],
+      ['admins', '管理员账号', 'system.admin'],
+      ['audit', '审计日志', 'audit.read'],
+      ['pay', '支付渠道', 'payment.channel.read'],
+      ['email', '邮件设置', 'email.read'],
+    ],
+  },
 ]
+
+/** 扁平索引：路由与标题查表用，保持与原 NAV 数组同构 [key, label, perm]。 */
+const NAV = NAV_GROUPS.flatMap((group) => group.items)
 
 const state = { token: localStorage.getItem('mh-admin-token') ?? '', page: 'dashboard', params: {}, timers: [] }
 
@@ -57,6 +88,22 @@ async function api(path, options = {}) {
 function clearTimers() {
   for (const timer of state.timers) clearInterval(timer)
   state.timers = []
+}
+
+/** 轻量弹层：后台没有引入组件库，用一层 mask 包住表单/向导。 */
+function openOverlay(title, bodyHtml, onMount) {
+  const mask = document.createElement('div')
+  mask.className = 'modal-mask'
+  mask.innerHTML = `<div class="modal-box">
+    <header><h3>${esc(title)}</h3><button class="btn sm" data-close>关闭</button></header>
+    <div class="modal-body">${bodyHtml}</div>
+  </div>`
+  document.body.appendChild(mask)
+  const close = () => mask.remove()
+  mask.querySelector('[data-close]').addEventListener('click', close)
+  mask.addEventListener('click', (event) => { if (event.target === mask) close() })
+  onMount?.(mask.querySelector('.modal-body'), close)
+  return close
 }
 
 /* ---------------- 登录 / 改密 ---------------- */
@@ -138,10 +185,45 @@ function logout() {
 }
 
 /* ---------------- 路由 ---------------- */
+const NAV_OPEN_KEY = 'mh-admin-nav-open'
+
+const readOpenGroups = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(NAV_OPEN_KEY) ?? 'null')
+    if (Array.isArray(saved)) return new Set(saved)
+  } catch { /* 存储损坏就当没存过 */ }
+  return new Set(['overview', 'content'])
+}
+
 function renderNav() {
   const perms = new Set(state.me?.permissions ?? [])
-  nav.innerHTML = NAV.filter(([, , perm]) => perms.has(perm))
-    .map(([key, label]) => `<a class="nav-item ${state.page === key ? 'active' : ''}" href="#/${key}">${label}</a>`).join('')
+  const open = readOpenGroups()
+  const activeGroup = NAV_GROUPS.find((group) => group.items.some(([key]) => key === state.page))
+  if (activeGroup) open.add(activeGroup.id)
+  nav.innerHTML = NAV_GROUPS
+    .map((group) => {
+      const items = group.items.filter(([, , perm]) => perms.has(perm))
+      if (!items.length) return ''
+      const expanded = open.has(group.id)
+      return `<div class="nav-group ${expanded ? 'open' : 'collapsed'}" data-group="${group.id}">
+        <button class="nav-group-head" data-toggle="${group.id}" aria-expanded="${expanded}">
+          <span>${esc(group.title)}</span><span class="chev">${expanded ? '▾' : '▸'}</span>
+        </button>
+        <div class="nav-group-body">
+          ${items.map(([key, label]) => `<a class="nav-item ${state.page === key ? 'active' : ''}" href="#/${key}">${esc(label)}</a>`).join('')}
+        </div>
+      </div>`
+    }).join('')
+  nav.querySelectorAll('[data-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = button.dataset.toggle
+      const next = readOpenGroups()
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      localStorage.setItem(NAV_OPEN_KEY, JSON.stringify([...next]))
+      renderNav()
+    })
+  })
   const who = $('#whoami')
   if (who) who.textContent = state.me ? `${state.me.admin.displayName ?? state.me.admin.username} · ${(state.me.roles ?? []).map((role) => role.name).join(' / ')}` : ''
 }
@@ -183,6 +265,8 @@ async function route() {
     else if (key === 'email') await pageEmail()
     else if (key === 'analytics') await pageAnalytics()
     else if (key === 'tags') await pageTags()
+    else if (key === 'events') await pageEvents()
+    else if (key === 'admins') await pageAdmins()
   } catch (error) {
     // 单页渲染失败不影响其它页面：给出错误、页面名与重试入口
     console.error('[admin]', key, error)
@@ -201,19 +285,31 @@ async function route() {
 async function pageDashboard() {
   const stats = await api('/admin/api/stats')
   const queue = stats.queue ?? { pending: 0, running: false, pendingItems: [] }
-  const commerce = stats.commerce ?? {}
-  $('#top-right').innerHTML = `<span class="muted">更新于 ${new Date().toLocaleTimeString('zh-CN')}</span>`
+  const cats = stats.categories ?? []
+  $('#top-right').innerHTML = `<span class="muted">更新于 ${new Date().toLocaleTimeString('zh-CN')}</span>
+    <a class="btn sm" href="#/analytics">看经营数据 →</a>`
+  // 概览只讲平台资产与内容健康度；收款/订阅/退款一律在「经营数据」里看。
   view.innerHTML = `
     <div class="cards">
-      ${card('剧集', fmt(stats.dramas), '部')}
-      ${card('分集', fmt(stats.episodes), `集（就绪 ${fmt(stats.readyEpisodes)}）`)}
-      ${card('转码队列', fmt(queue.pending), queue.running ? `进行中：EP ${queue.current?.episodeId ?? '-'}` : '空闲')}
-      ${card('待审弹幕', fmt(stats.pendingDanmu), '条')}
-      ${card('待审评论', fmt(stats.pendingComments), '条')}
-      ${card('用户', fmt(stats.users), '人')}
-      ${card('订单收入', `¥${fmt(commerce.revenue ?? 0)}`, `${fmt(commerce.orders ?? 0)} 笔订单`)}
+      ${card('已上架剧集', fmt(stats.publishedDramas ?? 0), `部（草稿 ${fmt(stats.draftDramas ?? 0)}）`)}
+      ${card('分集', fmt(stats.episodes ?? 0), `集（可播 ${fmt(stats.readyEpisodes ?? 0)}）`)}
+      ${card('标签', fmt(stats.tags ?? 0), '个启用')}
+      ${card('C 端用户', fmt(stats.users ?? 0), `人（7 日活跃 ${fmt(stats.activeUsers7d ?? 0)}）`)}
+      ${card('转码队列', fmt(queue.pending ?? 0), queue.running ? `进行中：EP ${queue.current?.episodeId ?? '-'}` : '空闲')}
+      ${card('待审弹幕', fmt(stats.pendingDanmu ?? 0), '条')}
+      ${card('待审评论', fmt(stats.pendingComments ?? 0), '条')}
     </div>
     <div class="split">
+      <div class="panel">
+        <h3>内容结构</h3>
+        ${cats.length ? `<table><thead><tr><th>类型</th><th>数量</th></tr></thead><tbody>
+          ${cats.map((row) => `<tr><td>${esc(row.label)}</td><td>${fmt(row.n)} 部</td></tr>`).join('')}
+        </tbody></table>` : '<div class="muted">还没有剧集：去「内容运营 → 剧集管理 → 新建剧集」，填标题后会自动搜刮元数据。</div>'}
+        <p class="muted" style="margin-top:10px">
+          发信通道：${stats.mailReady ? '<span class="pill ok">已配置</span>' : '<span class="pill warn">未配置（C 端无法自助收验证码）</span>'}
+          <a href="#/email">去配置 →</a>
+        </p>
+      </div>
       <div class="panel">
         <h3>转码队列</h3>
         ${queue.pending === 0 && !queue.running ? '<div class="muted">队列空闲：去「剧集管理 → 分集」上传视频或生成示例视频</div>' : `
@@ -222,29 +318,17 @@ async function pageDashboard() {
             ${(queue.pendingItems ?? []).map((item) => `<tr><td>EP ${item.episodeId}</td><td><span class="pill">排队</span></td><td class="muted">第 ${item.no} 集</td></tr>`).join('')}
           </tbody></table>`}
       </div>
-      <div class="panel">
-        <h3>收款与订阅</h3>
-        <table>
-          <tbody>
-            <tr><td>累计收入</td><td>¥${fmt(commerce.revenue ?? 0)}</td></tr>
-            <tr><td>已支付订单</td><td>${fmt(commerce.paidOrders ?? 0)} 笔</td></tr>
-            <tr><td>待支付订单</td><td>${fmt(commerce.pendingOrders ?? 0)} 笔</td></tr>
-            <tr><td>待审退款</td><td>${fmt(commerce.pendingRefunds ?? 0)} 笔 ${(commerce.pendingRefunds ?? 0) > 0 ? '<a href="#/refunds">去处理 →</a>' : ''}</td></tr>
-            <tr><td>活跃订阅</td><td>${fmt(commerce.activeSubscriptions ?? 0)} 个</td></tr>
-            <tr><td>已购单片</td><td>${fmt(commerce.purchases ?? 0)} 个</td></tr>
-          </tbody>
-        </table>
-        <p class="muted" style="margin-top:10px">
-          发信通道状态：${stats.mailReady ? '<span class="pill ok">已配置真实通道</span>' : '<span class="pill warn">未配置通道（验证码无法发送）</span>'}
-          <a href="#/email">去配置 →</a>
-        </p>
-      </div>
     </div>`
 }
 
 const card = (key, value, unit) => `<div class="card"><div class="k">${esc(key)}</div><div class="v">${value} <small>${esc(unit)}</small></div></div>`
 
 /* ---------------- 剧集 ---------------- */
+const CATEGORY_LABEL = { MOVIE: '电影', TV: '电视剧', PLAYLET: '短剧/漫剧', VARIETY: '综艺' }
+const ACCESS_LABEL = { free: '免费', subscription: '会员免费', paid: '单独收费' }
+const MISSING_LABEL = { title: '标题', category: '类型', coverUrl: '封面', year: '年份', area: '地区', score: '评分', accessMode: '付费模式' }
+const STATUS_LABEL = { published: '已上架', draft: '草稿', offline: '已下架' }
+
 async function pageDramas() {
   const idMatch = /^#\/dramas\/(\d+)(?:\/episodes)?$/.exec(location.hash)
   if (idMatch) {
@@ -253,37 +337,72 @@ async function pageDramas() {
   }
 
   const data = await api('/admin/api/dramas')
+  const options = data.options ?? { categories: [] }
+  const rows = data.list ?? []
+  const cat = state.params.cat ?? 'all'
+  const keyword = (state.params.q ?? '').trim()
+  const filtered = rows.filter((row) => (cat === 'all' || row.category === cat)
+    && (!keyword || String(row.title ?? '').includes(keyword)))
+  const counts = rows.reduce((acc, row) => { acc[row.category] = (acc[row.category] ?? 0) + 1; return acc }, {})
+
   view.innerHTML = `
     <div class="panel">
-      <h3>剧集库 <span class="muted">共 ${data.list.length} 部</span><span class="spacer"></span>
-        <button class="btn primary" id="new-drama">新建剧集</button>
+      <h3>剧集库 <span class="muted">共 ${rows.length} 部 · 已上架 ${rows.filter((row) => row.status === 'published').length}</span>
+        <span class="spacer"></span>
+        <input id="drama-q" class="input" placeholder="搜标题" value="${esc(keyword)}" style="width:180px" />
+        <button class="btn primary" id="new-drama">＋ 新建剧集</button>
       </h3>
+      <div class="subtabs" id="drama-cats">
+        <button class="pill ${cat === 'all' ? 'active' : ''}" data-cat="all">全部 ${rows.length}</button>
+        ${(options.categories ?? []).map((item) => `<button class="pill ${cat === item.value ? 'active' : ''}" data-cat="${item.value}">${esc(item.label)} ${counts[item.value] ?? 0}</button>`).join('')}
+      </div>
       <table>
-        <thead><tr><th>封面</th><th>标题</th><th>类型</th><th>收费</th><th>分集</th><th>状态</th><th>操作</th></tr></thead>
+        <thead><tr><th>封面</th><th>标题</th><th>类型</th><th>收费</th><th>分集</th><th>资料</th><th>状态</th><th>操作</th></tr></thead>
         <tbody>
-          ${data.list.map((row) => `
-            <tr>
-              <td><img class="mini" src="${esc(mediaUrl(row.cover_url))}" alt="" onerror="this.style.visibility='hidden'" /></td>
-              <td>${esc(row.title)}<div class="muted">${esc(row.sub_title ?? '')}</div></td>
-              <td>${esc(row.category ?? '')}</td>
-              <td>${row.fee_mode === 'vip' ? '<span class="pill warn">VIP</span>' : '<span class="pill">免费</span>'}</td>
-              <td>${row.episodeCount}</td>
-              <td>${row.status === 'published' ? '<span class="pill ok">已上架</span>' : '<span class="pill">草稿</span>'}</td>
+          ${filtered.map((row) => {
+            const missing = (row.completeness?.missing ?? []).map((key) => MISSING_LABEL[key] ?? key)
+            return `<tr>
+              <td>${row.cover_url ? `<img class="mini" src="${esc(mediaUrl(row.cover_url))}" alt="" onerror="this.style.visibility='hidden'" />` : '<span class="pill warn">缺</span>'}</td>
+              <td><strong>${esc(row.title)}</strong>
+                <div class="muted">${esc(row.sub_title ?? '')} ${row.year ? `· ${row.year}` : ''} ${row.area ? `· ${esc(row.area)}` : ''}</div></td>
+              <td>${esc(CATEGORY_LABEL[row.category] ?? row.category ?? '—')}</td>
+              <td>${esc(ACCESS_LABEL[row.policy?.access_mode] ?? '—')}</td>
+              <td>${row.readyEpisodes ?? 0} / ${row.episodeCount ?? 0}</td>
+              <td>${missing.length ? `<span class="pill warn" title="${esc(missing.join('、'))}">缺 ${missing.length} 项</span>` : '<span class="pill ok">完整</span>'}</td>
+              <td>${row.status === 'published' ? '<span class="pill ok">已上架</span>' : `<span class="pill">${esc(STATUS_LABEL[row.status] ?? row.status)}</span>`}</td>
               <td class="row-actions">
                 <a class="btn sm" href="#/dramas/${row.id}">编辑</a>
-                <a class="btn sm" href="#/dramas/${row.id}/episodes">分集/视频</a>
+                <a class="btn sm" href="#/dramas/${row.id}/episodes">分集</a>
+                <button class="btn sm" data-toggle-publish="${row.id}" data-status="${row.status}">${row.status === 'published' ? '下架' : '上架'}</button>
                 <button class="btn sm danger" data-del="${row.id}">删除</button>
               </td>
-            </tr>`).join('')}
+            </tr>`
+          }).join('') || '<tr><td colspan="8" class="muted">没有匹配的剧集</td></tr>'}
         </tbody>
       </table>
     </div>`
 
-  $('#new-drama').addEventListener('click', async () => {
-    const title = prompt('剧集标题')
-    if (!title) return
-    const data = await api('/admin/api/dramas', { method: 'POST', body: { title, coverUrl: '', category: 'TV' } })
-    location.hash = `#/dramas/${data.id}`
+  view.querySelectorAll('[data-cat]').forEach((button) => button.addEventListener('click', () => {
+    state.params.cat = button.dataset.cat
+    pageDramas()
+  }))
+  $('#drama-q')?.addEventListener('change', (event) => {
+    state.params.q = event.target.value
+    pageDramas()
+  })
+  $('#new-drama').addEventListener('click', () => dramaWizard(options))
+  view.querySelectorAll('[data-toggle-publish]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = Number(button.dataset.togglePublish)
+      const next = button.dataset.status === 'published' ? 'draft' : 'published'
+      try {
+        await api(`/admin/api/dramas/${id}/publish`, { method: 'POST', body: { status: next } })
+        toast(next === 'published' ? '已上架' : '已下架')
+      } catch (error) {
+        toast(error.message)
+      }
+      await pageDramas()
+    })
   })
   view.querySelectorAll('[data-del]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -295,10 +414,145 @@ async function pageDramas() {
   })
 }
 
+/** 新建剧集向导：先搜刮再补，字段不全只能存草稿。 */
+function dramaWizard(options) {
+  const categories = options?.categories ?? []
+  const accessModes = options?.accessModes ?? []
+  const draft = { title: '', subTitle: '', category: '', coverUrl: '', year: '', area: '', score: '', description: '', accessMode: 'subscription', singlePrice: 0, freeEpisodes: 1, trialSeconds: 0 }
+
+  openOverlay('新建剧集', `
+    <div class="field">
+      <label>剧集名称（先填名字，再点搜刮）</label>
+      <div style="display:flex;gap:8px">
+        <input id="wz-title" placeholder="例如：辛特尔 / 钢铁之泪" autocomplete="off" />
+        <button class="btn primary" id="wz-scrape" style="white-space:nowrap">自动搜刮</button>
+      </div>
+      <div class="catalog-hint" id="wz-hint">搜刮会补封面、年份、地区、评分、简介与标签；结果有误可直接改。</div>
+    </div>
+    <div class="grid-2">
+      <div class="field"><label>内容类型 *</label>
+        <select id="wz-category"><option value="">请选择</option>
+          ${categories.map((item) => `<option value="${item.value}">${esc(item.label)}</option>`).join('')}
+        </select></div>
+      <div class="field"><label>付费模式 *</label>
+        <select id="wz-access">${accessModes.map((item) => `<option value="${item.value}">${esc(item.label)}</option>`).join('')}</select></div>
+      <div class="field"><label>年份</label><input id="wz-year" placeholder="2010" /></div>
+      <div class="field"><label>地区</label><input id="wz-area" placeholder="荷兰 / 中国大陆" /></div>
+      <div class="field"><label>评分（0–10）</label><input id="wz-score" placeholder="9.1" /></div>
+      <div class="field"><label>单片价格（元，单独收费时用）</label><input id="wz-price" placeholder="6" /></div>
+    </div>
+    <div class="field"><label>封面地址 *</label>
+      <div style="display:flex;gap:10px;align-items:flex-start">
+        <input id="wz-cover" placeholder="https://… 或 /media/images/cover-xxx.jpg" />
+        <img class="cover-prev" id="wz-prev" alt="" />
+      </div>
+    </div>
+    <div class="field"><label>简介</label><textarea id="wz-desc" rows="3"></textarea></div>
+    <div class="field"><label>标签（逗号分隔，可留空后续在标签管理里绑定）</label><input id="wz-tags" placeholder="动画,奇幻,无对白" /></div>
+    <div class="req-missing" id="wz-missing"></div>
+    <div class="modal-foot">
+      <button class="btn" id="wz-draft">存为草稿</button>
+      <button class="btn primary" id="wz-publish">保存并上架</button>
+    </div>
+  `, (body, close) => {
+    const read = () => {
+      draft.title = body.querySelector('#wz-title').value.trim()
+      draft.category = body.querySelector('#wz-category').value
+      draft.accessMode = body.querySelector('#wz-access').value
+      draft.year = body.querySelector('#wz-year').value
+      draft.area = body.querySelector('#wz-area').value.trim()
+      draft.score = body.querySelector('#wz-score').value
+      draft.coverUrl = body.querySelector('#wz-cover').value.trim()
+      draft.description = body.querySelector('#wz-desc').value.trim()
+      draft.singlePrice = Number(body.querySelector('#wz-price').value || 0)
+      draft.tags = body.querySelector('#wz-tags').value.split(/[,，\s]+/).filter(Boolean)
+      return draft
+    }
+    const missingOf = (value) => {
+      const missing = []
+      if (!value.title) missing.push('标题')
+      if (!value.category) missing.push('内容类型')
+      if (!value.coverUrl) missing.push('封面')
+      if (!(Number(value.year) > 1900)) missing.push('年份')
+      if (!value.area) missing.push('地区')
+      if (!(Number(value.score) > 0)) missing.push('评分')
+      return missing
+    }
+    const paint = () => {
+      const value = read()
+      const missing = missingOf(value)
+      body.querySelector('#wz-missing').textContent = missing.length
+        ? `还缺：${missing.join('、')}（缺项只能存草稿）`
+        : '字段已完整，可以直接上架'
+      const prev = body.querySelector('#wz-prev')
+      const url = mediaUrl(value.coverUrl)
+      prev.src = url || ''
+      prev.style.visibility = url ? 'visible' : 'hidden'
+    }
+    body.addEventListener('input', paint)
+    body.addEventListener('change', paint)
+
+    body.querySelector('#wz-scrape').addEventListener('click', async () => {
+      const title = body.querySelector('#wz-title').value.trim()
+      if (!title) return toast('请先填剧集名称')
+      const hint = body.querySelector('#wz-hint')
+      hint.textContent = '搜刮中…'
+      try {
+        const result = await api(`/admin/api/scrape?title=${encodeURIComponent(title)}`)
+        const payload = result.payload ?? {}
+        body.querySelector('#wz-title').value = payload.title ?? title
+        if (payload.subTitle) body.querySelector('#wz-desc').value ||= ''
+        body.querySelector('#wz-category').value = payload.category ?? ''
+        body.querySelector('#wz-year').value = payload.year ?? ''
+        body.querySelector('#wz-area').value = payload.area ?? ''
+        body.querySelector('#wz-score').value = payload.score ?? ''
+        body.querySelector('#wz-cover').value = payload.coverUrl ?? ''
+        if (payload.description) body.querySelector('#wz-desc').value = payload.description
+        if (payload.tags?.length) body.querySelector('#wz-tags').value = payload.tags.join(',')
+        const missing = (payload.completeness?.missing ?? []).map((key) => MISSING_LABEL[key] ?? key)
+        hint.textContent = result.found
+          ? `已从「${payload.source === 'catalog' ? '内置片库' : payload.source === 'remote' ? '外部元数据' : '本地缓存'}」补全${missing.length ? `，仍缺：${missing.join('、')}` : '，字段齐了'}${(result.suggestions ?? []).length ? `；站内已有：${result.suggestions.join('、')}` : ''}`
+          : `没有搜到「${title}」的公开元数据，请手动补齐（封面/年份/地区/评分）`
+        paint()
+      } catch (error) {
+        hint.textContent = `搜刮失败：${error.message}`
+      }
+    })
+
+    const submit = async (wantPublish) => {
+      const value = read()
+      if (!value.title) return toast('请先填剧集名称')
+      try {
+        const created = await api('/admin/api/dramas', {
+          method: 'POST',
+          body: {
+            title: value.title, subTitle: value.subTitle, category: value.category,
+            coverUrl: value.coverUrl, description: value.description,
+            year: Number(value.year) || 0, area: value.area, score: Number(value.score) || 0,
+            accessMode: value.accessMode, singlePrice: Number(value.singlePrice) || 0,
+            status: wantPublish ? 'published' : 'draft',
+          },
+        })
+        const dramaId = created.drama?.id
+        toast(created.statusNote || '已保存')
+        close()
+        if (dramaId) location.hash = `#/dramas/${dramaId}`
+        else await pageDramas()
+      } catch (error) {
+        toast(error.message)
+      }
+    }
+    body.querySelector('#wz-draft').addEventListener('click', () => submit(false))
+    body.querySelector('#wz-publish').addEventListener('click', () => submit(true))
+    body.querySelector('#wz-title').focus()
+  })
+}
+
 async function pageDramaEdit(id) {
   const data = await api(`/admin/api/dramas/${id}`)
   const drama = data.drama
   const allTags = await api('/admin/api/tags').then((result) => result.list).catch(() => [])
+  const policy = data.policy ?? {}
   const currentTags = new Set((drama.tags ?? []).map((tag) => Number(tag.id ?? tag.tag_id)))
   view.innerHTML = `
     <div class="panel">
@@ -307,12 +561,19 @@ async function pageDramaEdit(id) {
         ${field('title', '标题', drama.title)}
         ${field('subTitle', '副标题', drama.sub_title)}
         ${field('coverUrl', '封面地址', drama.cover_url)}
-        ${field('category', '类型（TV/MOVIE/PLAYLET…）', drama.category)}
+        <label>内容类型<select id="f-category">
+          ${Object.entries(CATEGORY_LABEL).map(([value, label]) => `<option value="${value}" ${drama.category === value ? 'selected' : ''}>${label}</option>`).join('')}
+        </select></label>
         ${field('year', '年份', drama.year, 'number')}
         ${field('area', '地区', drama.area)}
         ${field('score', '评分', drama.score, 'number')}
-        <label>收费<select id="f-feeMode"><option value="free" ${drama.fee_mode === 'free' ? 'selected' : ''}>免费</option><option value="vip" ${drama.fee_mode === 'vip' ? 'selected' : ''}>VIP</option></select></label>
-        <label>状态<select id="f-status"><option value="published" ${drama.status === 'published' ? 'selected' : ''}>已上架</option><option value="draft" ${drama.status === 'draft' ? 'selected' : ''}>草稿</option></select></label>
+        <label>付费模式<select id="f-accessMode">
+          ${Object.entries(ACCESS_LABEL).map(([value, label]) => `<option value="${value}" ${policy.access_mode === value ? 'selected' : ''}>${label}</option>`).join('')}
+        </select></label>
+        <label>状态<select id="f-status">
+          <option value="published" ${drama.status === 'published' ? 'selected' : ''}>已上架</option>
+          <option value="draft" ${drama.status !== 'published' ? 'selected' : ''}>草稿 / 待补全</option>
+        </select></label>
       </div>
       <label class="muted">标签<span class="spacer"></span></label>
     <div class="tag-picker" style="display:flex;flex-wrap:wrap;gap:10px;margin:8px 0 14px">
@@ -324,9 +585,10 @@ async function pageDramaEdit(id) {
     </div>
     <label class="muted">简介</label>
       <textarea id="f-description" rows="3" style="width:100%;margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel-2);color:var(--text)">${esc(drama.description ?? '')}</textarea>
-      <div style="margin-top:12px;display:flex;gap:8px">
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn primary" id="save-drama">保存</button>
         <button class="btn" id="save-tags">保存标签</button>
+        <button class="btn" id="edit-rules">按集定价规则</button>
         <a class="btn" href="#/dramas/${id}/episodes">管理分集与视频 →</a>
       </div>
     </div>`
@@ -339,16 +601,27 @@ async function pageDramaEdit(id) {
     } catch (error) { toast(error.message) }
   })
 
+  $('#edit-rules').addEventListener('click', () => openRuleEditor(Number(id), drama.title))
+
     $('#save-drama').addEventListener('click', async () => {
     await api(`/admin/api/dramas/${id}`, {
       method: 'PUT',
       body: {
         title: $('#f-title').value, subTitle: $('#f-subTitle').value, coverUrl: $('#f-coverUrl').value,
         category: $('#f-category').value, year: Number($('#f-year').value), area: $('#f-area').value,
-        score: Number($('#f-score').value), feeMode: $('#f-feeMode').value, status: $('#f-status').value,
+        score: Number($('#f-score').value), status: $('#f-status').value,
         description: $('#f-description').value,
       },
     })
+    await api(`/admin/api/dramas/${id}/policy`, {
+      method: 'PUT',
+      body: {
+        accessMode: $('#f-accessMode').value,
+        freeEpisodes: Number(policy.free_episodes ?? 0),
+        trialSeconds: Number(policy.trial_seconds ?? 0),
+        singlePrice: Number(policy.single_price_cny ?? 0),
+      },
+    }).catch(() => null)
     toast('已保存')
   })
 }
@@ -518,35 +791,98 @@ async function pageOps() {
 }
 
 /* ---------------- 榜单 ---------------- */
+const RANK_TYPE_LABEL = { HOT: '热播榜', RISE: '飙升榜', SEARCH: '搜索榜', CLASSIC: '口碑榜' }
+
 async function pageRanks() {
-  const data = await api('/admin/api/ranks')
+  const [data, dramas] = await Promise.all([api('/admin/api/ranks'), api('/admin/api/dramas').catch(() => ({ list: [] }))])
   view.innerHTML = `
     <div class="panel">
-      <h3>榜单配置<span class="spacer"></span><button class="btn primary" id="add-rank">新增榜单</button></h3>
-      ${data.list.map((list) => `
-        <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px">
-          <div style="display:flex;gap:10px;align-items:center">
-            <strong>${esc(list.name)}</strong><span class="muted">${esc(list.type)} · #${list.id}</span>
+      <h3>榜单 <span class="muted">每日自动按用户行为重算</span><span class="spacer"></span>
+        <button class="btn primary" id="refresh-ranks">立即刷新全部</button>
+        <button class="btn" id="add-rank">＋ 新增榜单</button>
+      </h3>
+      <p class="muted">自动榜每天凌晨按播放/收藏/成交重算；人工插进去的条目可以「锁定」，刷新时原位保留不被覆盖。</p>
+      ${(data.list ?? []).map((list) => `
+        <div style="border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <strong>${esc(list.name)}</strong>
+            <span class="pill">${esc(RANK_TYPE_LABEL[list.type] ?? list.type)}</span>
+            <span class="pill ${list.auto ? 'ok' : ''}">${list.auto ? '自动更新' : '人工维护'}</span>
+            <span class="muted">${list.updated_at ? `上次刷新 ${esc(list.updated_at)}` : '尚未刷新'}</span>
             <span class="spacer" style="flex:1"></span>
+            <button class="btn sm" data-refresh="${list.id}">刷新此榜</button>
             <button class="btn sm" data-attach-rank="${list.id}">加榜单项</button>
           </div>
-          <div class="muted" style="margin-top:6px">${list.items.map((item) => `${item.rank_no}. #${item.drama_id} ${esc(item.title)}`).join(' · ') || '（空）'}</div>
+          <table style="margin-top:8px">
+            <thead><tr><th>名次</th><th>剧集</th><th>得分</th><th>来源</th><th>操作</th></tr></thead>
+            <tbody>
+              ${(list.items ?? []).map((item) => `<tr>
+                <td>${item.rank_no}</td>
+                <td>#${item.drama_id} ${esc(item.title ?? '')}</td>
+                <td>${item.score === null || item.score === undefined ? '—' : Number(item.score).toFixed(1)}</td>
+                <td>${item.locked ? '<span class="pill warn">人工锁定</span>' : '<span class="muted">自动</span>'}</td>
+                <td><button class="btn sm" data-lock="${list.id}" data-drama="${item.drama_id}" data-locked="${item.locked ? 1 : 0}">${item.locked ? '解锁' : '锁定'}</button></td>
+              </tr>`).join('') || '<tr><td colspan="5" class="muted">（空）点「刷新此榜」按现有数据生成</td></tr>'}
+            </tbody>
+          </table>
         </div>`).join('')}
     </div>`
-  $('#add-rank').addEventListener('click', async () => {
-    const name = prompt('榜单名称')
-    if (!name) return
-    const type = prompt('类型 HOT/SEARCH/RISE/CLASSIC', 'HOT') ?? 'HOT'
-    await api('/admin/api/ranks', { method: 'POST', body: { name, type } })
-    await pageRanks()
-  })
-  view.querySelectorAll('[data-attach-rank]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const dramaId = prompt('剧集 ID')
-      const rankNo = prompt('名次', '1')
-      if (!dramaId) return
-      await api('/admin/api/ranks', { method: 'POST', body: { action: 'attach', listId: Number(button.dataset.attachRank), dramaId: Number(dramaId), rankNo: Number(rankNo ?? 0) } })
+
+  $('#refresh-ranks').addEventListener('click', async () => {
+    try {
+      const result = await api('/admin/api/ranks/refresh', { method: 'POST', body: { limit: 20 } })
+      const ok = (result.results ?? []).filter((row) => !row.error)
+      toast(`已刷新 ${ok.length} 个榜（生成 ${ok.reduce((sum, row) => sum + (row.added ?? 0), 0)} 条）`)
       await pageRanks()
+    } catch (error) { toast(error.message) }
+  })
+  view.querySelectorAll('[data-refresh]').forEach((button) => button.addEventListener('click', async () => {
+    try {
+      const result = await api(`/admin/api/ranks/${button.dataset.refresh}/refresh`, { method: 'POST', body: { limit: 20 } })
+      toast(`已刷新：保留锁定 ${result.kept} 条，新增 ${result.added} 条`)
+      await pageRanks()
+    } catch (error) { toast(error.message) }
+  }))
+  view.querySelectorAll('[data-lock]').forEach((button) => button.addEventListener('click', async () => {
+    try {
+      await api(`/admin/api/ranks/${button.dataset.lock}/lock`, {
+        method: 'POST',
+        body: { dramaId: Number(button.dataset.drama), locked: button.dataset.locked !== '1' },
+      })
+      await pageRanks()
+    } catch (error) { toast(error.message) }
+  }))
+  view.querySelectorAll('[data-attach-rank]').forEach((button) => button.addEventListener('click', () => {
+    openOverlay('加入榜单', `
+      <div class="field"><label>剧集</label>
+        <select id="rk-drama">${(dramas.list ?? []).map((row) => `<option value="${row.id}">#${row.id} ${esc(row.title)}</option>`).join('')}</select></div>
+      <div class="field"><label>名次</label><input id="rk-no" type="number" value="1" /></div>
+      <div class="modal-foot"><button class="btn primary" id="rk-save">加入</button></div>
+    `, (body, close) => {
+      body.querySelector('#rk-save').addEventListener('click', async () => {
+        await api('/admin/api/ranks', {
+          method: 'POST',
+          body: { action: 'attach', listId: Number(button.dataset.attachRank), dramaId: Number(body.querySelector('#rk-drama').value), rankNo: Number(body.querySelector('#rk-no').value || 1) },
+        })
+        close()
+        await pageRanks()
+      })
+    })
+  }))
+  $('#add-rank').addEventListener('click', () => {
+    openOverlay('新增榜单', `
+      <div class="field"><label>名称</label><input id="nr-name" placeholder="如：本周热播" /></div>
+      <div class="field"><label>类型</label>
+        <select id="nr-type">${Object.entries(RANK_TYPE_LABEL).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></div>
+      <div class="modal-foot"><button class="btn primary" id="nr-save">创建</button></div>
+    `, (body, close) => {
+      body.querySelector('#nr-save').addEventListener('click', async () => {
+        const name = body.querySelector('#nr-name').value.trim()
+        if (!name) return toast('请填名称')
+        await api('/admin/api/ranks', { method: 'POST', body: { name, type: body.querySelector('#nr-type').value } })
+        close()
+        await pageRanks()
+      })
     })
   })
 }
@@ -651,24 +987,37 @@ const pillOf = (status) => {
   return `<span class="pill ${cls}">${esc(label)}</span>`
 }
 
-/* ---------------- 付费策略 ---------------- */
+/* ---------------- 付费策略 + 按集定价规则 ---------------- */
+const ACCESS_LABEL_POLICY = { free: '免费', subscription: '会员免费', paid: '单独收费' }
+const RULE_MODE_LABEL = { free: '免费观看', vip: '需会员', single: '需单集购买' }
+
+function rulesSummary(rules) {
+  if (!rules || !rules.length) return '<span class="muted">沿用整体策略</span>'
+  return rules.map((rule) => {
+    const range = rule.to_no ? `第 ${rule.from_no}-${rule.to_no} 集` : `第 ${rule.from_no} 集起`
+    const extra = rule.mode === 'single' ? ` ¥${Number(rule.price_cny ?? 0).toFixed(2)}` : ''
+    return `<span class="pill">${range} · ${RULE_MODE_LABEL[rule.mode] ?? rule.mode}${extra}</span>`
+  }).join(' ')
+}
+
 async function pagePolicies() {
   const data = await api('/admin/api/dramas')
   const rows = data.list.map((drama) => {
     const policy = drama.policy ?? { access_mode: 'subscription', free_episodes: 1, trial_seconds: 0, single_price_cny: 0 }
     return `<tr data-row="${drama.id}">
-      <td>${drama.id}</td>
       <td>${esc(drama.title)}</td>
-      <td><select data-f="accessMode">${['free', 'subscription', 'paid'].map((mode) => `<option value="${mode}" ${policy.access_mode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select></td>
+      <td><select data-f="accessMode">${['free', 'subscription', 'paid'].map((mode) => `<option value="${mode}" ${policy.access_mode === mode ? 'selected' : ''}>${ACCESS_LABEL_POLICY[mode] ?? mode}</option>`).join('')}</select></td>
       <td><input data-f="freeEpisodes" type="number" min="0" value="${policy.free_episodes}" style="width:70px" /></td>
       <td><input data-f="trialSeconds" type="number" min="0" value="${policy.trial_seconds}" style="width:80px" /></td>
       <td><input data-f="singlePrice" type="number" min="0" step="0.01" value="${policy.single_price_cny}" style="width:80px" /></td>
       <td><button class="btn sm primary" data-save="${drama.id}">保存</button></td>
+      <td><button class="btn sm" data-rules="${drama.id}" data-title="${esc(drama.title)}">按集规则</button></td>
     </tr>`
   })
-  view.innerHTML = panel('内容付费策略', `
-    <p class="muted">access_mode：free=免费 / subscription=会员 / paid=单片付费；free_episodes=前几集免费；trial_seconds=未授权试看秒数。</p>
-    ${table(['ID', '剧名', '模式', '免费集', '试看(秒)', '单片价', '保存'], rows)}`)
+  view.innerHTML = panel('付费策略', `
+    <p class="muted">整体策略决定默认口径：免费 = 全部可看；会员免费 = 有会员即可看；单独收费 = 按单片价购买。需要「VIP 免费但最后两集单独收费」这类组合，用每行的「按集规则」配置。</p>
+    ${table(['剧名', '模式', '免费集', '试看(秒)', '单片价', '保存', '按集规则'], rows)}`)
+
   view.querySelectorAll('[data-save]').forEach((button) => {
     button.addEventListener('click', async () => {
       const row = button.closest('tr')
@@ -685,31 +1034,114 @@ async function pagePolicies() {
       toast('策略已保存')
     })
   })
+
+  view.querySelectorAll('[data-rules]').forEach((button) => button.addEventListener('click', () => {
+    openRuleEditor(Number(button.dataset.rules), button.dataset.title)
+  }))
+}
+
+/** 按集规则编辑器：可以叠加多条区间规则，保存时整体替换。 */
+async function openRuleEditor(dramaId, title) {
+  const data = await api(`/admin/api/dramas/${dramaId}/pricing-rules`)
+  const rules = (data.rules ?? []).map((rule) => ({
+    fromNo: rule.from_no, toNo: rule.to_no ?? '', mode: rule.mode, price: Number(rule.price_cny ?? 0), note: rule.note ?? '',
+  }))
+  openOverlay(`按集定价 · ${title}`, `
+    <p class="muted">共 ${data.episodeCount} 集（最后一集第 ${data.lastNo} 集）。规则从上到下匹配，命中第一条即生效；没有命中的集走整体策略（${ACCESS_LABEL_POLICY[data.defaults.accessMode] ?? data.defaults.accessMode}，单片价 ¥${Number(data.defaults.singlePrice).toFixed(2)}）。</p>
+    <div id="rules-body"></div>
+    <button class="btn sm" id="rule-add">＋ 加一条规则</button>
+    <div class="modal-foot">
+      <button class="btn" id="rule-clear">清空全部规则</button>
+      <button class="btn primary" id="rule-save">保存规则</button>
+    </div>
+  `, (body, close) => {
+    const host = body.querySelector('#rules-body')
+    const paint = () => {
+      host.innerHTML = rules.map((rule, index) => `<div class="grid-2" style="align-items:end;margin-bottom:8px" data-rule="${index}">
+        <div class="field"><label>起始集</label><input type="number" min="1" data-k="fromNo" value="${rule.fromNo}" /></div>
+        <div class="field"><label>结束集（留空 = 到最后一集）</label><input type="number" min="1" data-k="toNo" value="${rule.toNo}" /></div>
+        <div class="field"><label>规则</label><select data-k="mode">${Object.entries(RULE_MODE_LABEL).map(([value, label]) => `<option value="${value}" ${rule.mode === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+        <div class="field"><label>单集价格（仅「需单集购买」用）</label><input type="number" min="0" step="0.01" data-k="price" value="${rule.price}" /></div>
+        <div class="field" style="grid-column:1/-1"><label>备注（给运营看）</label>
+          <div style="display:flex;gap:8px"><input data-k="note" value="${esc(rule.note)}" />
+          <button class="btn sm danger" data-del-rule="${index}">删除</button></div></div>
+      </div>`).join('') || '<p class="muted">还没有规则：全部剧集走整体策略。</p>'
+      host.querySelectorAll('[data-del-rule]').forEach((node) => node.addEventListener('click', () => {
+        rules.splice(Number(node.dataset.delRule), 1)
+        paint()
+      }))
+      host.querySelectorAll('[data-rule]').forEach((node) => node.addEventListener('input', () => {
+        const rule = rules[Number(node.dataset.rule)]
+        node.querySelectorAll('[data-k]').forEach((input) => { rule[input.dataset.k] = input.value })
+      }))
+    }
+    paint()
+    body.querySelector('#rule-add').addEventListener('click', () => {
+      rules.push({ fromNo: 1, toNo: '', mode: 'vip', price: 0, note: '' })
+      paint()
+    })
+    body.querySelector('#rule-clear').addEventListener('click', async () => {
+      if (!confirm('清空该剧全部按集规则？')) return
+      try {
+        await api(`/admin/api/dramas/${dramaId}/pricing-rules`, { method: 'PUT', body: { rules: [] } })
+        toast('已清空')
+        close()
+      } catch (error) { toast(error.message) }
+    })
+    body.querySelector('#rule-save').addEventListener('click', async () => {
+      const payload = rules.map((rule) => ({
+        fromNo: Number(rule.fromNo),
+        toNo: rule.toNo === '' || rule.toNo === null ? null : Number(rule.toNo),
+        mode: rule.mode,
+        price: Number(rule.price || 0),
+        note: rule.note ?? '',
+      }))
+      try {
+        await api(`/admin/api/dramas/${dramaId}/pricing-rules`, { method: 'PUT', body: { rules: payload } })
+        toast('规则已保存')
+        close()
+        await pagePolicies()
+      } catch (error) { toast(error.message) }
+    })
+  })
 }
 
 /* ---------------- 套餐 ---------------- */
 async function pagePlans() {
   const data = await api('/admin/api/plans')
-  const rows = data.list.map((plan) => `<tr>
-    <td>${plan.id}</td><td class="mono">${esc(plan.code)}</td><td>${esc(plan.name)}</td>
-    <td>¥${Number(plan.price_cny).toFixed(2)}</td><td>${plan.duration_days}</td><td>${esc(plan.scope)}</td>
-    <td>${pillOf(plan.status)}</td>
-    <td><button class="btn sm" data-toggle-plan="${plan.id}" data-status="${plan.status === 'active' ? 'disabled' : 'active'}">${plan.status === 'active' ? '下架' : '上架'}</button></td>
-  </tr>`)
-  view.innerHTML = panel('套餐定价', `
-    <div class="form-row">
-      <input id="plan-name" placeholder="套餐名（月卡会员）" />
-      <input id="plan-days" type="number" placeholder="天数" value="30" style="width:90px" />
-      <input id="plan-price" type="number" step="0.01" placeholder="价格" style="width:100px" />
-      <button class="btn primary" id="plan-add">新增套餐</button>
+  const cards = (data.list ?? []).map((plan) => {
+    const days = Number(plan.duration_days || 30)
+    const price = Number(plan.price_cny || 0)
+    const perDay = days > 0 ? price / days : price
+    const months = Math.max(1, Math.round(days / 30))
+    return `<div class="panel" style="margin:0">
+      <h3>${esc(plan.name)} <span class="pill ${plan.status === 'active' ? 'ok' : ''}">${plan.status === 'active' ? '在售' : '已下架'}</span></h3>
+      <p style="font-size:26px;font-weight:600;margin:6px 0">¥${price.toFixed(2)}<span class="muted" style="font-size:13px"> / ${months} 个月</span></p>
+      <p class="muted">日均 ¥${perDay.toFixed(2)} · 有效期 ${days} 天 · 范围 ${plan.scope === 'all' ? '全部内容' : esc(plan.scope)}</p>
+      <p class="muted">权益：${plan.scope === 'all' ? '全站剧集无限观看（含单片付费内容）' : '指定范围内容观看'}</p>
+      <p class="mono muted" style="font-size:12px">套餐编码 ${esc(plan.code)}</p>
+      <div class="form-row">
+        <button class="btn sm" data-toggle-plan="${plan.id}" data-status="${plan.status === 'active' ? 'disabled' : 'active'}">${plan.status === 'active' ? '下架' : '上架'}</button>
+      </div>
+    </div>`
+  }).join('')
+  view.innerHTML = `
+    <div class="panel">
+      <h3>套餐定价 <span class="muted">编码由系统生成，全局唯一</span></h3>
+      <div class="form-row">
+        <input id="plan-name" placeholder="套餐名（月卡会员）" />
+        <input id="plan-days" type="number" placeholder="天数" value="30" style="width:90px" />
+        <input id="plan-price" type="number" step="0.01" placeholder="价格" style="width:100px" />
+        <button class="btn primary" id="plan-add">新增套餐</button>
+      </div>
     </div>
-    ${table(['ID', '编码', '名称', '价格', '天数', '范围', '状态', '操作'], rows)}`)
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">${cards || '<p class="muted">还没有套餐</p>'}</div>`
   $('#plan-add').addEventListener('click', async () => {
     const name = $('#plan-name').value.trim()
     if (!name) return toast('请填套餐名')
     await api('/admin/api/plans', {
       method: 'POST',
-      body: { name, days: Number($('#plan-days').value || 30), price: Number($('#plan-price').value || 0), code: `plan-${Date.now()}` },
+      body: { name, days: Number($('#plan-days').value || 30), price: Number($('#plan-price').value || 0) },
     })
     await pagePlans()
   })
@@ -724,24 +1156,25 @@ async function pagePlans() {
 /* ---------------- 优惠券 ---------------- */
 async function pageCoupons() {
   const data = await api('/admin/api/coupons')
-  const rows = data.list.map((coupon) => `<tr>
-    <td>${coupon.id}</td><td class="mono">${esc(coupon.code)}</td><td>${esc(coupon.name)}</td>
+  const rows = (data.list ?? []).map((coupon) => `<tr>
+    <td class="mono">${esc(coupon.code)}</td><td>${esc(coupon.name)}</td>
     <td>${coupon.discount_type === 'amount' ? '立减' : '折扣'}</td>
-    <td>${coupon.discount_type === 'amount' ? '¥' + coupon.discount_value : coupon.discount_value + '%'}</td>
-    <td>¥${coupon.min_amount}</td><td>${coupon.used}/${coupon.total || '∞'}</td>
-    <td>${esc(coupon.valid_to ?? '—')}</td><td>${pillOf(coupon.status)}</td>
+    <td>${coupon.discount_type === 'amount' ? '¥' + Number(coupon.discount_value).toFixed(2) : coupon.discount_value + '%'}</td>
+    <td>¥${Number(coupon.min_amount).toFixed(2)}</td><td>${coupon.used}/${coupon.total || '不限'}</td>
+    <td>${esc(coupon.valid_to ?? '长期')}</td><td>${pillOf(coupon.status)}</td>
     <td><button class="btn sm" data-c-status="${coupon.id}" data-status="${coupon.status === 'active' ? 'disabled' : 'active'}">${coupon.status === 'active' ? '停用' : '启用'}</button></td>
   </tr>`)
   view.innerHTML = panel('优惠券', `
+    <p class="muted">编码留空时由系统生成纯数字唯一码；需要外部投放的固定码也可以自己填。</p>
     <div class="form-row">
-      <input id="c-code" placeholder="券码（WELCOME10）" />
+      <input id="c-code" placeholder="券码（留空自动生成）" />
       <input id="c-name" placeholder="名称" />
       <select id="c-type"><option value="amount">立减</option><option value="percent">折扣(%)</option></select>
       <input id="c-value" type="number" step="0.01" placeholder="面额/折扣" style="width:110px" />
       <input id="c-min" type="number" step="0.01" placeholder="门槛" style="width:90px" />
       <button class="btn primary" id="c-add">新增</button>
     </div>
-    ${table(['ID', '券码', '名称', '类型', '面额', '门槛', '已用/总量', '有效期', '状态', '操作'], rows)}`)
+    ${table(['券码', '名称', '类型', '面额', '门槛', '已用/总量', '有效期', '状态', '操作'], rows)}`)
   $('#c-add').addEventListener('click', async () => {
     await api('/admin/api/coupons', {
       method: 'POST',
@@ -1646,64 +2079,221 @@ async function pageAnalytics() {
 }
 
 /* ---------------- 标签管理 ---------------- */
+const TAG_LEVELS = [['all', '全部'], ['top', '一级标签'], ['child', '二级标签']]
+
 async function pageTags() {
-  const data = await api('/admin/api/tags')
-  const rows = data.list.map((tag) => `<tr>
-    <td>${tag.id}</td>
-    <td><input value="${esc(tag.name)}" data-name="${tag.id}" style="width:180px" /></td>
-    <td><input type="number" value="${tag.sort}" data-sort="${tag.id}" style="width:80px" /></td>
-    <td>${fmt(tag.dramaCount)}</td>
-    <td><span class="pill ${tag.status === 'active' ? 'ok' : ''}">${tag.status === 'active' ? '启用' : '停用'}</span></td>
-    <td>
-      <button class="btn sm" data-save="${tag.id}">保存</button>
-      <button class="btn sm danger" data-del="${tag.id}">删除</button>
-    </td>
-  </tr>`).join('')
+  const page = Number(state.params.tagPage ?? 1)
+  const level = state.params.tagLevel ?? 'all'
+  const keyword = (state.params.tagQ ?? '').trim()
+  const showDisabled = state.params.tagDisabled ? '1' : ''
+  const query = new URLSearchParams({ page: String(page), pageSize: '20', level, includeDisabled: '1' })
+  if (keyword) query.set('keyword', keyword)
+  if (showDisabled) query.set('includeDisabled', '1')
+  const data = await api(`/admin/api/tags?${query.toString()}`)
+  const byId = new Map((data.tree ?? []).map((node) => [node.id, node.name]))
+  const pages = Math.max(1, Math.ceil((data.total ?? 0) / (data.pageSize || 20)))
 
-  view.innerHTML = panel('标签管理', `
-    <p class="muted">标签用于 C 端筛选与详情展示；改完后到「剧集管理」里给剧集打标。删除标签会同时解除剧集关联。</p>
-    <div class="form-row">
-      <label>新标签 <input id="tag-name" placeholder="如：甜宠 / 悬疑 / 高分" style="width:200px" /></label>
-      <label>排序 <input id="tag-sort" type="number" value="100" style="width:80px" /></label>
-      <button class="btn primary" id="tag-add">新增标签</button>
-      <span class="muted" id="tag-msg"></span>
-    </div>
-    <table style="margin-top:12px">
-      <thead><tr><th>ID</th><th>名称</th><th>排序</th><th>剧集数</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6" class="muted">还没有标签</td></tr>'}</tbody>
-    </table>`)
+  view.innerHTML = `
+    <div class="panel">
+      <h3>标签管理 <span class="muted">共 ${data.total ?? 0} 个</span></h3>
+      <p class="muted">标签用于 C 端筛选与详情展示。启停开关即时生效；改名/换父级请点「编辑」。</p>
+      <div class="form-row">
+        <div class="subtabs">${TAG_LEVELS.map(([key, label]) => `<button class="pill ${level === key ? 'active' : ''}" data-level="${key}">${label}</button>`).join('')}</div>
+        <input id="tag-q" placeholder="搜标签名" value="${esc(keyword)}" style="width:160px" />
+        <button class="btn primary" id="tag-add">＋ 新增标签</button>
+        <span class="muted">第 ${page} / ${pages} 页</span>
+      </div>
+      <table style="margin-top:12px">
+        <thead><tr><th>名称</th><th>层级</th><th>父级</th><th>剧集数</th><th>排序</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>
+          ${(data.list ?? []).map((tag) => `<tr class="${tag.parent_id ? 'tag-row child' : ''}">
+            <td>${tag.parent_id ? '└ ' : ''}${esc(tag.name)}</td>
+            <td>${tag.parent_id ? '<span class="pill">二级</span>' : '<span class="pill ok">一级</span>'}</td>
+            <td>${tag.parent_id ? esc(byId.get(tag.parent_id) ?? `#${tag.parent_id}`) : '—'}</td>
+            <td>${fmt(tag.dramaCount ?? 0)}</td>
+            <td>${tag.sort}</td>
+            <td><button class="btn sm ${tag.status === 'active' ? '' : 'ghost'}" data-status="${tag.id}" data-active="${tag.status === 'active' ? 1 : 0}">
+              ${tag.status === 'active' ? '<span class="tag-state-on">● 启用</span>' : '<span class="tag-state-off">○ 停用</span>'}
+            </button></td>
+            <td class="row-actions">
+              <button class="btn sm" data-edit="${tag.id}">编辑</button>
+              <button class="btn sm danger" data-del="${tag.id}">删除</button>
+            </td>
+          </tr>`).join('') || '<tr><td colspan="7" class="muted">没有匹配的标签</td></tr>'}
+        </tbody>
+      </table>
+      <div class="form-row" style="margin-top:12px">
+        <button class="btn sm" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+        <button class="btn sm" data-page="${page + 1}" ${page >= pages ? 'disabled' : ''}>下一页</button>
+      </div>
+    </div>`
 
-  $('#tag-add').addEventListener('click', async () => {
-    const name = $('#tag-name').value.trim()
-    if (!name) return
-    try {
-      await api('/admin/api/tags', { method: 'POST', body: { name, sort: Number($('#tag-sort').value || 100) } })
-      toast('标签已新增')
-      await pageTags()
-    } catch (error) { $('#tag-msg').textContent = error.message }
+  const reload = () => pageTags()
+  view.querySelectorAll('[data-level]').forEach((button) => button.addEventListener('click', () => {
+    state.params.tagLevel = button.dataset.level
+    state.params.tagPage = 1
+    reload()
+  }))
+  $('#tag-q')?.addEventListener('change', (event) => {
+    state.params.tagQ = event.target.value
+    state.params.tagPage = 1
+    reload()
   })
+  view.querySelectorAll('[data-page]').forEach((button) => button.addEventListener('click', () => {
+    state.params.tagPage = Number(button.dataset.page)
+    reload()
+  }))
+  view.querySelectorAll('[data-status]').forEach((button) => button.addEventListener('click', async () => {
+    const enabled = button.dataset.active !== '1'
+    try {
+      await api(`/admin/api/tags/${button.dataset.status}/status`, { method: 'POST', body: { enabled } })
+      toast(enabled ? '已启用' : '已停用')
+      reload()
+    } catch (error) { toast(error.message) }
+  }))
 
-  for (const button of view.querySelectorAll('[data-save]')) {
-    button.addEventListener('click', async () => {
-      const id = button.dataset.save
-      const name = view.querySelector(`[data-name="${id}"]`).value.trim()
-      const sort = Number(view.querySelector(`[data-sort="${id}"]`).value || 100)
-      try {
-        await api('/admin/api/tags', { method: 'POST', body: { id: Number(id), name, sort } })
-        toast('已保存')
-        await pageTags()
-      } catch (error) { toast(error.message) }
+  const openEditor = (tag) => {
+    openOverlay(tag ? `编辑标签 · ${tag.name}` : '新增标签', `
+      <div class="field"><label>名称 *</label><input id="tg-name" value="${esc(tag?.name ?? '')}" /></div>
+      <div class="grid-2">
+        <div class="field"><label>父级标签（留空 = 一级）</label>
+          <select id="tg-parent"><option value="">（一级标签）</option>
+            ${(data.tree ?? []).filter((node) => !tag || node.id !== tag.id).map((node) => `<option value="${node.id}" ${tag?.parent_id === node.id ? 'selected' : ''}>${esc(node.name)}</option>`).join('')}
+          </select></div>
+        <div class="field"><label>排序（小的在前）</label><input id="tg-sort" type="number" value="${tag?.sort ?? 100}" /></div>
+      </div>
+      <div class="field"><label>状态</label>
+        <select id="tg-status">
+          <option value="active" ${tag?.status !== 'disabled' ? 'selected' : ''}>启用</option>
+          <option value="disabled" ${tag?.status === 'disabled' ? 'selected' : ''}>停用</option>
+        </select></div>
+      <div class="modal-foot"><button class="btn primary" id="tg-save">保存</button></div>
+    `, (body, close) => {
+      body.querySelector('#tg-save').addEventListener('click', async () => {
+        const name = body.querySelector('#tg-name').value.trim()
+        if (!name) return toast('请填标签名')
+        const payload = {
+          name,
+          sort: Number(body.querySelector('#tg-sort').value || 100),
+          status: body.querySelector('#tg-status').value,
+          parentId: body.querySelector('#tg-parent').value ? Number(body.querySelector('#tg-parent').value) : null,
+        }
+        try {
+          if (tag) await api('/admin/api/tags', { method: 'POST', body: { id: tag.id, ...payload } })
+          else await api('/admin/api/tags', { method: 'POST', body: payload })
+          toast('已保存')
+          close()
+          reload()
+        } catch (error) { toast(error.message) }
+      })
     })
   }
-  for (const button of view.querySelectorAll('[data-del]')) {
-    button.addEventListener('click', async () => {
+
+  $('#tag-add').addEventListener('click', () => openEditor(null))
+  view.querySelectorAll('[data-edit]').forEach((button) => button.addEventListener('click', () => {
+    const tag = (data.list ?? []).find((row) => String(row.id) === button.dataset.edit)
+    openEditor(tag)
+  }))
+  view.querySelectorAll('[data-del]').forEach((button) => button.addEventListener('click', async () => {
+    if (!confirm('删除该标签？会同时解除剧集关联。')) return
+    try {
       await api(`/admin/api/tags?id=${button.dataset.del}`, { method: 'DELETE' })
       toast('已删除')
-      await pageTags()
-    })
-  }
+      reload()
+    } catch (error) { toast(error.message) }
+  }))
 }
 
+/* ---------------- 埋点数据 ---------------- */
+async function pageEvents() {
+  const days = Number(state.params.eventDays ?? 7)
+  const type = state.params.eventType ?? ''
+  const page = Number(state.params.eventPage ?? 1)
+  const query = new URLSearchParams({ days: String(days), page: String(page), pageSize: '20' })
+  if (type) query.set('type', type)
+  const data = await api(`/admin/api/events?${query.toString()}`)
+  const EVENT_LABEL = {
+    impression: '曝光', detail_view: '详情页浏览', paywall_view: '付费墙展示', paywall_click: '付费墙点击',
+    play_end: '播放结束', search: '搜索', share: '分享', category_filter: '分类筛选', rank_view: '榜单浏览', login_open: '打开登录',
+  }
+  const pages = Math.max(1, Math.ceil((data.total ?? 0) / (data.pageSize || 20)))
+
+  view.innerHTML = `
+    <div class="panel">
+      <h3>埋点数据 <span class="muted">近 ${days} 天 · 共 ${fmt(data.total ?? 0)} 条</span></h3>
+      <div class="form-row">
+        <div class="subtabs">${[1, 7, 30].map((n) => `<button class="pill ${days === n ? 'active' : ''}" data-days="${n}">${n} 天</button>`).join('')}</div>
+        <select id="ev-type" style="width:160px">
+          <option value="">全部事件</option>
+          ${(data.byType ?? []).map((row) => `<option value="${esc(row.type)}" ${type === row.type ? 'selected' : ''}>${esc(EVENT_LABEL[row.type] ?? row.type)}（${row.n}）</option>`).join('')}
+        </select>
+        <span class="muted">第 ${page} / ${pages} 页</span>
+      </div>
+      <table style="margin-top:12px">
+        <thead><tr><th>时间</th><th>事件</th><th>用户</th><th>剧集</th><th>路径</th><th>数值</th><th>明细</th></tr></thead>
+        <tbody>
+          ${(data.list ?? []).map((row) => `<tr>
+            <td class="muted">${esc(row.created_at)}</td>
+            <td>${esc(EVENT_LABEL[row.type] ?? row.type)}</td>
+            <td>${row.userEmail ? esc(row.userEmail) : (row.user_id ? `#${row.user_id}` : '游客')}</td>
+            <td>${row.dramaTitle ? esc(row.dramaTitle) : (row.drama_id ? `#${row.drama_id}` : '—')}</td>
+            <td class="muted" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${esc(row.path ?? '—')}</td>
+            <td>${row.value === null || row.value === undefined ? '—' : Number(row.value).toFixed(2)}</td>
+            <td class="muted">${esc(row.meta ? JSON.stringify(row.meta) : '—')}</td>
+          </tr>`).join('') || '<tr><td colspan="7" class="muted">还没有埋点数据：C 端产生浏览/播放后这里会实时出现</td></tr>'}
+        </tbody>
+      </table>
+      <div class="form-row" style="margin-top:12px">
+        <button class="btn sm" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>上一页</button>
+        <button class="btn sm" data-page="${page + 1}" ${page >= pages ? 'disabled' : ''}>下一页</button>
+      </div>
+      <h3 style="margin-top:18px">事件分布</h3>
+      <table><thead><tr><th>事件</th><th>次数</th></tr></thead><tbody>
+        ${(data.byType ?? []).map((row) => `<tr><td>${esc(EVENT_LABEL[row.type] ?? row.type)}</td><td>${fmt(row.n)}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">—</td></tr>'}
+      </tbody></table>
+    </div>`
+
+  view.querySelectorAll('[data-days]').forEach((button) => button.addEventListener('click', () => {
+    state.params.eventDays = Number(button.dataset.days)
+    state.params.eventPage = 1
+    pageEvents()
+  }))
+  $('#ev-type')?.addEventListener('change', (event) => {
+    state.params.eventType = event.target.value
+    state.params.eventPage = 1
+    pageEvents()
+  })
+  view.querySelectorAll('[data-page]').forEach((button) => button.addEventListener('click', () => {
+    state.params.eventPage = Number(button.dataset.page)
+    pageEvents()
+  }))
+}
+
+/* ---------------- 管理员账号（B 端） ---------------- */
+async function pageAdmins() {
+  const [data, roles] = await Promise.all([api('/admin/api/admins'), api('/admin/api/roles').catch(() => ({ roles: [] }))])
+  const roleOptions = (roles.roles ?? []).map((role) => role.code)
+  view.innerHTML = `
+    <div class="panel">
+      <h3>管理员账号 <span class="muted">B 端 ${data.list?.length ?? 0} 个 · C 端用户 ${fmt(data.users ?? 0)} 人</span></h3>
+      <p class="muted">这里只列后台账号（B 端）；C 端注册用户在「用户 → C 端用户」里，两边不混表也不共用登录入口。</p>
+      <table>
+        <thead><tr><th>账号</th><th>类型</th><th>显示名</th><th>角色</th><th>状态</th><th>最近操作</th><th>创建时间</th></tr></thead>
+        <tbody>
+          ${(data.list ?? []).map((admin) => `<tr>
+            <td><strong>${esc(admin.username)}</strong></td>
+            <td><span class="pill">${esc(admin.kindLabel ?? 'B 端账号')}</span></td>
+            <td>${esc(admin.display_name ?? '—')}</td>
+            <td>${(admin.roles ?? []).map((role) => `<span class="pill">${esc(role.name)}</span>`).join(' ') || '<span class="muted">未分配</span>'}</td>
+            <td>${admin.status === 'active' ? '<span class="pill ok">正常</span>' : `<span class="pill warn">${esc(admin.status)}</span>`}</td>
+            <td class="muted">${esc(admin.lastAuditAt ?? '—')}</td>
+            <td class="muted">${esc(admin.created_at ?? '—')}</td>
+          </tr>`).join('') || '<tr><td colspan="7" class="muted">没有后台账号</td></tr>'}
+        </tbody>
+      </table>
+      <p class="muted" style="margin-top:10px">角色分配在「系统设置 → 角色权限」里操作；后台口令策略为 8 位以上且同时含字母与数字。</p>
+    </div>`
+}
 /* 启动 */
 if (state.token) await boot()
 

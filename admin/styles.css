@@ -142,3 +142,51 @@ table input:focus, table select:focus { outline: none; border-color: #ff4d6d; }
 .bar-track { height: 10px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: hidden; }
 .bar-fill { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--brand), var(--brand-2)); }
 .bar-value { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ---------- 分组菜单 ---------- */
+.nav-group { margin-bottom: 6px; }
+.nav-group-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; padding: 10px 12px; border: 0; border-radius: 10px;
+  background: transparent; color: var(--fg-muted, #8b93a7);
+  font-size: 12px; font-weight: 600; letter-spacing: .04em; cursor: pointer;
+}
+.nav-group-head:hover { background: rgba(255,255,255,.04); color: var(--fg, #e8ecf5); }
+.nav-group .chev { opacity: .7; font-size: 11px; }
+.nav-group.collapsed .nav-group-body { display: none; }
+.nav-group-body { display: flex; flex-direction: column; gap: 2px; padding: 2px 0 4px; }
+
+/* ---------- 弹层 ---------- */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-start;
+  justify-content: center; padding: 6vh 16px; overflow: auto;
+  background: rgba(6, 10, 20, .62); backdrop-filter: blur(2px);
+}
+.modal-box {
+  width: min(760px, 100%); border-radius: 16px; overflow: hidden;
+  background: var(--surface-1, #141821); border: 1px solid var(--line, #232a38);
+  box-shadow: 0 24px 60px rgba(0,0,0,.45);
+}
+.modal-box > header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--line, #232a38);
+}
+.modal-box > header h3 { margin: 0; font-size: 15px; }
+.modal-body { padding: 16px 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+.modal-body .field { display: flex; flex-direction: column; gap: 6px; }
+.modal-body .field > label { font-size: 12px; color: var(--fg-muted, #8b93a7); }
+.modal-body .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.modal-body .catalog-hint { font-size: 12px; color: var(--fg-muted, #8b93a7); }
+.modal-body .req-missing { color: var(--warn, #f0b429); font-size: 12px; }
+.modal-body input, .modal-body select, .modal-body textarea {
+  width: 100%; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--line, #232a38); background: var(--surface-0, #0d1117); color: inherit;
+}
+.modal-box .cover-prev { width: 96px; height: 136px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line,#232a38); }
+.modal-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 4px; }
+
+/* ---------- 标签树 ---------- */
+.tag-row.child td:first-child { padding-left: 28px; }
+.tag-state-on { color: var(--ok, #3ecf8e); }
+.tag-state-off { color: var(--fg-muted, #8b93a7); }
+.switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
