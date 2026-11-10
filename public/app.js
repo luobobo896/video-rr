@@ -45,15 +45,24 @@ async function api(path, options = {}) {
   return json.data
 }
 
-async function login(email, code) {
-  const data = await api('/api/auth/email/login', { method: 'POST', body: JSON.stringify({ email, code }) })
+function applySession(data, message) {
   state.token = data.token
   state.user = data.user
   localStorage.setItem('mh-token', data.token)
   localStorage.setItem('mh-user', JSON.stringify(data.user))
-  toast(data.created ? '注册成功，已自动登录' : '登录成功')
+  toast(message)
   renderChrome()
-  await route()
+  return route()
+}
+
+async function login(email, code) {
+  const data = await api('/api/auth/email/login', { method: 'POST', body: JSON.stringify({ email, code }) })
+  await applySession(data, data.created ? '注册成功，已自动登录' : '登录成功')
+}
+
+async function loginWithPassword(email, password) {
+  const data = await api('/api/auth/email/password', { method: 'POST', body: JSON.stringify({ email, password }) })
+  await applySession(data, '登录成功')
 }
 
 function logout() {
@@ -66,31 +75,41 @@ function logout() {
   route()
 }
 
-/** 邮箱验证码登录 / 注册（一体化）：发码 → 校验 → 存在即登录，不存在自动建号 */
+/** 登录 / 注册：验证码（默认）与密码两种方式 */
 function openLogin() {
   const modal = $('#modal')
   modal.classList.remove('hidden')
   let countdown = 0
   let timer
-  let devCode = ''
+  let mode = 'code'
 
   modal.innerHTML = `
     <div class="modal-card" style="width:min(420px,94vw)">
-      <h3>邮箱登录 / 注册</h3>
-      <p style="color:#9aa3b2;font-size:13px;margin:4px 0 12px">输入邮箱获取 6 位验证码，未注册的邮箱会自动创建账号。</p>
+      <h3>登录 / 注册</h3>
+      <div class="seg" id="login-tabs" style="margin:10px 0 14px">
+        <button class="seg-item active" data-mode="code">验证码登录</button>
+        <button class="seg-item" data-mode="password">密码登录</button>
+      </div>
       <label class="field"><span>邮箱</span>
         <input id="login-email" type="email" placeholder="you@example.com" autocomplete="email" />
       </label>
-      <div style="display:flex;gap:8px;margin-top:10px">
-        <input id="login-code" placeholder="6 位验证码" maxlength="6" inputmode="numeric"
-          style="flex:1;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg-elev);color:var(--text)" />
-        <button class="btn-ghost" id="send-code">获取验证码</button>
+      <div id="code-block">
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <input id="login-code" placeholder="6 位验证码" maxlength="6" inputmode="numeric" class="input" style="flex:1" />
+          <button class="btn-ghost" id="send-code">获取验证码</button>
+        </div>
+      </div>
+      <div id="password-block" class="hidden">
+        <label class="field" style="margin-top:10px"><span>密码</span>
+          <input id="login-password" type="password" placeholder="账号密码" autocomplete="current-password" />
+        </label>
       </div>
       <div id="login-hint" style="font-size:12px;color:#9aa3b2;min-height:18px;margin-top:8px"></div>
       <div style="display:flex;gap:8px;margin-top:14px">
         <button class="btn-primary" id="login-submit" style="flex:1">登录 / 注册</button>
         <button class="btn-ghost" id="login-cancel">取消</button>
       </div>
+      <p style="color:#7d8695;font-size:12px;margin-top:12px">未注册的邮箱会自动创建账号；密码可在「个人中心」设置。</p>
     </div>`
 
   const close = () => { clearInterval(timer); modal.classList.add('hidden') }
@@ -100,6 +119,17 @@ function openLogin() {
     node.style.color = color
   }
 
+  $('#login-tabs').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-mode]')
+    if (!button) return
+    mode = button.dataset.mode
+    modal.querySelectorAll('#login-tabs .seg-item').forEach((item) => item.classList.toggle('active', item.dataset.mode === mode))
+    $('#code-block').classList.toggle('hidden', mode !== 'code')
+    $('#password-block').classList.toggle('hidden', mode !== 'password')
+    $('#login-submit').textContent = mode === 'code' ? '登录 / 注册' : '登录'
+    hint('')
+  })
+
   $('#send-code').addEventListener('click', async () => {
     const email = $('#login-email').value.trim()
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return hint('请输入正确的邮箱地址', '#ff8a8a')
@@ -107,8 +137,7 @@ function openLogin() {
     button.disabled = true
     try {
       const result = await api('/api/auth/email/send', { method: 'POST', body: JSON.stringify({ email }) })
-      devCode = result.devCode ?? ''
-      hint(devCode ? `开发模式验证码：${devCode}（5 分钟内有效）` : `验证码已发送至 ${email}，5 分钟内有效`, '#4ade80')
+      hint(`验证码已发送至 ${email}，5 分钟内有效`, '#4ade80')
       countdown = result.resendAfter ?? 60
       button.textContent = `${countdown}s 后重发`
       timer = setInterval(() => {
@@ -129,11 +158,17 @@ function openLogin() {
 
   $('#login-submit').addEventListener('click', async () => {
     const email = $('#login-email').value.trim()
-    const code = $('#login-code').value.trim()
     if (!email) return hint('请输入邮箱', '#ff8a8a')
-    if (!/^\d{6}$/.test(code)) return hint('请输入 6 位数字验证码', '#ff8a8a')
     try {
-      await login(email, code)
+      if (mode === 'password') {
+        const password = $('#login-password').value
+        if (!password) return hint('请输入密码', '#ff8a8a')
+        await loginWithPassword(email, password)
+      } else {
+        const code = $('#login-code').value.trim()
+        if (!/^\d{6}$/.test(code)) return hint('请输入 6 位数字验证码', '#ff8a8a')
+        await login(email, code)
+      }
       close()
     } catch (error) {
       hint(error.message, '#ff8a8a')
@@ -141,6 +176,7 @@ function openLogin() {
   })
 
   $('#login-code').addEventListener('keydown', (event) => { if (event.key === 'Enter') $('#login-submit').click() })
+  $('#login-password').addEventListener('keydown', (event) => { if (event.key === 'Enter') $('#login-submit').click() })
   $('#login-cancel').addEventListener('click', close)
   modal.addEventListener('click', (event) => { if (event.target === modal) close() }, { once: true })
 }
@@ -562,7 +598,7 @@ async function renderPlay(id, episodeNo) {
       <div class="player" id="player">
         <video id="video" playsinline controls style="width:100%;height:100%;background:#000"></video>
         <div class="danmu-layer" id="danmu-layer"></div>
-        <div class="notice" id="player-notice">${data.hls ? '播放链接 10 分钟有效（签名防盗链）' : '该集没有片源：后台生成示例视频后即可播放'}</div>
+        <div class="notice" id="player-notice">${data.hls ? `播放链接 ${Math.round((data.expiresIn ?? 300) / 60)} 分钟内有效（签名防盗链，过期自动续签）` : '该集没有片源：后台生成示例视频后即可播放'}</div>
         <div class="player-tools">
           <select id="quality-select"><option value="-1">自动清晰度</option></select>
           <input id="danmu-input" placeholder="发条弹幕…" maxlength="60" />
@@ -816,7 +852,7 @@ function openProfileEdit(user) {
 function openChangePassword(user) {
   const modal = $('#modal')
   modal.classList.remove('hidden')
-  let devCode = ''
+  let timer
   modal.innerHTML = `
     <div class="modal-card" style="width:min(440px,94vw)">
       <h3>修改密码</h3>
@@ -836,25 +872,50 @@ function openChangePassword(user) {
   const close = () => modal.classList.add('hidden')
   $('#pw-cancel').addEventListener('click', close)
   $('#pw-send').addEventListener('click', async () => {
+    const button = $('#pw-send')
+    button.disabled = true
     try {
       const result = await api('/api/auth/password/send', { method: 'POST', body: JSON.stringify({ email: user.email }) })
-      devCode = result.devCode ?? ''
       $('#pw-msg').style.color = '#4ade80'
-      $('#pw-msg').textContent = devCode ? `开发模式验证码：${devCode}` : '验证码已发送，请查收邮箱'
-    } catch (error) { $('#pw-msg').textContent = error.message }
+      $('#pw-msg').textContent = `验证码已发送至 ${user.email ?? '注册邮箱'}，5 分钟内有效`
+      let countdown = result.resendAfter ?? 60
+      button.textContent = `${countdown}s 后重发`
+      timer = setInterval(() => {
+        countdown -= 1
+        if (countdown <= 0) {
+          clearInterval(timer)
+          button.disabled = false
+          button.textContent = '发送验证码'
+          return
+        }
+        button.textContent = `${countdown}s 后重发`
+      }, 1000)
+    } catch (error) {
+      button.disabled = false
+      $('#pw-msg').style.color = '#ff8a8a'
+      $('#pw-msg').textContent = error.message
+    }
   })
   $('#pw-save').addEventListener('click', async () => {
     const code = $('#pw-code').value.trim()
     const password = $('#pw-new').value
     if (password !== $('#pw-confirm').value) { $('#pw-msg').textContent = '两次输入的密码不一致'; return }
     try {
-      await api('/api/auth/password/change', {
+      const result = await api('/api/auth/password/change', {
         method: 'POST',
         body: JSON.stringify({ email: user.email, code, newPassword: password }),
       })
+      if (result?.token) {
+        state.token = result.token
+        localStorage.setItem('mh-token', result.token)
+      }
+      clearInterval(timer)
       close()
-      toast('密码已更新')
-    } catch (error) { $('#pw-msg').textContent = error.message }
+      toast('密码已更新，其他设备需重新登录')
+    } catch (error) {
+      $('#pw-msg').style.color = '#ff8a8a'
+      $('#pw-msg').textContent = error.message
+    }
   })
   modal.addEventListener('click', (event) => { if (event.target === modal) close() }, { once: true })
 }
@@ -863,7 +924,7 @@ function openChangePassword(user) {
 function openChangeEmail(user) {
   const modal = $('#modal')
   modal.classList.remove('hidden')
-  let devCode = ''
+  let timer
   modal.innerHTML = `
     <div class="modal-card" style="width:min(440px,94vw)">
       <h3>更换邮箱</h3>
@@ -886,10 +947,26 @@ function openChangeEmail(user) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { $('#ce-msg').textContent = '邮箱格式不正确'; return }
     try {
       const result = await api('/api/auth/email/send-change', { method: 'POST', body: JSON.stringify({ newEmail: email }) })
-      devCode = result.devCode ?? ''
       $('#ce-msg').style.color = '#4ade80'
-      $('#ce-msg').textContent = devCode ? `开发模式验证码：${devCode}` : '验证码已发送至新邮箱'
-    } catch (error) { $('#ce-msg').textContent = error.message }
+      $('#ce-msg').textContent = `验证码已发送至 ${email}，5 分钟内有效`
+      const button = $('#ce-send')
+      button.disabled = true
+      let countdown = result.resendAfter ?? 60
+      button.textContent = `${countdown}s 后重发`
+      timer = setInterval(() => {
+        countdown -= 1
+        if (countdown <= 0) {
+          clearInterval(timer)
+          button.disabled = false
+          button.textContent = '发送验证码'
+          return
+        }
+        button.textContent = `${countdown}s 后重发`
+      }, 1000)
+    } catch (error) {
+      $('#ce-msg').style.color = '#ff8a8a'
+      $('#ce-msg').textContent = error.message
+    }
   })
   $('#ce-save').addEventListener('click', async () => {
     try {
@@ -899,6 +976,11 @@ function openChangeEmail(user) {
       })
       state.user = result.user
       localStorage.setItem('mh-user', JSON.stringify(result.user))
+      if (result.token) {
+        state.token = result.token
+        localStorage.setItem('mh-token', result.token)
+      }
+      clearInterval(timer)
       close()
       toast('邮箱已更换')
       await renderMe()

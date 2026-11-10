@@ -3,22 +3,25 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { db, getSetting, ROOT } from './db.mjs'
 import {
-  authOf, changeUserEmail, checkPasswordStrength, loginByEmail, publicUser, setUserPassword, updateProfile,
+  authOf, changeUserEmail, checkPasswordStrength, issueToken, loginByEmail, publicUser, revokeSessions, setUserPassword,
+  updateProfile, verifyPassword,
 } from './auth.mjs'
 import { OtpError, normalizeEmail, sendCode, verifyCode } from './otp.mjs'
-import { isDevMail } from './mailer.mjs'
 import {
-  decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, secureLink,
+  LINK_TTL, decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, secureLink,
 } from './entitlements.mjs'
 import { recordPlay } from './analytics.mjs'
 import { listTags, tagsOfDrama, dramaIdsByTag } from './tags.mjs'
 import {
-  CommerceError, createOrder, handleAlipayNotify, handleUsdtNotify, listOrders, markPaid, mockPay, paymentOptions, validateCoupon,
+  CommerceError, createOrder, handleAlipayNotify, listOrders, markPaid, mockPay, paymentOptions, validateCoupon,
   buildSimulatedAlipayNotify, syncAlipayOrder,
 } from './commerce.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
+
+/** 单次播放链接的最长有效期：覆盖整集时长，默认 2 小时（可用 MH_PLAY_TTL_MAX 调整）。 */
+const PLAY_TTL_MAX = Math.max(LINK_TTL, Math.min(4 * 3600, Number(process.env.MH_PLAY_TTL_MAX ?? 7200) || 7200))
 
 export function send(res, data, code = '0000', msg = 'Success', status = 200) {
   const body = JSON.stringify({ requestId: `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`, code, msg, data })
@@ -29,11 +32,11 @@ export function send(res, data, code = '0000', msg = 'Success', status = 200) {
 const fail = (res, code, msg, status = 400, extra = {}) => send(res, extra, code, msg, status)
 
 /** 播放签名放 Cookie：HLS 播放器请求分片时不带 query，但会自动带 Cookie。 */
-function setLinkCookies(res, link, ttl) {
-  res.setHeader('set-cookie', [
-    `mh_link=${link.sign}; Path=/; Max-Age=${ttl}; SameSite=Lax`,
-    `mh_exp=${link.expires}; Path=/; Max-Age=${ttl}; SameSite=Lax`,
-  ])
+function setLinkCookies(res, link, ttl, req) {
+  const proto = String(req?.headers['x-forwarded-proto'] ?? '').split(',')[0].trim().toLowerCase()
+  const secure = proto === 'https'
+  const flags = `; Path=/; Max-Age=${ttl}; SameSite=Lax; HttpOnly${secure ? '; Secure' : ''}`
+  res.setHeader('set-cookie', [`mh_link=${link.sign}${flags}`, `mh_exp=${link.expires}${flags}`])
 }
 
 function cardOf(drama, userId, context = {}) {
@@ -105,10 +108,8 @@ export async function handlePublic(pathname, url, req, res) {
    * 例外：常量、首页、登录、支付回调（渠道服务器直接调，没有用户 token）。
    */
   const OPEN_PATHS = new Set(['/api/constants', '/api/home', '/api/auth/login', '/api/auth/email/send', '/api/auth/email/login'])
-  const isOpen = OPEN_PATHS.has(pathname)
-    || pathname.startsWith('/api/notify/')
-    || pathname === '/api/pay/mock'
-    || pathname.startsWith('/api/pay/alipay-sim')
+  // 只有支付宝服务端回调是公开的（自带 RSA2 验签）；其余回调一律留在内网/进程内
+  const isOpen = OPEN_PATHS.has(pathname) || pathname === '/api/notify/alipay'
   if (!isOpen && !userId) {
     return fail(res, '0401', '请先登录后再浏览和播放', 401)
   }
@@ -137,7 +138,7 @@ export async function handlePublic(pathname, url, req, res) {
           ttlSeconds: 300,
           resendSeconds: 60,
           maxAttempts: 3,
-          devCode: process.env.MH_EMAIL_DEV === '1' && isDevMail(),
+          passwordLogin: true,
         },
       })
     }
@@ -245,12 +246,13 @@ export async function handlePublic(pathname, url, req, res) {
       if (!access.allow && access.trialSeconds > 0 && trialWanted) {
         // 试看：仍签发短时链接，但前端按 trialSeconds 截断（服务端记录审计）
         const trialHls = episode.hls_path ?? `/media/hls/${episode.id}/index.m3u8`
-        const trialLink = episode.hls_path ? secureLink(trialHls, 180) : { url: null, sign: null, expires: 0 }
-        if (episode.hls_path) setLinkCookies(res, trialLink, 180)
+        const ua = req.headers['user-agent'] ?? ''
+        const trialLink = episode.hls_path ? secureLink(trialHls, Math.min(120, LINK_TTL), ua) : { url: null, sign: null, expires: 0 }
+        if (episode.hls_path) setLinkCookies(res, trialLink, Math.min(120, LINK_TTL), req)
         recordPlay({ userId, dramaId, episodeId: episode.id, episodeNo: no, source: 'trial', ip: clientIp(req), ua: req.headers['user-agent'] })
         return send(res, {
           dramaId, title: drama.title, episode: { id: episode.id, no: episode.no, title: episode.title },
-          source: 'trial', hls: episode.hls_path, expiresIn: 180, trialSeconds: access.trialSeconds, danmu: [],
+          source: 'trial', hls: episode.hls_path, expiresIn: Math.min(120, LINK_TTL), trialSeconds: access.trialSeconds, danmu: [],
         })
       }
       if (!access.allow) {
@@ -264,15 +266,19 @@ export async function handlePublic(pathname, url, req, res) {
         }, '0402', access.reason === 'single_purchase_required' ? '该片需单独购买' : '需要开通会员', 402)
       }
       const hlsPath = episode.hls_path ?? null
-      const link = hlsPath ? secureLink(hlsPath, 600) : { url: null, sign: null, expires: 0 }
-      if (hlsPath) setLinkCookies(res, link, 600)
+      const ua = req.headers['user-agent'] ?? ''
+      // 有效期覆盖整集时长（否则 45 分钟一集在 5 分钟处断流），上限 MH_PLAY_TTL_MAX
+      const duration = Number(episode.duration ?? 0)
+      const playTtl = Math.min(PLAY_TTL_MAX, Math.max(LINK_TTL, duration > 0 ? duration + 300 : LINK_TTL))
+      const link = hlsPath ? secureLink(hlsPath, playTtl, ua) : { url: null, sign: null, expires: 0 }
+      if (hlsPath) setLinkCookies(res, link, playTtl, req)
       recordPlay({ userId, dramaId, episodeId: episode.id, episodeNo: no, source: 'play', ip: clientIp(req), ua: req.headers['user-agent'] })
       const danmu = all("SELECT time_ms, content FROM danmus WHERE episode_id = ? AND status = 'approved' ORDER BY time_ms", episode.id)
       return send(res, {
         dramaId, title: drama.title, episode: { id: episode.id, no: episode.no, title: episode.title },
         source: access.source,
         hls: hlsPath,
-        expiresIn: 600,
+        expiresIn: playTtl,
         trialSeconds: 0,
         danmu: danmu.map((row) => ({ time: row.time_ms, text: row.content })),
       })
@@ -352,21 +358,28 @@ export async function handlePublic(pathname, url, req, res) {
       return send(res, result)
     }
 
-    if (pathname === '/api/notify/usdt' && method === 'POST') {
-      const body = await readBody(req)
-      return send(res, handleUsdtNotify({
-        outTradeNo: body.outTradeNo, txid: body.txid, amount: body.amount, confirmations: body.confirmations,
-      }))
+    /* USDT 只走进程内链上监听（usdt-watch.mjs），不提供公网回调入口 */
+
+    /* 模拟支付：仅本地/联调可用（MH_ALLOW_SIM_PAY=1），且只能支付自己的订单 */
+    const simPayEnabled = process.env.MH_ALLOW_SIM_PAY === '1'
+    const ownOrder = (outTradeNo) => {
+      const row = one('SELECT id, user_id FROM orders WHERE out_trade_no = ?', String(outTradeNo ?? ''))
+      if (!row) return false
+      return Number(row.user_id) === Number(userId)
     }
 
     if (pathname === '/api/pay/mock' && method === 'POST') {
+      if (!simPayEnabled) return fail(res, '0404', '接口不存在', 404)
       const body = await readBody(req)
+      if (!ownOrder(body.outTradeNo)) return fail(res, '0403', '只能支付本人订单', 403)
       return send(res, mockPay(body.outTradeNo))
     }
 
     /* 支付宝模拟收银台：用真实 RSA2 签名通知 → 走同一套验签入账 */
     if (pathname.startsWith('/api/pay/alipay-sim') && method === 'POST') {
+      if (!simPayEnabled) return fail(res, '0404', '接口不存在', 404)
       const body = await readBody(req)
+      if (!ownOrder(body.outTradeNo)) return fail(res, '0403', '只能支付本人订单', 403)
       const { params } = buildSimulatedAlipayNotify(body.outTradeNo)
       const result = handleAlipayNotify(params, { simulator: true })
       return send(res, { ...result, simulated: true })
@@ -407,7 +420,7 @@ export async function handlePublic(pathname, url, req, res) {
       })
       return send(res, {
         email: result.email, expiresIn: result.expiresIn, resendAfter: result.resendAfter,
-        delivered: result.delivered, devCode: result.devCode,
+        delivered: result.delivered,
       })
     }
 
@@ -423,6 +436,20 @@ export async function handlePublic(pathname, url, req, res) {
       })
     }
 
+    // 邮箱 + 密码登录：已经设置过密码的用户在邮件通道异常时仍可登录
+    if (pathname === '/api/auth/email/password' && method === 'POST') {
+      const body = await readBody(req)
+      const email = normalizeEmail(body.email)
+      const user = one('SELECT * FROM users WHERE email = ?', email)
+      if (!user || !user.password_hash) return fail(res, '0401', '邮箱或密码不正确', 401)
+      if (!verifyPassword(String(body.password ?? ''), user.password_salt, user.password_hash)) {
+        return fail(res, '0401', '邮箱或密码不正确', 401)
+      }
+      if (user.status && user.status !== 'active') return fail(res, '0403', '账号已被停用', 403)
+      const result = loginByEmail(email)
+      return send(res, { token: result.token, expiresAt: result.expiresAt, created: false, user: publicUser(result.user) })
+    }
+
     // 手机号登录已下线（系统统一走邮箱验证码）
     if (pathname === '/api/auth/login' && method === 'POST') {
       return fail(res, '0410', '系统已改为邮箱验证码登录，请使用 /api/auth/email/send', 410)
@@ -436,7 +463,7 @@ export async function handlePublic(pathname, url, req, res) {
       const email = String(body.email ?? user.email).trim().toLowerCase()
       if (email !== user.email) return fail(res, '0403', '只能向注册邮箱发送验证码', 403)
       const result = await sendCode({ email, purpose: 'change_password', ip: clientIp(req), userAgent: req.headers['user-agent'] })
-      return send(res, { email: result.email, expiresIn: result.expiresIn, resendAfter: result.resendAfter, devCode: result.devCode })
+      return send(res, { email: result.email, expiresIn: result.expiresIn, resendAfter: result.resendAfter })
     }
 
     if (pathname === '/api/auth/password/change' && method === 'POST') {
@@ -450,7 +477,10 @@ export async function handlePublic(pathname, url, req, res) {
       if (!strength.ok) return fail(res, 'password_weak', strength.message, 400)
       verifyCode({ email: user.email, purpose: 'change_password', code: body.code })
       setUserPassword(userId, body.newPassword)
-      return send(res, { ok: true, message: '密码已更新，请牢记新密码' })
+      // 改密后吊销该账号此前签发的全部会话，避免旧 token 继续可用
+      revokeSessions(userId, 'user')
+      const fresh = issueToken(userId, 'user')
+      return send(res, { ok: true, message: '密码已更新，其他设备需重新登录', token: fresh.token, expiresAt: fresh.expiresAt })
     }
 
     /* ---------- 更换邮箱 ---------- */
@@ -460,7 +490,7 @@ export async function handlePublic(pathname, url, req, res) {
       const taken = one('SELECT id FROM users WHERE email = ? AND id != ?', newEmail, userId)
       if (taken) return fail(res, '0409', '该邮箱已被其他账号使用', 409)
       const result = await sendCode({ email: newEmail, purpose: 'change_email', ip: clientIp(req), userAgent: req.headers['user-agent'] })
-      return send(res, { email: result.email, expiresIn: result.expiresIn, resendAfter: result.resendAfter, devCode: result.devCode })
+      return send(res, { email: result.email, expiresIn: result.expiresIn, resendAfter: result.resendAfter })
     }
 
     if (pathname === '/api/auth/email/change' && method === 'POST') {
@@ -468,7 +498,9 @@ export async function handlePublic(pathname, url, req, res) {
       const newEmail = normalizeEmail(body.newEmail ?? body.email)
       verifyCode({ email: newEmail, purpose: 'change_email', code: body.code })
       const updated = changeUserEmail(userId, newEmail)
-      return send(res, { ok: true, user: publicUser(updated) })
+      revokeSessions(userId, 'user')
+      const fresh = issueToken(userId, 'user')
+      return send(res, { ok: true, user: publicUser(updated), token: fresh.token, expiresAt: fresh.expiresAt })
     }
 
     /* ---------- 个人中心 ---------- */
@@ -558,3 +590,4 @@ export async function handlePublic(pathname, url, req, res) {
 }
 
 export { markPaid }
+

@@ -10,6 +10,7 @@ import { join } from 'node:path'
 
 const dir = mkdtempSync(join(tmpdir(), 'mh-test-'))
 process.env.MH_DB = join(dir, 'test.db')
+process.env.MH_ADMIN_INIT_PASSWORD = 'admin123'
 process.env.MH_LINK_SECRET = 'test-link-secret'
 process.env.MH_SECRET = 'test-secret'
 
@@ -22,6 +23,10 @@ before(async () => {
   seedIfEmpty()
   dbModule.syncMenuCatalog()
   dbModule.migratePayChannels()
+  // 生产默认禁用模拟支付；测试显式打开
+  process.env.MH_ALLOW_SIM_PAY = '1'
+  dbModule.db.prepare("UPDATE pay_channels SET status = 'enabled', is_default = 1 WHERE channel_code = 'mock'").run()
+  dbModule.setSetting('pay', { ...dbModule.getSetting('pay', {}), mock: { enabled: true } })
   ent = await import('../server/entitlements.mjs')
   commerce = await import('../server/commerce.mjs')
   rbac = await import('../server/rbac.mjs')

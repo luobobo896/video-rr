@@ -39,13 +39,14 @@ Body 会被识别为 JSON 时（以 `{` 或 `[` 开头），占位值按 **JSON 
 
 - `优先级` 数字越小越先尝试；「置顶」按钮会把该通道设为 `当前最小值 - 10`
 - 每条通道记录 `最近测试`（时间/成功与否/错误原文），失败信息会显示在列表里
-- 全部通道停用 = 开发模式：验证码只写日志并在接口回显 `devCode`（配置 SMTP 后必须保证至少一条启用，否则真实用户收不到码）
+- 全部通道停用或全部失败 = **验证码发不出去**：此时 `POST /api/auth/email/send` 返回 `503 mail_not_configured`（无通道）或 `502 mail_failed`（通道都失败了），**不会**降级成本地回显验证码。上线前必须在后台至少配置一条可用通道并用「测试」按钮验证通过。
+- 唯一例外是本地自动化测试：`MH_OTP_TEST=1` 时跳过投递并把验证码放在响应的 `testCode` 字段。该变量只能在测试进程里设置，生产 `.env` 中没有它。
 
 ## 5. 接口
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/admin/api/email-channels` | 通道列表 + 预设 + 默认发件人 + 是否开发模式 |
+| GET | `/admin/api/email-channels` | 通道列表 + 预设 + 默认发件人 + `mailMissing`（是否缺可用通道） |
 | POST | `/admin/api/email-channels` | 新增/更新通道（`id` 存在则更新；口令/Key 留空表示不修改） |
 | DELETE | `/admin/api/email-channels/:id` | 删除通道 |
 | POST | `/admin/api/email-channels/:id/test` | 连接自检 + 发测试邮件（`{to}`） |
@@ -70,3 +71,4 @@ Body 会被识别为 JSON 时（以 `{` 或 `[` 开头），占位值按 **JSON 
 - 存储：`settings.email`（JSON），口令 / API Key / client_secret / refresh_token 全部 AES-256-GCM 加密（`v` 前缀密文），接口只返回 `passSet / keySet / refreshTokenSet` 布尔
 - 审计：`audit_logs` 记录 `admin.email.channel.save / remove / test / oauth`
 - 传输：SMTP 465 隐式 TLS 或 587 STARTTLS；`rejectUnauthorized` 在 STARTTLS 后按需保留（当前为兼容自签证书设为 false，接正式域名建议收紧）
+

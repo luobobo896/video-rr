@@ -7,6 +7,7 @@ import { join } from 'node:path'
 
 const dir = mkdtempSync(join(tmpdir(), 'mh-rbac-'))
 process.env.MH_DB = join(dir, 'test.db')
+process.env.MH_ADMIN_INIT_PASSWORD = 'admin123'
 process.env.MH_SECRET = 'test-secret'
 process.env.MH_CONFIG_KEYS = `1:${Buffer.alloc(32, 7).toString('base64')}`
 process.env.MH_CONFIG_KEY_VERSION = '1'

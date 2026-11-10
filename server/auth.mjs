@@ -33,6 +33,10 @@ export function verifyToken(token) {
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
     if (!payload.exp || payload.exp < Date.now()) return undefined
+    // 会话必须仍在库中：改密 / 封号 / 主动登出后旧 token 立即失效
+    const session = db.prepare('SELECT expires_at FROM sessions WHERE token = ?').get(token)
+    if (!session) return undefined
+    if (Number(session.expires_at) < Date.now()) return undefined
     return payload
   } catch { return undefined }
 }
@@ -47,6 +51,12 @@ export function issueToken(subjectId, role) {
 
 export function revokeToken(token) {
   db.prepare('DELETE FROM sessions WHERE token = ?').run(token)
+}
+
+/** 吊销某个账号的全部会话（改密 / 封号时调用）。 */
+export function revokeSessions(subjectId, role) {
+  if (role) db.prepare('DELETE FROM sessions WHERE subject_id = ? AND role = ?').run(subjectId, role)
+  else db.prepare('DELETE FROM sessions WHERE subject_id = ?').run(subjectId)
 }
 
 export function loginAdmin(username, password) {

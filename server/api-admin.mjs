@@ -1,6 +1,7 @@
 /** 后台接口：RBAC 保护 + 审计 + 内容/付费策略/套餐/优惠券/订单/退款/对账/权限。 */
+import { randomBytes } from 'node:crypto'
 import { db, getSetting, setSetting } from './db.mjs'
-import { authOf, loginAdmin } from './auth.mjs'
+import { authOf, checkPasswordStrength, hashPassword, issueToken, loginAdmin, revokeSessions, verifyPassword } from './auth.mjs'
 import { send } from './api-public.mjs'
 import { hasPermission, listAdmins, listAudit, listPermissionCatalog, listRoles, loadPrincipal, menuTree, roleMenuBinding, setAdminRoles, updateRoleMenus } from './rbac.mjs'
 import { audit } from './rbac.mjs'
@@ -11,18 +12,20 @@ import {
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
 import { policyOf } from './entitlements.mjs'
 import {
-  PRESETS, channelList, emailSettings, isDevMail, markTest, removeChannel, saveEmailSettings, upsertChannel as upsertMailChannel, verifyChannel,
+  PRESETS, channelList, emailSettings, mailUnavailable, markTest, removeChannel, saveEmailSettings, upsertChannel as upsertMailChannel, verifyChannel,
 } from './mail-channels.mjs'
 import { pollDeviceFlow, startDeviceFlow } from './mailer-oauth.mjs'
 import { analyticsReport } from './analytics.mjs'
 import { createTag, deleteTag, listTags, setDramaTags, tagsOfDrama, updateTag } from './tags.mjs'
-import { guardStats } from './ratelimit.mjs'
+import { clearLoginFailures, clientIpOf, guardStats, loginLockSeconds, noteLoginFailure } from './ratelimit.mjs'
+import { issueAssistCode } from './otp.mjs'
+import { usdtWatchStatus } from './usdt-watch.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
 const run = (sql, ...args) => db.prepare(sql).run(...args)
 
-const ipOf = (req) => (req.socket?.remoteAddress ?? '').replace('::ffff:', '')
+const ipOf = (req) => clientIpOf(req)
 const readBody = (req) => new Promise((resolve) => {
   let raw = ''
   req.on('data', (chunk) => { raw += chunk; if (raw.length > 2e6) req.destroy() })
@@ -31,6 +34,20 @@ const readBody = (req) => new Promise((resolve) => {
     try { resolve(JSON.parse(raw)) } catch { resolve({}) }
   })
 })
+
+const WEAK_ADMIN_PASSWORDS = new Set(['admin123', 'admin', '12345678', 'password', '123456789', 'qwerty123', 'admin1234'])
+const WEAK_ADMIN_PATTERN = /(password|qwerty|asdfgh|123456|654321|888888|abc123|iloveyou|letmein|welcome)/i
+
+/** 后台口令策略：>=12 位，含字母与数字，不得包含用户名，不得是常见弱口令。 */
+export function checkAdminPassword(password, username) {
+  const value = String(password ?? '')
+  if (value.length < 12) return { ok: false, message: '后台密码至少 12 位' }
+  if (!/[A-Za-z]/.test(value) || !/\d/.test(value)) return { ok: false, message: '后台密码需同时包含字母和数字' }
+  if (username && value.toLowerCase().includes(String(username).toLowerCase())) return { ok: false, message: '密码不能包含用户名' }
+  if (WEAK_ADMIN_PASSWORDS.has(value.toLowerCase()) || WEAK_ADMIN_PATTERN.test(value)) return { ok: false, message: '该密码过于常见，请更换' }
+  if (/^(.)\1+$/.test(value) || /(.)\1{5,}/.test(value) || new Set(value).size < 5) return { ok: false, message: '密码重复字符过多，请更换' }
+  return { ok: true }
+}
 
 const PERM = {
   login: null,
@@ -59,6 +76,7 @@ const PERM = {
   review: 'content.review',
   users: 'user.read',
   userManage: 'user.manage',
+  userAssist: 'user.login.assist',
   cs: 'cs.toolkit',
   roles: 'admin.read',
   rolesWrite: 'admin.write',
@@ -77,19 +95,42 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   const seg = pathname.replace('/admin/api/', '').split('/').filter(Boolean)
 
   if (pathname === '/admin/api/login' && method === 'POST') {
-    const result = loginAdmin(String(body.username ?? ''), String(body.password ?? ''))
+    const username = String(body.username ?? '').trim()
+    const ip = clientIpOf(req)
+    // 先校验口令：口令正确一律放行，锁定只惩罚错误尝试（避免攻击者锁死账号）
+    const result = loginAdmin(username, String(body.password ?? ''))
     if (!result) {
-      audit({ actorType: 'admin', actorName: body.username, action: 'admin.login.failed', ip: ipOf(req), result: 'denied' })
-      return send(res, {}, '0401', '账号或密码错误', 401)
+      const locked = await loginLockSeconds(username, ip)
+      if (locked > 0) {
+        audit({ actorType: 'admin', actorName: username, action: 'admin.login.locked', ip, result: 'denied' })
+        res.setHeader('retry-after', String(locked))
+        return send(res, { retryAfter: locked }, '0429', `登录失败次数过多，请 ${locked} 秒后再试`, 429)
+      }
+      const left = await noteLoginFailure(username, ip)
+      audit({ actorType: 'admin', actorName: username, action: 'admin.login.failed', ip, result: 'denied' })
+      return send(res, { attemptsLeft: left }, '0401',
+        left > 0 ? `账号或密码错误，还可尝试 ${left} 次` : '账号或密码错误，已锁定 10 分钟', 401)
     }
+    await clearLoginFailures(username, ip)
     const principal = loadPrincipal(Number(result.token ? JSON.parse(Buffer.from(result.token.split('.')[0], 'base64url').toString()).sub : 0))
     audit({ actorType: 'admin', actorId: principal?.admin?.id, actorName: principal?.admin?.username, action: 'admin.login', ip: ipOf(req) })
-    return send(res, { token: result.token, expiresAt: result.expiresAt, roles: principal?.roles?.map((role) => role.code) ?? [] })
+    return send(res, {
+      token: result.token, expiresAt: result.expiresAt,
+      roles: principal?.roles?.map((role) => role.code) ?? [],
+      mustChangePassword: Boolean(principal?.admin?.must_change_password),
+    })
   }
 
   const auth = authOf(req)
   const principal = auth?.role === 'admin' ? loadPrincipal(Number(auth.sub)) : undefined
   if (!principal) return send(res, {}, '0401', '需要管理员登录', 401)
+
+  // 强制改密：未改初始口令前，除「读自己」与「改密」外一律拒绝
+  if (principal.admin.must_change_password
+    && pathname !== '/admin/api/me'
+    && pathname !== '/admin/api/password') {
+    return send(res, { required: 'password_change' }, '0403', '请先修改初始密码', 403)
+  }
 
   const deny = (perm) => {
     audit({ actorId: principal.admin.id, actorName: principal.admin.username, action: 'rbac.denied', targetType: 'permission', targetId: perm, ip: ipOf(req), result: 'denied' })
@@ -107,11 +148,34 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
       admin: { id: principal.admin.id, username: principal.admin.username, displayName: principal.admin.display_name },
       roles: principal.roles.map((role) => ({ code: role.code, name: role.name })),
       permissions: [...principal.permissions],
+      mustChangePassword: Boolean(principal.admin.must_change_password),
     })
   }
 
-  if (pathname === '/admin/api/stats') {
-    if (!guard(PERM.stats)) return deny(PERM.stats)
+  /* ---------- 管理员自助改密（强口令，不启用 2FA） ---------- */
+  if (pathname === '/admin/api/password' && method === 'POST') {
+    const admin = one('SELECT * FROM admins WHERE id = ?', principal.admin.id)
+    if (!verifyPassword(String(body.oldPassword ?? ''), admin.salt, admin.password_hash)) {
+      log('admin.password.change', 'admin', admin.id, null, { ok: false, reason: 'old_password_wrong' })
+      return send(res, {}, '0401', '当前密码不正确', 401)
+    }
+    const next = String(body.newPassword ?? '')
+    const strength = checkAdminPassword(next, admin.username)
+    if (!strength.ok) return send(res, {}, 'password_weak', strength.message, 400)
+    if (verifyPassword(next, admin.salt, admin.password_hash)) {
+      return send(res, {}, 'password_same', '新密码不能与当前密码相同', 400)
+    }
+    const salt = randomBytes(8).toString('hex')
+    run("UPDATE admins SET password_hash = ?, salt = ?, must_change_password = 0, password_updated_at = datetime('now') WHERE id = ?",
+      hashPassword(next, salt), salt, admin.id)
+    log('admin.password.change', 'admin', admin.id, null, { ok: true })
+    // 改密后吊销该管理员全部旧会话，并下发一枚新 token（当前会话无缝续用）
+    revokeSessions(admin.id, 'admin')
+    const fresh = issueToken(admin.id, 'admin')
+    return send(res, { ok: true, message: '密码已更新，其他设备需重新登录', token: fresh.token, expiresAt: fresh.expiresAt })
+  }
+
+  if (pathname === '/admin/api/stats') {    if (!guard(PERM.stats)) return deny(PERM.stats)
     return send(res, {
       dramas: one('SELECT COUNT(*) AS n FROM dramas').n,
       episodes: one('SELECT COUNT(*) AS n FROM episodes').n,
@@ -121,7 +185,7 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
       pendingComments: one("SELECT COUNT(*) AS n FROM comments WHERE status = 'pending'").n,
       queue: queueState(),
       commerce: commerceStats(),
-      mailReady: !isDevMail(),
+      mailReady: !mailUnavailable(),
       pay: (() => {
         const pay = getSetting('pay', {})
         return { alipay: Boolean(pay.alipay?.enabled), usdt: Boolean(pay.usdt?.enabled), mock: Boolean(pay.mock?.enabled) }
@@ -485,7 +549,8 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   if (pathname === '/admin/api/users' && method === 'GET') {
     if (!guard(PERM.users)) return deny(PERM.users)
     return send(res, {
-      list: all(`SELECT u.*,
+      list: all(`SELECT u.id, u.email, u.nickname, u.avatar, u.birthday, u.gender, u.bio,
+        u.status, u.email_verified_at, u.created_at, u.last_login_at,
         (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS order_count,
         (SELECT COALESCE(SUM(amount_cny),0) FROM orders o WHERE o.user_id = u.id AND o.status IN ('paid','fulfilled')) AS paid_total,
         (SELECT datetime(valid_to) FROM subscriptions s WHERE s.user_id = u.id AND s.status = 'active' ORDER BY datetime(valid_to) DESC LIMIT 1) AS vip_until
@@ -497,6 +562,16 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     run('UPDATE users SET status = ? WHERE id = ?', body.status === 'banned' ? 'banned' : 'active', Number(seg[1]))
     log('user.status.update', 'user', seg[1], null, { status: body.status }, body.reason)
     return send(res, { ok: true })
+  }
+  // 邮件通道异常时的运维兜底：给指定用户签发一次性登录码（明文只返回这一次，写审计）
+  if (seg[0] === 'users' && seg[1] && seg[2] === 'login-code' && method === 'POST') {
+    if (!guard(PERM.userAssist)) return deny(PERM.userAssist)
+    const user = one('SELECT * FROM users WHERE id = ?', Number(seg[1]))
+    if (!user) return send(res, {}, '0404', '用户不存在', 404)
+    if (!user.email) return send(res, {}, '0400', '该用户未绑定邮箱', 400)
+    const result = issueAssistCode(user.email, { operator: principal.admin.username })
+    log('user.login.code.issue', 'user', user.id, null, { email: result.email, expiresIn: result.expiresIn }, body.reason)
+    return send(res, { ...result, nickname: user.nickname, userId: user.id })
   }
   if (pathname === '/admin/api/cs/grant' && method === 'POST') {
     if (!guard(PERM.cs)) return deny(PERM.cs)
@@ -624,7 +699,7 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
       presets: PRESETS,
       from: settings.from ?? '',
       fromName: settings.fromName ?? '影巢',
-      devMode: isDevMail(),
+      mailMissing: mailUnavailable(),
     })
   }
 
@@ -724,7 +799,7 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   if (pathname === '/admin/api/security' && method === 'GET') {
     if (!guard(PERM.audit)) return deny(PERM.audit)
     const events = all("SELECT * FROM security_events ORDER BY id DESC LIMIT ?", Math.min(200, Number(url.searchParams.get('limit') ?? 50)))
-    return send(res, { ...guardStats(), events })
+    return send(res, { ...guardStats(), usdtWatch: usdtWatchStatus(), events })
   }
 
   /* ---------------- 标签管理 ---------------- */
@@ -798,6 +873,8 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
 
   return send(res, {}, '0404', '接口不存在', 404)
 }
+
+
 
 
 

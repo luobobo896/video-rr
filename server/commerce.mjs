@@ -250,15 +250,19 @@ export function mockPay(outTradeNo) {
   return markPaid({ outTradeNo, channel: 'mock', channelTxnId: `MOCK-${outTradeNo}`, raw: { mock: true } })
 }
 
-/* --- 支付宝（RSA2；未配置密钥时明确报错） --- */
-export function handleUsdtNotify({ outTradeNo, txid, amount, confirmations }) {
-  const config = channelConfig(resolveByCode('usdt') ?? {})
+/* --- USDT：只由进程内链上监听调用（无公网回调入口） --- */
+export function handleUsdtNotify({ outTradeNo, txid, amount, confirmations, channelId }) {
+  const row = channelId ? one('SELECT * FROM pay_channels WHERE id = ?', Number(channelId)) : resolveByCode('usdt')
+  const config = channelConfig(row ?? {})
   const minConf = Number(config.minConfirmations ?? 19)
   if (!txid) throw new CommerceError('txid_missing', '缺少链上 txid')
   const order = one('SELECT * FROM orders WHERE out_trade_no = ?', String(outTradeNo))
   if (!order) throw new CommerceError('order_not_found', '订单不存在', 404)
+  if (order.status === 'closed') throw new CommerceError('order_closed', '订单已超时关闭，需人工处理', 409)
   const expected = Number(order.usdt_amount ?? 0)
-  if (amount !== undefined && expected > 0 && Math.abs(Number(amount) - expected) > Math.max(0.01, expected * 0.005)) {
+  if (!(Number(amount) > 0)) throw new CommerceError('amount_required', '缺少链上转账金额')
+  // 容差与监听端保持一致（0.01 USDT），避免"监听匹配成功但入账被拒"
+  if (expected > 0 && Math.abs(Number(amount) - expected) > 0.01) {
     throw new CommerceError('amount_mismatch', `USDT 金额不符：应 ${expected}，实 ${amount}`)
   }
   run('UPDATE orders SET usdt_confirmations = ? WHERE id = ?', Number(confirmations ?? 0), order.id)

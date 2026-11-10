@@ -10,7 +10,7 @@
  */
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto'
 import { db } from './db.mjs'
-import { isDevMail, sendMail } from './mailer.mjs'
+import { sendMail } from './mailer.mjs'
 
 const SECRET = process.env.MH_OTP_SECRET ?? process.env.MH_SECRET ?? 'mh-otp-dev-secret'
 const CODE_TTL_SECONDS = 300          // 5 分钟
@@ -52,12 +52,16 @@ export function normalizeEmail(input) {
 }
 
 export const hashCode = (email, code) => createHmac('sha256', SECRET).update(`${email}:${code}`).digest('hex')
+/** 发送失败回滚：删除本次发送记录，避免"投递失败也吃冷却/日限"。 */
+function rollbackSendLog(email, purpose) {
+  run("DELETE FROM email_send_log WHERE id = (SELECT id FROM email_send_log WHERE email = ? AND purpose = ? ORDER BY id DESC LIMIT 1)", email, purpose)
+}
 const nowSql = () => new Date().toISOString().slice(0, 19).replace('T', ' ')
 const secondsBetween = (a, b) => Math.round((new Date(`${b}Z`).getTime() - new Date(`${a}Z`).getTime()) / 1000)
 
 /** 发送前限流检查，抛 OtpError 带上 retryAfter。 */
 export function checkSendLimits(email, ip) {
-  const last = one('SELECT * FROM email_send_log WHERE email = ? ORDER BY id DESC LIMIT 1', email)
+  const last = one("SELECT * FROM email_send_log WHERE email = ? AND purpose <> 'assist' ORDER BY id DESC LIMIT 1", email)
   if (last) {
     const elapsed = secondsBetween(last.created_at, nowSql())
     if (elapsed < RESEND_COOLDOWN_SECONDS) {
@@ -67,7 +71,7 @@ export function checkSendLimits(email, ip) {
     }
   }
   const today = nowSql().slice(0, 10)
-  const todayCount = one('SELECT COUNT(*) AS n FROM email_send_log WHERE email = ? AND sent_date = ?', email, today).n
+  const todayCount = one("SELECT COUNT(*) AS n FROM email_send_log WHERE email = ? AND sent_date = ? AND purpose <> 'assist'", email, today).n
   if (todayCount >= DAILY_LIMIT_PER_EMAIL) {
     throw new OtpError('daily_limit', `该邮箱今日发送已达上限（${DAILY_LIMIT_PER_EMAIL} 次），请明天再试`, 429, {
       dailyLimit: DAILY_LIMIT_PER_EMAIL,
@@ -75,7 +79,7 @@ export function checkSendLimits(email, ip) {
   }
   if (ip) {
     const hourAgo = new Date(Date.now() - 3600_000).toISOString().slice(0, 19).replace('T', ' ')
-    const ipCount = one('SELECT COUNT(*) AS n FROM email_send_log WHERE ip = ? AND created_at >= ?', ip, hourAgo).n
+    const ipCount = one("SELECT COUNT(*) AS n FROM email_send_log WHERE ip = ? AND created_at >= ? AND purpose <> 'assist'", ip, hourAgo).n
     if (ipCount >= HOURLY_LIMIT_PER_IP) {
       throw new OtpError('ip_limit', '当前网络发送过于频繁，请稍后再试', 429)
     }
@@ -119,24 +123,80 @@ export async function sendCode({ email: rawEmail, purpose = 'login', ip, userAge
     '—— 影巢',
   ].join('\r\n')
 
+  // 单元测试钩子：只有显式设置 MH_OTP_TEST=1 时把明文码带回（生产环境不设置该变量）
+  const testHook = process.env.MH_OTP_TEST === '1'
+
   let delivered = false
-  try {
-    const result = await sendMail({ to: email, subject: subjectMap[purpose], text })
-    delivered = result.delivered
-  } catch (error) {
-    console.error('[otp] 邮件发送失败', email, error.message)
-    throw new OtpError('mail_failed', '验证码邮件发送失败，请稍后重试', 502)
+  if (testHook) {
+    delivered = true
+  } else {
+    try {
+      const result = await sendMail({ to: email, subject: subjectMap[purpose], text })
+      delivered = result.delivered
+    } catch (error) {
+      console.error('[otp] 邮件发送失败', email, error.message)
+      run("UPDATE email_codes SET consumed_at = datetime('now') WHERE email = ? AND purpose = ? AND consumed_at IS NULL", email, purpose)
+      rollbackSendLog(email, purpose)
+      throw new OtpError('mail_failed', '验证码邮件发送失败，请稍后重试', 502)
+    }
   }
 
-  return {
+  // 没有任何可用邮件通道：验证码不投递也不回显，直接失败（后台可代发登录码）
+  if (!delivered) {
+    run("UPDATE email_codes SET consumed_at = datetime('now') WHERE email = ? AND purpose = ? AND consumed_at IS NULL", email, purpose)
+    rollbackSendLog(email, purpose)
+    throw new OtpError('mail_not_configured', '邮件通道尚未配置完成，暂时无法发送验证码，请联系客服处理', 503)
+  }
+
+  const payload = {
     email,
     purpose,
     expiresIn: CODE_TTL_SECONDS,
     resendAfter: RESEND_COOLDOWN_SECONDS,
     delivered,
-    // 只有「显式开发模式 + 未配置 SMTP」才回显验证码；一旦配好发信，验证码只进邮箱
-    devCode: process.env.MH_EMAIL_DEV === '1' && isDevMail() ? code : undefined,
   }
+  if (testHook) payload.testCode = code
+  return payload
+}
+
+/**
+ * 后台代发登录码（邮件通道异常时的运维兜底）：
+ * 不受发信冷却限制，但同样 5 分钟过期、单次使用、3 次尝试上限，并把操作人写进 user_agent 便于审计。
+ * 明文只在这一次调用里返回给管理员，服务端只存哈希。
+ */
+export const ASSIST_HOURLY_LIMIT = 20
+export const ASSIST_COOLDOWN_SECONDS = 60
+
+export function issueAssistCode(rawEmail, { operator = 'admin' } = {}) {
+  const email = normalizeEmail(rawEmail)
+  const op = String(operator ?? 'admin').slice(0, 40)
+
+  // 同操作人配额：防止内鬼无限签码接管账号
+  const hourAgo = new Date(Date.now() - 3600_000).toISOString().slice(0, 19).replace('T', ' ')
+  const issued = one("SELECT COUNT(*) AS n FROM email_send_log WHERE purpose = 'assist' AND ip = ? AND created_at >= ?", `assist:${op}`, hourAgo).n
+  if (issued >= ASSIST_HOURLY_LIMIT) {
+    throw new OtpError('assist_limit', `该操作人每小时最多代发 ${ASSIST_HOURLY_LIMIT} 次`, 429, { limit: ASSIST_HOURLY_LIMIT })
+  }
+  // 同邮箱 60 秒冷却：避免对同一用户连续签码
+  const last = one("SELECT created_at FROM email_send_log WHERE email = ? AND purpose = 'assist' ORDER BY id DESC LIMIT 1", email)
+  if (last) {
+    const elapsed = secondsBetween(last.created_at, nowSql())
+    if (elapsed < ASSIST_COOLDOWN_SECONDS) {
+      throw new OtpError('send_too_frequent', `该邮箱刚刚代发过，请 ${ASSIST_COOLDOWN_SECONDS - elapsed} 秒后再试`, 429, {
+        retryAfter: ASSIST_COOLDOWN_SECONDS - elapsed,
+      })
+    }
+  }
+
+  const code = String(randomInt(0, 1_000_000)).padStart(OTP_RULES.codeLength, '0')
+  const expiresAt = new Date(Date.now() + CODE_TTL_SECONDS * 1000).toISOString().slice(0, 19).replace('T', ' ')
+
+  run("UPDATE email_codes SET consumed_at = datetime('now') WHERE email = ? AND purpose = 'login' AND consumed_at IS NULL", email)
+  run(`INSERT INTO email_codes (email, purpose, code_hash, expires_at, ip, user_agent)
+       VALUES (?, 'login', ?, ?, NULL, ?)`, email, hashCode(email, code), expiresAt, `admin-assist:${op}`)
+  run("INSERT INTO email_send_log (email, purpose, ip, sent_date) VALUES (?, 'assist', ?, ?)", email, `assist:${op}`, nowSql().slice(0, 10))
+
+  return { email, code, expiresIn: CODE_TTL_SECONDS, maxAttempts: MAX_ATTEMPTS, operator: op }
 }
 
 /**

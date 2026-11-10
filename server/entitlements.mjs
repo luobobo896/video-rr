@@ -4,7 +4,7 @@
  * 判定顺序（固定）：单片所有权 > 订阅 > 首集/免费库 > 试看 > 拒绝
  * 所有客户端（C 端/客服工具/接口）只认这里的结果，前端不做权限判断。
  */
-import { createHash, createHmac } from 'node:crypto'
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { db, getSetting } from './db.mjs'
 
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -159,20 +159,51 @@ export function entitlementsOf(userId) {
 
 const linkSecret = () => getSetting('site', {}).linkSecret ?? 'dev-link-secret'
 
-/** base64url(md5(expires + uri + secret))，与 nginx secure_link_md5 对应。 */
-export function secureLink(uri, expiresInSeconds = 600) {
-  const expires = Math.floor(Date.now() / 1000) + expiresInSeconds
-  const digest = createHash('md5').update(`${expires}${uri}${linkSecret()}`).digest()
-  const sign = digest.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-  return { expires, sign, url: `${uri}?sign=${sign}&expires=${expires}` }
+/** 播放链接有效期（秒）：默认 5 分钟，可用 MH_LINK_TTL 覆盖（60–1800）。 */
+export const LINK_TTL = Math.min(1800, Math.max(60, Number(process.env.MH_LINK_TTL ?? 300) || 300))
+
+/**
+ * UA 指纹：同一链接只允许签发时的浏览器使用，防止链接被复制到别处/脚本盗链。
+ * 只取 UA 的哈希前 16 位进签名，不改 Cookie 结构。
+ */
+export function uaFingerprint(ua) {
+  const text = String(ua ?? '').trim().toLowerCase()
+  if (!text) return 'noua'
+  return createHash('sha256').update(text).digest('hex').slice(0, 16)
 }
 
-export function verifyLink(uri, sign, expires) {
+/**
+ * 签名作用域：HLS 是 master → <rendition>/index.m3u8 → seg_%03d.ts 的多层相对路径，
+ * 只签单个 URI 会让分片全部 403。这里统一把 /media/hls/<episodeId>/ 作为作用域，
+ * 同一集的所有播放列表与分片共用一次签名。
+ */
+export function linkScope(uri) {
+  const text = String(uri ?? '')
+  const match = text.match(/^(\/media\/hls\/[^/?#]+\/)/)
+  return match ? match[1] : text
+}
+
+/**
+ * base64url(md5(expires + scope + ua + secret))。
+ * scope 为 /media/hls/<episodeId>/ 时，该目录下所有文件通用；
+ * 其他路径退化为精确匹配。
+ */
+export function secureLink(uri, expiresInSeconds = LINK_TTL, ua = '') {
+  const scope = linkScope(uri)
+  const expires = Math.floor(Date.now() / 1000) + expiresInSeconds
+  const digest = createHash('md5').update(`${expires}${scope}${uaFingerprint(ua)}${linkSecret()}`).digest()
+  const sign = digest.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return { expires, sign, scope, url: `${uri}?sign=${sign}&expires=${expires}` }
+}
+
+export function verifyLink(uri, sign, expires, ua = '') {
   if (!sign || !expires) return false
   if (Number(expires) < Math.floor(Date.now() / 1000)) return false
-  const digest = createHash('md5').update(`${expires}${uri}${linkSecret()}`).digest()
+  const digest = createHash('md5').update(`${expires}${linkScope(uri)}${uaFingerprint(ua)}${linkSecret()}`).digest()
   const expected = digest.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-  return expected === sign
+  const left = Buffer.from(expected)
+  const right = Buffer.from(String(sign))
+  return left.length === right.length && timingSafeEqual(left, right)
 }
 
 /** 设备/用户级 HMAC 令牌（可选，防转发）。 */

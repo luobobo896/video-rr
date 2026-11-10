@@ -11,11 +11,21 @@
   <div id="login" class="login">
     <form class="login-card" id="login-form">
       <h1>影巢 · 运营后台</h1>
-      <p>内容 / 运营 / 审核 / 转码 / 直播</p>
-      <label>账号<input id="login-user" value="admin" autocomplete="username" /></label>
-      <label>密码<input id="login-pass" type="password" value="admin123" autocomplete="current-password" /></label>
+      <p>内容 / 订阅 / 订单 / 运营 / 风控</p>
+      <label>账号<input id="login-user" autocomplete="username" placeholder="管理员账号" /></label>
+      <label>密码<input id="login-pass" type="password" autocomplete="current-password" placeholder="请输入密码" /></label>
       <button type="submit">登录</button>
       <div class="login-tip" id="login-tip"></div>
+    </form>
+
+    <form class="login-card hidden" id="pass-form">
+      <h1>设置新密码</h1>
+      <p>后台强制使用强口令（≥12 位，含字母与数字，不含用户名）</p>
+      <label>当前密码<input id="pass-old" type="password" autocomplete="current-password" /></label>
+      <label>新密码<input id="pass-new" type="password" autocomplete="new-password" /></label>
+      <label>确认新密码<input id="pass-confirm" type="password" autocomplete="new-password" /></label>
+      <button type="submit">保存并进入后台</button>
+      <div class="login-tip" id="pass-tip"></div>
     </form>
   </div>
 
@@ -25,6 +35,7 @@
       <nav id="nav"></nav>
       <div class="side-foot">
         <a href="/" target="_blank">打开 C 端 ↗</a>
+        <button id="change-pass">修改密码</button>
         <button id="logout">退出登录</button>
       </div>
     </aside>

@@ -8,6 +8,7 @@ import { join } from 'node:path'
 
 const dir = mkdtempSync(join(tmpdir(), 'mh-channels-'))
 process.env.MH_DB = join(dir, 'test.db')
+process.env.MH_ADMIN_INIT_PASSWORD = 'admin123'
 process.env.MH_SECRET = 'test-secret'
 
 let db, channels, transport, echo, echoPort

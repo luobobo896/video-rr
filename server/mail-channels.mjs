@@ -280,7 +280,7 @@ async function deliverWith(rt, message) {
   return smtpDeliver({ ...rt.smtp, from: rt.from || rt.smtp.user, fromName: rt.fromName }, message, { mode: rt.smtp.authMode })
 }
 
-export function isDevMail() {
+export function mailUnavailable() {
   const channels = channelList().filter((channel) => channel.enabled && channel.type !== 'dev')
   return channels.length === 0
 }
@@ -294,8 +294,8 @@ export async function sendMail(message) {
     .sort((a, b) => a.priority - b.priority)
 
   if (ordered.length === 0) {
-    console.log(`[mail:dev] to=${message.to} subject=${message.subject}\n${message.text}`)
-    return { delivered: false, dev: true, channel: 'dev' }
+    console.warn(`[mail:no-channel] to=${message.to} subject=${message.subject}（未配置可用通道，邮件未投递）`)
+    return { delivered: false, reason: 'no_channel' }
   }
 
   const failures = []
@@ -351,3 +351,5 @@ export async function verifyChannel(id, { sendTo } = {}) {
 export function defaultEmailSettings() {
   return { channels: [], from: '', fromName: '影巢', strict: false }
 }
+
+

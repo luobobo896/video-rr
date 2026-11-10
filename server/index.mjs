@@ -7,9 +7,9 @@
  *   /media/hls/*HLS 切片：必须带 sign+expires（与 nginx secure_link 同规则）
  */
 import { createServer } from 'node:http'
-import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
-import { extname, join, normalize, resolve } from 'node:path'
-import { db, seedIfEmpty, ROOT, ensureSettings, ensureUserSchema, migratePayChannels, syncMenuCatalog } from './db.mjs'
+import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { extname, join, normalize, resolve, sep } from 'node:path'
+import { db, seedIfEmpty, ROOT, ensureSettings, ensurePaySafety, ensureUserSchema, ensureAdminSchema, ensureAdminCredentials, ensureLinkSecret, migratePayChannels, syncMenuCatalog } from './db.mjs'
 import { cleanupCodes } from './otp.mjs'
 import { handlePublic } from './api-public.mjs'
 import { handleAdmin } from './api-admin.mjs'
@@ -17,13 +17,20 @@ import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
 import { verifyLink } from './entitlements.mjs'
 import { closeExpiredOrders } from './commerce.mjs'
 import { inspect, sweep } from './ratelimit.mjs'
+import { connectRedis, redisStatus } from './redis.mjs'
+import { scanOnce } from './usdt-watch.mjs'
 
 mkdirSync(UPLOAD_DIR, { recursive: true })
 mkdirSync(HLS_DIR, { recursive: true })
 
+ensureAdminSchema()      // 老库先补列，避免 seed 插入强制改密标记时缺列
 const seed = seedIfEmpty()
 ensureUserSchema()
+ensureAdminSchema()
 ensureSettings()
+ensureAdminCredentials()   // 老库弱口令轮换（与 seed 解耦）
+ensureLinkSecret()         // 播放签名密钥自检
+ensurePaySafety()          // 模拟支付渠道默认关闭 + USDT 确认数口径统一
 syncMenuCatalog()
 const channelMigration = migratePayChannels()
 const PORT = Number(process.env.PORT ?? 8787)
@@ -42,16 +49,33 @@ const MIME = {
 /** 大文件上传：流式落地（不把整个视频读进内存）。 */
 function streamToUpload(req) {
   const temp = join(UPLOAD_DIR, `upload-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.part`)
+  const limit = Number(process.env.MH_UPLOAD_MAX_BYTES ?? 2 * 1024 * 1024 * 1024)
   return new Promise((resolvePromise, reject) => {
-    const stream = createReadStream ? undefined : undefined
-    void stream
-    const chunks = []
+    const out = createWriteStream(temp)
     let size = 0
-    req.on('data', (chunk) => { chunks.push(chunk); size += chunk.length; if (size > 2 * 1024 * 1024 * 1024) req.destroy() })
-    req.on('end', () => {
-      try { writeFileSync(temp, Buffer.concat(chunks)); resolvePromise({ path: temp, size }) } catch (error) { reject(error) }
+    let failed = false
+    const cleanup = (error) => {
+      if (failed) return
+      failed = true
+      out.destroy()
+      try { unlinkSync(temp) } catch { /* 临时文件可能还没创建 */ }
+      reject(error)
+    }
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        req.destroy()
+        cleanup(Object.assign(new Error('文件超出上传上限'), { status: 413 }))
+      }
     })
-    req.on('error', reject)
+    req.pipe(out)
+    out.on('error', cleanup)
+    req.on('error', cleanup)
+    out.on('finish', () => {
+      if (failed) return
+      if (!size) return cleanup(Object.assign(new Error('上传内容为空'), { status: 400 }))
+      resolvePromise({ path: temp, size })
+    })
   })
 }
 
@@ -180,7 +204,7 @@ const server = createServer(async (req, res) => {
 
   try {
     // 反爬与限流（UA 黑名单 / 滑动窗口限流 / 内容枚举探测）
-    const patrol = inspect(req, pathname, req.method ?? 'GET')
+    const patrol = await inspect(req, pathname, req.method ?? 'GET')
     if (patrol.blocked) {
       const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
       if (patrol.retryAfter) headers['retry-after'] = String(patrol.retryAfter)
@@ -199,7 +223,8 @@ const server = createServer(async (req, res) => {
       }))
       const sign = url.searchParams.get('sign') ?? cookies.mh_link
       const expires = url.searchParams.get('expires') ?? cookies.mh_exp
-      const ok = ALLOW_UNSIGNED || verifyLink(mediaPath, sign, expires)
+      const ua = String(req.headers['user-agent'] ?? '')
+      const ok = ALLOW_UNSIGNED || verifyLink(mediaPath, sign, expires, ua)
       res.writeHead(ok ? 204 : 403, { 'cache-control': 'no-store' })
       res.end()
       return
@@ -212,14 +237,21 @@ const server = createServer(async (req, res) => {
       }))
       const sign = url.searchParams.get('sign') ?? cookies.mh_link
       const expires = url.searchParams.get('expires') ?? cookies.mh_exp
-      if (!ALLOW_UNSIGNED && !verifyLink(pathname, sign, expires)) {
+      if (!ALLOW_UNSIGNED && !verifyLink(pathname, sign, expires, String(req.headers['user-agent'] ?? ''))) {
         res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
         res.end('403 播放链接无效或已过期')
         return
       }
-      const filePath = join(HLS_DIR, pathname.replace('/media/hls/', ''))
+      const relative = decodeURIComponent(pathname.replace('/media/hls/', ''))
+      const filePath = resolve(HLS_DIR, relative)
+      // 归一化后再校验前缀，堵住 ..%2f 之类的穿越（签名本身不覆盖路径语义）
+      if (filePath !== resolve(HLS_DIR) && !filePath.startsWith(resolve(HLS_DIR) + sep)) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('403 非法路径')
+        return
+      }
       if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
-      return serveFileWithRange(req, res, filePath, 'private, max-age=600')
+      return serveFileWithRange(req, res, filePath, 'private, max-age=60')
     }
 
     if (pathname === '/robots.txt') {
@@ -236,9 +268,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname === '/media/uploads' || pathname.startsWith('/media/uploads/')) {
-      const filePath = join(UPLOAD_DIR, pathname.replace('/media/uploads/', ''))
-      if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
-      return serveFileWithRange(req, res, filePath)
+      // 源片（mp4）永远不直出：播放一律走 HLS + 签名，避免付费墙被整片拖走
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      res.end('403 源文件不对外提供')
+      return
     }
 
     if (pathname === '/media/placeholder.svg') {
@@ -323,6 +356,18 @@ setInterval(() => {
   } catch (error) { console.error('[otp-cleanup]', error) }
 }, 10 * 60_000).unref()
 
+// 每 60 秒扫一次 TRC20 到账（未配置 usdt 收款地址时自动跳过）
+setInterval(() => {
+  scanOnce().catch((error) => console.error('[usdt-watch]', error.message))
+}, 60_000).unref()
+
+connectRedis().catch(() => {})
+// 复位上次进程中断的转码任务
+{
+  const stuck = db.prepare("UPDATE episodes SET status = 'pending', progress = 0 WHERE status IN ('transcoding', 'queued')").run()
+  if (stuck.changes) console.log(`[media] 复位 ${stuck.changes} 个中断的转码任务`)
+}
+
 server.listen(PORT, '127.0.0.1', () => {
   const stats = {
     dramas: db.prepare('SELECT COUNT(*) AS n FROM dramas').get().n,
@@ -331,7 +376,20 @@ server.listen(PORT, '127.0.0.1', () => {
   }
   console.log('影巢已启动（无直播模块）')
   console.log(`  C 端      http://127.0.0.1:${PORT}/`)
-  console.log(`  后台      http://127.0.0.1:${PORT}/admin   （admin / admin123，另含 ops01/fin01/cs01）`)
+  console.log(`  后台      http://127.0.0.1:${PORT}/admin   （账号见部署生成的管理员凭据文件）`)
   console.log(`  数据库    ${seed.seeded ? '已按种子初始化' : '沿用现有'}：${stats.dramas} 部剧 / ${stats.episodes} 集 / ${stats.plans} 个套餐`)
+  const rd = redisStatus()
+  console.log(`  限流存储  ${rd.connected ? `Redis ${rd.url}` : '进程内内存（未连接 Redis）'}`)
+  const debugFlags = ['MH_ALLOW_UNSIGNED', 'MH_OTP_TEST', 'MH_ALLOW_SIM_PAY', 'MH_ADMIN_INIT_PASSWORD', 'MH_SKIP_ADMIN_ROTATION']
+    .filter((name) => process.env[name])
+  if (debugFlags.length > 0) {
+    console.warn(`  ⚠ 调试验证开关已开启：${debugFlags.join(', ')} —— 正式环境必须移除`)
+  }
+  const weakSecrets = ['MH_SECRET', 'MH_OTP_SECRET']
+    .filter((name) => String(process.env[name] ?? '').length < 32)
+  if (weakSecrets.length > 0) {
+    console.warn(`  ⚠ 密钥过短或缺失：${weakSecrets.join(', ')}（建议 ≥32 位随机值）`)
+  }
 })
+
 

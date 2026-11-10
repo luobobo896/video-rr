@@ -12,13 +12,37 @@ APP_PORT=8787
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
+log "0/7 备份数据库"
+if [ -f "$APP/storage/app.db" ]; then
+  BK="$APP/storage/backup/app.db.$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$APP/storage/backup"
+  cp -a "$APP/storage/app.db" "$BK"
+  [ -f "$APP/storage/app.db-wal" ] && cp -a "$APP/storage/app.db-wal" "$BK-wal"
+  echo "已备份：$BK"
+  ls -1t "$APP"/storage/backup/app.db.* 2>/dev/null | tail -n +11 | xargs -r rm -f
+fi
+
 log "1/7 依赖检查"
 mkdir -p "$APP/storage/hls" "$APP/storage/uploads" "$APP/storage/images"
 command -v ffmpeg >/dev/null || { echo "缺少 ffmpeg"; exit 1; }
 command -v node >/dev/null || { echo "缺少 node >=22.5（需要 node:sqlite）"; exit 1; }
 node -e "require('node:sqlite')" 2>/dev/null || { echo "node 版本过低：$(node -v)"; exit 1; }
 
-log "2/7 生成 .env（含播放签名密钥）"
+# Redis：限流滑动窗口。未安装则装上并只监听回环；装不上也不阻塞（服务自动降级为进程内内存）
+if command -v redis-server >/dev/null; then
+  systemctl enable --now redis-server >/dev/null 2>&1 || true
+  echo "Redis 已启用：$(redis-cli ping 2>/dev/null || echo '未响应')"
+else
+  echo "未安装 redis-server，尝试安装……"
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server >/dev/null 2>&1; then
+    systemctl enable --now redis-server >/dev/null 2>&1 || true
+    echo "Redis 安装完成：$(redis-cli ping 2>/dev/null || echo '未响应')"
+  else
+    echo "警告：Redis 安装失败，限流将退化为单进程内存（多实例部署不可用）"
+  fi
+fi
+
+log "2/7 生成 .env（播放签名 / 限流 / 链上监听）"
 if [ ! -f "$APP/.env" ]; then
   SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-40)
   LINK=$(head -c 24 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-32)
@@ -44,21 +68,27 @@ if ! grep -q '^MH_OTP_SECRET=' "$APP/.env"; then
   OTP=$(head -c 24 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-32)
   printf 'MH_OTP_SECRET=%s\n' "$OTP" >> "$APP/.env"
 fi
-# 邮箱验证码：配置 SMTP 后删掉 MH_EMAIL_DEV=1，验证码就只发邮件、不再回显
-if ! grep -q '^MH_EMAIL_DEV=' "$APP/.env"; then
-  cat >> "$APP/.env" <<'EOF'
-# ---- 邮件（填入后删除下面一行 MH_EMAIL_DEV，验证码将只发邮件）----
-MH_EMAIL_DEV=1
-#MH_SMTP_HOST=smtp.example.com
-#MH_SMTP_PORT=465
-#MH_SMTP_SECURE=1
-#MH_SMTP_USER=no-reply@example.com
-#MH_SMTP_PASS=
-#MH_SMTP_FROM=no-reply@example.com
-#MH_SMTP_FROM_NAME=影巢
-EOF
-  chmod 600 "$APP/.env"
+if ! grep -q '^MH_REDIS_URL=' "$APP/.env"; then
+  printf 'MH_REDIS_URL=redis://127.0.0.1:6379/0\n' >> "$APP/.env"
 fi
+if ! grep -q '^MH_LINK_TTL=' "$APP/.env"; then
+  printf '# 播放地址签名有效期（秒）；绑定 UA 指纹，换 UA 即失效\nMH_LINK_TTL=300\n' >> "$APP/.env"
+fi
+if ! grep -q '^MH_TRON_API_KEY=' "$APP/.env"; then
+  cat >> "$APP/.env" <<'EOF'
+# ---- USDT 链上监听（TronGrid）----
+# 免费额度够用；限流时申请 API Key 填这里
+MH_TRON_API_KEY=
+MH_TRON_API_BASE=https://api.trongrid.io
+MH_USDT_WATCH=1
+EOF
+fi
+# 旧版本曾写入 MH_EMAIL_DEV=1（验证码回显），本版本一律移除
+if grep -q '^MH_EMAIL_DEV=' "$APP/.env"; then
+  sed -i '/^MH_EMAIL_DEV=/d' "$APP/.env"
+  echo "已移除 MH_EMAIL_DEV（验证码不再回显，需在后台配置邮件通道）"
+fi
+chmod 600 "$APP/.env"
 set -a; . "$APP/.env"; set +a
 [ -n "${MH_LINK_SECRET:-}" ] || { echo "MH_LINK_SECRET 缺失"; exit 1; }
 
@@ -76,8 +106,9 @@ sleep 2
 curl -fsS "http://127.0.0.1:$APP_PORT/api/constants" >/dev/null && echo "API 正常" || { echo "API 启动失败，看 /var/log/video-rr.err.log"; exit 1; }
 node scripts/rewrite-cover-urls.mjs || true
 
-log "5/7 nginx 片段（注入播放签名密钥）"
-sed "s/__MH_LINK_SECRET__/$MH_LINK_SECRET/g" "$APP/deploy/nginx-video.snippet.conf" > "$SNIPPET"
+log "5/7 nginx 片段"
+# 播放签名由 Node 校验（auth_request → /media-auth），片段里不再有密钥占位符
+install -m 644 "$APP/deploy/nginx-video.snippet.conf" "$SNIPPET"
 install -m 644 "$APP/deploy/nginx-video-http.conf" "$HTTPCONF"
 
 log "6/7 注入 site 配置 + 并发参数"
@@ -116,4 +147,11 @@ unsigned=$(curl -sk -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.
 printf '  %-24s %s（应为 403）\n' 'unsigned hls' "$unsigned"
 echo
 echo "完成：C 端 https://$DOMAIN/video/   后台 https://$DOMAIN/video-admin/"
-echo "后台：admin / admin123（另含 ops01 / fin01 / cs01，密码同为 admin123，务必改掉）"
+CRED="$APP/storage/admin-initial-passwords.txt"
+if [ -f "$CRED" ]; then
+  echo "后台初始口令：$CRED（0600，首次登录强制改密；改完请删除该文件）"
+  echo "  账号：$(cut -f1 "$CRED" | grep -v '^#' | tr '\n' ' ')"
+else
+  echo "后台口令未重新生成（已有账号保持不变）。忘记口令用：node scripts/reset-admin-password.mjs <用户名>"
+fi
+echo "自检：bash $APP/deploy/verify-hk.sh"

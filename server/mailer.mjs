@@ -3,7 +3,7 @@ export {
   PRESETS,
   channelList,
   emailSettings,
-  isDevMail,
+  mailUnavailable,
   markTest,
   newChannel,
   presetOf,
@@ -13,3 +13,4 @@ export {
   upsertChannel,
   verifyChannel,
 } from './mail-channels.mjs'
+

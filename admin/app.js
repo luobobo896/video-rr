@@ -59,19 +59,72 @@ function clearTimers() {
   state.timers = []
 }
 
-/* ---------------- 登录 ---------------- */
+/* ---------------- 登录 / 改密 ---------------- */
+let pendingPassword = ''
+
+function showPassForm({ tip = '' } = {}) {
+  $('#login').classList.remove('hidden')
+  $('#login-form').classList.add('hidden')
+  $('#pass-form').classList.remove('hidden')
+  $('#pass-old').value = pendingPassword
+  $('#pass-new').value = ''
+  $('#pass-confirm').value = ''
+  $('#pass-tip').textContent = tip
+}
+
+function hidePassForm() {
+  $('#pass-form').classList.add('hidden')
+  $('#login-form').classList.add('hidden')
+  $('#shell').classList.remove('hidden')
+}
+
 $('#login-form').addEventListener('submit', async (event) => {
   event.preventDefault()
   const tip = $('#login-tip')
   tip.textContent = ''
+  const password = $('#login-pass').value
   try {
-    const data = await api('/admin/api/login', { method: 'POST', body: { username: $('#login-user').value, password: $('#login-pass').value } })
+    const data = await api('/admin/api/login', { method: 'POST', body: { username: $('#login-user').value, password } })
     state.token = data.token
     localStorage.setItem('mh-admin-token', data.token)
+    if (data.mustChangePassword) {
+      pendingPassword = password
+      $('#login').classList.remove('hidden')
+      showPassForm({ tip: '首次登录或密码已被重置，请先设置新密码' })
+      return
+    }
     await boot()
   } catch (error) {
     tip.textContent = error.message
   }
+})
+
+$('#pass-form').addEventListener('submit', async (event) => {
+  event.preventDefault()
+  const tip = $('#pass-tip')
+  tip.textContent = ''
+  const next = $('#pass-new').value
+  if (next !== $('#pass-confirm').value) { tip.textContent = '两次输入的新密码不一致'; return }
+  try {
+    const data = await api('/admin/api/password', { method: 'POST', body: { oldPassword: $('#pass-old').value, newPassword: next } })
+    if (data?.token) {
+      state.token = data.token
+      localStorage.setItem('mh-admin-token', data.token)
+    }
+    pendingPassword = ''
+    $('#login-pass').value = ''
+    $('#pass-form').classList.add('hidden')
+    hidePassForm()
+    await boot()
+  } catch (error) {
+    tip.textContent = error.message
+  }
+})
+
+$('#change-pass').addEventListener('click', () => {
+  pendingPassword = ''
+  $('#shell').classList.add('hidden')
+  showPassForm({ tip: '修改成功后建议重新登录' })
 })
 
 $('#logout').addEventListener('click', () => logout())
@@ -80,6 +133,8 @@ function logout() {
   localStorage.removeItem('mh-admin-token')
   $('#shell').classList.add('hidden')
   $('#login').classList.remove('hidden')
+  $('#login-form').classList.remove('hidden')
+  $('#pass-form').classList.add('hidden')
 }
 
 /* ---------------- 路由 ---------------- */
@@ -180,7 +235,7 @@ async function pageDashboard() {
           </tbody>
         </table>
         <p class="muted" style="margin-top:10px">
-          发信通道状态：${stats.mailReady ? '<span class="pill ok">已配置真实通道</span>' : '<span class="pill warn">开发模式（验证码回显）</span>'}
+          发信通道状态：${stats.mailReady ? '<span class="pill ok">已配置真实通道</span>' : '<span class="pill warn">未配置通道（验证码无法发送）</span>'}
           <a href="#/email">去配置 →</a>
         </p>
       </div>
@@ -545,14 +600,28 @@ async function pageUsers() {
     <td>${esc(row.vip_until ?? '—')}</td>
     <td>${row.order_count}</td>
     <td>¥${Number(row.paid_total).toFixed(2)}</td>
-    <td><button class="btn sm" data-toggle="${row.id}" data-status="${row.status === 'banned' ? 'active' : 'banned'}">${row.status === 'banned' ? '解禁' : '禁用'}</button></td>
+    <td><button class="btn sm" data-toggle="${row.id}" data-status="${row.status === 'banned' ? 'active' : 'banned'}">${row.status === 'banned' ? '解禁' : '禁用'}</button>
+        ${row.email ? `<button class="btn sm ghost" data-code="${row.id}">登录码</button>` : ''}</td>
   </tr>`)
   view.innerHTML = `<div class="panel">
     <h3>用户<span class="spacer"></span></h3>
     <table><thead><tr><th>ID</th><th>邮箱</th><th>昵称</th><th>头像</th><th>状态</th><th>会员到期</th><th>订单数</th><th>累计付费</th><th>操作</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table>
-    <p class="muted">C 端已改为邮箱验证码登录；客服补发权益：POST /admin/api/cs/grant（需 cs.toolkit 权限）。</p>
+    <p class="muted">C 端已改为邮箱验证码登录；邮件通道不可用时，用「登录码」为该用户签发一次性验证码（5 分钟、单次、写审计）。</p>
   </div>`
+  view.querySelectorAll('[data-code]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const reason = prompt('签发原因（必填，将写入审计）')
+      if (!reason) return
+      try {
+        const result = await api(`/admin/api/users/${button.dataset.code}/login-code`, { method: 'POST', body: { reason } })
+        alert(`登录码已生成（${Math.round(result.expiresIn / 60)} 分钟内有效，仅可使用一次）\n\n${result.email}\n验证码：${result.code}\n\n请通过可靠渠道转交用户，页面关闭后无法再次查看。`)
+        await pageUsers()
+      } catch (error) {
+        toast(error.message)
+      }
+    })
+  })
   view.querySelectorAll('[data-toggle]').forEach((button) => {
     button.addEventListener('click', async () => {
       const reason = prompt('操作原因（必填）')
@@ -1134,7 +1203,7 @@ async function pageEmail() {
       密码/Key/refresh_token 全部 AES-256-GCM 加密存储。
     </p>
     <div class="cards">
-      <div class="card"><div class="k">当前状态</div><div class="v">${data.devMode ? '<span class="pill">无可用通道（开发模式，验证码回显）</span>' : '<span class="pill ok">真实发信</span>'}</div></div>
+      <div class="card"><div class="k">当前状态</div><div class="v">${data.mailMissing ? '<span class="pill warn">未配置可用通道（验证码无法发送）</span>' : '<span class="pill ok">真实发信</span>'}</div></div>
       <div class="card"><div class="k">通道数</div><div class="v">${channels.length}</div></div>
       <div class="card"><div class="k">默认发件人</div><div class="v" style="font-size:14px">${esc(data.from || '未设置')}</div></div>
     </div>
@@ -1598,3 +1667,4 @@ async function pageTags() {
 
 /* 启动 */
 if (state.token) await boot()
+

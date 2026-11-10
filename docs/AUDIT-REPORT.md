@@ -130,12 +130,39 @@
 | 9 | USDT 无人工确认入口 | 链上到账后无法补单 | 订单页「确认到账」+ 审计 |
 | 10 | 本机 curl 被 UA 拦截 | nginx/健康检查误报 403 | 回环地址放行 |
 
-## 十、风险与建议（未阻塞上线）
+## 十、风险与建议（运营方 2026-11-10 决策后状态）
 
-1. **SMTP/邮件**：目前仍是开发模式（验证码回显），必须完成 OAuth2 授权或改用应用密码后关闭 `MH_EMAIL_DEV`，否则验证码等于公开。
-2. **管理员弱口令**：`admin/admin123`、`ops01` 等 4 个账号同密码，已在多处提醒，建议强制改密 + 2FA。
-3. **播放签名有效期**：10 分钟 Cookie，建议对热门内容缩短到 2–5 分钟并绑定 UA 指纹。
-4. **限流为单机内存实现**：多实例部署需换 Redis（当前单机 1000 并发方案不受影响）。
-5. **USDT 到账依赖人工确认**：建议后续接入链上监听或第三方回调，避免漏单。
-6. **统计基线为空**：播放埋点今天才开始，历史播放量无法回溯（`play_events` 起始日 2026-11-10）。
-7. **素材版权**：封面海报来自原站镜像，商用前需替换为自有版权素材。
+| # | 风险 | 决策 | 当前状态 |
+|---|---|---|---|
+| 1 | 邮件开发模式（验证码回显） | 去掉 | ✅ 已移除 `devCode` 与 `MH_EMAIL_DEV`；无可用通道时 `503 mail_not_configured`，投递失败 `502 mail_failed`；仅测试进程可用 `MH_OTP_TEST=1`。**上线前置：后台配一条可用通道并测试通过** |
+| 2 | 管理员弱口令 | 改强口令、不展示密码、不上 2FA | ✅ 初始口令 16 位随机、落盘 `storage/admin-initial-passwords.txt`(0600)、首登强制改密；策略 ≥12 位含字母数字、不含用户名、非常见、非重复；失败 5 次锁 10 分钟；登录页不再预填账号密码 |
+| 3 | 播放签名 10 分钟 | 缩短并绑 UA | ✅ `MH_LINK_TTL` 默认 300 秒（60–1800 可调），签名串含 UA 指纹，换 UA 立即失效；试看 120 秒 |
+| 4 | 限流单机内存 | 接 Redis | ✅ `server/redis.mjs`（零依赖 RESP2）+ ZSET 滑动窗口；Redis 不可用自动降级内存并在启动日志与后台风控页标注 |
+| 5 | USDT 靠人工确认 | 接链上监听 | ✅ `server/usdt-watch.mjs`（TronGrid TRC20 轮询、6 小时窗口、金额容差 0.01、`chain_txns` 去重），人工「确认到账」保留为兜底 |
+| 6 | 统计基线为空 | 忽略 | — 播放埋点自 2026-11-10 起累计 |
+| 7 | 素材版权 | 暂不变，后续后台批量上传替换 | ⏳ 待运营替换 |
+
+仍未覆盖（运营方明确不做或延后）：后台 2FA、多实例部署、CDN、微信支付。
+
+## 11. 安全加固（评审团 NO-GO 项闭环）
+
+| 编号 | 问题 | 处置 |
+|---|---|---|
+| A1 | 支付回调无信任边界（`/api/notify/usdt`、`/api/pay/mock`、`/api/pay/alipay-sim` 匿名可核销） | USDT 回调下线，只由服务端链上监听调用；模拟支付需 `MH_ALLOW_SIM_PAY=1` 且校验订单归属，否则 404 |
+| A2 | HLS 分片验签必 403 | 签名作用域改为 `/media/hls/<集>/` 前缀，master / 子播放列表 / 分片共用一次签名 |
+| A4 | XFF 可伪造关掉限流 | 仅反代来源（socket 回环）才信 `x-real-ip`，XFF 只取最后一段；nginx 改 `$remote_addr`；回环豁免不再适用于带转发头的请求 |
+| A5 | 登录锁可锁死账号 | 先验口令，错误才计数；按 `用户名:IP` + 账号全局双维度，Redis Lua 原子自增 |
+| A6 | 强制改密只在前端 | 服务端闸门：`must_change_password=1` 时除 `/me`、`/password` 外一律 403 `password_change` |
+| A7 | 老库不轮换口令与签名密钥 | `ensureAdminCredentials()` 幂等轮换历史账号（`password_updated_at IS NULL`）与 `admin123`；`ensureLinkSecret()` 把空/`dev-link-secret`/过短密钥换掉 |
+| A8 | USDT pending 被记终态永不入账 | `pending:<确认数>/<阈值>` 只记中间态并下轮重试，`credited` 才是终态；迟付进 `late_payment` 告警 |
+| R5 | `/media/uploads/` 直出源片 | nginx `return 403`，Node 侧同样拒绝 |
+| R6 | 播放 5 分钟断流 | 播放有效期 `max(LINK_TTL, 时长+300)`，上限 `MH_PLAY_TTL_MAX`（默认 7200） |
+| R7 | 邮件失败仍吃冷却 | 投递失败回滚 `email_send_log`，不占冷却与日限 |
+| R9 | 原生播放器/TV 被 UA 拦 | `/media/` 对 ExoPlayer/ijklayer/VLC/Android/iOS 等放行，仅 `/api/` 严格 |
+| R14 | 上传全量入内存 | `req.pipe(createWriteStream)` 流式落盘，超限 413，失败即删临时文件 |
+| R16 | 代发登录码无限签发 | 同操作人 20 次/小时、同邮箱 60 秒冷却、5 分钟单次有效 |
+| P1-1 | 用户列表泄露口令哈希 | 改显式列查询 |
+| P1-2 | 会话不可吊销 | `verifyToken` 校验 `sessions`，改密/改邮箱即吊销并下发新 token |
+| P1-4/S-8 | Cookie 与响应头 | 链接 Cookie 加 `HttpOnly`，HTTPS 下加 `Secure`；nginx 补 `nosniff` / `X-Frame-Options` / `Referrer-Policy`，HLS 缓存降到 60 秒 |
+
+回归：`npm test` 73/73、`verify-system.mjs` 78/78、`verify-hk.sh` 带断言与退出码（含分片 200、伪造签名 403、源片 403、未改密 403、匿名模拟支付 404）。

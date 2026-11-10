@@ -7,9 +7,10 @@ import { join } from 'node:path'
 
 const dir = mkdtempSync(join(tmpdir(), 'mh-otp-'))
 process.env.MH_DB = join(dir, 'test.db')
+process.env.MH_ADMIN_INIT_PASSWORD = 'admin123'
 process.env.MH_SECRET = 'test-secret'
 process.env.MH_OTP_SECRET = 'otp-secret'
-process.env.MH_EMAIL_DEV = '1'
+process.env.MH_OTP_TEST = '1'
 
 let db, otp, auth
 
@@ -30,7 +31,7 @@ const newEmail = () => `user${Date.now()}${counter++}@example.com`
 test('发码：6 位数字、5 分钟有效、60 秒冷却', async () => {
   const email = newEmail()
   const sent = await otp.sendCode({ email, purpose: 'login', ip: '1.1.1.1' })
-  assert.match(sent.devCode, /^\d{6}$/)
+  assert.match(sent.testCode, /^\d{6}$/)
   assert.equal(sent.expiresIn, 300)
   assert.equal(sent.resendAfter, 60)
 
@@ -48,7 +49,7 @@ test('邮箱格式校验', async () => {
 test('验证码校验：正确通过、错误提示剩余次数、3 次后作废', async () => {
   const email = newEmail()
   const sent = await otp.sendCode({ email, purpose: 'login' })
-  const wrong = sent.devCode === '000000' ? '111111' : '000000'
+  const wrong = sent.testCode === '000000' ? '111111' : '000000'
 
   // 错一次 → 还剩 2 次
   await assert.rejects(async () => otp.verifyCode({ email, purpose: 'login', code: wrong }), (error) => {
@@ -67,14 +68,14 @@ test('验证码校验：正确通过、错误提示剩余次数、3 次后作废
     return true
   })
   // 即使输对也不能用了（已被消费）
-  await assert.rejects(async () => otp.verifyCode({ email, purpose: 'login', code: sent.devCode }), /验证码已失效/)
+  await assert.rejects(async () => otp.verifyCode({ email, purpose: 'login', code: sent.testCode }), /验证码已失效/)
 })
 
 test('验证码过期：返回 code_expired', async () => {
   const email = newEmail()
   const sent = await otp.sendCode({ email, purpose: 'login' })
   db.prepare("UPDATE email_codes SET expires_at = datetime('now','-1 second') WHERE email = ?").run(email)
-  await assert.rejects(async () => otp.verifyCode({ email, purpose: 'login', code: sent.devCode }), (error) => {
+  await assert.rejects(async () => otp.verifyCode({ email, purpose: 'login', code: sent.testCode }), (error) => {
     assert.equal(error.code, 'code_expired')
     assert.match(error.message, /过期/)
     return true
@@ -95,14 +96,14 @@ test('每日上限 20 条', async () => {
 test('邮箱登录/注册一体：首次建号，再次登录不重复建号', async () => {
   const email = newEmail()
   const first = await otp.sendCode({ email, purpose: 'login' })
-  const login1 = (() => { otp.verifyCode({ email, purpose: 'login', code: first.devCode }); return auth.loginByEmail(email) })()
+  const login1 = (() => { otp.verifyCode({ email, purpose: 'login', code: first.testCode }); return auth.loginByEmail(email) })()
   assert.equal(login1.created, true)
   assert.equal(login1.user.email, email)
   assert.ok(login1.token)
 
   db.prepare("UPDATE email_send_log SET created_at = datetime('now','-2 minutes') WHERE email = ?").run(email)
   const second = await otp.sendCode({ email, purpose: 'login' })
-  otp.verifyCode({ email, purpose: 'login', code: second.devCode })
+  otp.verifyCode({ email, purpose: 'login', code: second.testCode })
   const login2 = auth.loginByEmail(email)
   assert.equal(login2.created, false)
   assert.equal(login2.user.id, login1.user.id)
@@ -119,7 +120,7 @@ test('改密流程：验证码通过后写入新口令', async () => {
   const email = newEmail()
   const { user } = (() => { auth.loginByEmail(email); return { user: db.prepare('SELECT * FROM users WHERE email = ?').get(email) } })()
   const sent = await otp.sendCode({ email, purpose: 'change_password' })
-  otp.verifyCode({ email, purpose: 'change_password', code: sent.devCode })
+  otp.verifyCode({ email, purpose: 'change_password', code: sent.testCode })
   auth.setUserPassword(user.id, 'abc12345')
   const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)
   assert.ok(updated.password_hash)

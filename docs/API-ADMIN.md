@@ -5,8 +5,15 @@
 ## 认证
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/admin/api/login` | `{username,password}` → `{token,expiresAt}`（默认 admin / admin123） |
+| POST | `/admin/api/login` | `{username,password}` → `{token,expiresAt,mustChangePassword}`。初始口令在部署时随机生成，落在 `storage/admin-initial-passwords.txt`（0600），首次登录 `mustChangePassword=true` |
 | GET | `/admin/api/me` | 校验 token |
+| POST | `/admin/api/password` | `{oldPassword,newPassword}` 改密（≥12 位、含字母数字、不含用户名、非常见口令、非重复字符；改完清 `must_change_password`，写审计 `admin.password.change`） |
+| POST | `/admin/api/users/:id/login-code` | 后台代发 C 端登录码 `{reason}` → `{email,code,expiresIn}`（5 分钟一次性，权限 `user.login.assist`，写审计 `user.login.code.issue`） |
+| GET | `/admin/api/security` | 风控概览：`redis`（限流存储）、`loginLock`（5 次失败锁 10 分钟）、`last24h` 拦截分类、`usdtWatch`、`events` |
+
+登录失败 5 次锁 10 分钟（按用户名），返回 `429` + `retry-after`；失败响应带 `attemptsLeft`。口令策略与锁定阈值在 `server/api-admin.mjs`（`checkAdminPassword`）与 `server/ratelimit.mjs`（`LOGIN_MAX_FAILS` / `LOGIN_LOCK_SECONDS`）。
+
+运维重置口令：`node scripts/reset-admin-password.mjs <用户名> [新口令]`（会重新置 `must_change_password=1`）。
 
 ## 概览
 | GET | `/admin/api/stats` | 剧集/分集/就绪数、待审弹幕与评论、用户数、订单数与收入、转码队列、直播状态 |

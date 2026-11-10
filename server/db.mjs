@@ -3,7 +3,8 @@
  * 直播相关表与代码已移除（无直播场景）。
  */
 import { DatabaseSync } from 'node:sqlite'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { hashPassword } from './auth.mjs'
@@ -78,6 +79,8 @@ CREATE TABLE IF NOT EXISTS admins (
   salt TEXT NOT NULL,
   display_name TEXT,
   status TEXT NOT NULL DEFAULT 'active',
+  must_change_password INTEGER NOT NULL DEFAULT 0,
+  password_updated_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS roles (
@@ -368,6 +371,17 @@ CREATE TABLE IF NOT EXISTS security_events (
   detail TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS chain_txns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  network TEXT NOT NULL DEFAULT 'TRC20',
+  txid TEXT UNIQUE NOT NULL,
+  to_address TEXT,
+  amount REAL,
+  block_ts INTEGER,
+  order_no TEXT,
+  status TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- ===== 支付渠道（多渠道路由 + 敏感配置加密）=====
 CREATE TABLE IF NOT EXISTS pay_channels (
@@ -447,6 +461,7 @@ export const MENU_TREE = [
   { code: 'user.list', name: '用户管理', type: 'menu', parent: 'dir:user', sort: 10, path: '/users', icon: '👥' },
   { code: 'user.read', name: '查看用户', type: 'button', parent: 'user.list', sort: 10 },
   { code: 'user.manage', name: '禁用/解禁用户', type: 'button', parent: 'user.list', sort: 20 },
+  { code: 'user.login.assist', name: '代发登录验证码', type: 'button', parent: 'user.list', sort: 30 },
   { code: 'cs.toolkit', name: '客服工具', type: 'menu', parent: 'dir:user', sort: 20, path: '/cs', icon: '🎧' },
   { code: 'cs.toolkit.grant', name: '补发权益', type: 'button', parent: 'cs.toolkit', sort: 10 },
 
@@ -484,7 +499,7 @@ export const ROLES = [
     'system.analytics', 'analytics.read',
   ]],
   ['cs', '客服', '查单、补发权益、用户查看', [
-    'dashboard', 'commerce.order', 'finance.order.read', 'user.list', 'user.read', 'cs.toolkit', 'cs.toolkit.grant',
+    'dashboard', 'commerce.order', 'finance.order.read', 'user.list', 'user.read', 'user.login.assist', 'cs.toolkit', 'cs.toolkit.grant',
   ]],
   ['auditor', '审核员', '内容审核 + 审计只读', [
     'dashboard', 'content.review', 'content.review.write', 'system.audit', 'audit.read', 'content.drama', 'content.drama.read',
@@ -526,6 +541,92 @@ export function buildMenuTree(codes) {
   return roots
 }
 
+/** 随机初始口令：16 位，去掉易混字符，保证含字母与数字。 */
+function randomInitPassword() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+  for (;;) {
+    const bytes = randomBytes(16)
+    let out = ''
+    for (let i = 0; i < 16; i += 1) out += alphabet[bytes[i] % alphabet.length]
+    if (/[A-Za-z]/.test(out) && /\d/.test(out)) return out
+  }
+}
+
+/** 初始口令只落盘一次（0600），不进日志、不进前端。 */
+function writeInitialAdminPasswords(list) {
+  try {
+    // 与数据库同目录：临时库/测试库不会覆盖正式凭据文件
+    const dir = dirname(DB_PATH)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'admin-initial-passwords.txt')
+    const body = [
+      `# 生成时间 ${new Date().toISOString()}`,
+      '# 首次登录会强制修改密码；修改后本文件内容即失效，可删除。',
+      ...list.map(([username, displayName, password]) => `${username}\t${password}\t${displayName}`),
+      '',
+    ].join('\n')
+    writeFileSync(file, body, { mode: 0o600 })
+    console.log(`[admin] 初始口令已写入 ${file}（首次登录强制修改）`)
+  } catch (error) {
+    console.error('[admin] 初始口令落盘失败，请手动重置管理员密码', error.message)
+  }
+}
+
+/**
+ * 老库结构升级：admins 增加强制改密标记与改密时间。
+ */
+export function ensureAdminSchema() {
+  const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'admins'").get()
+  if (!exists) return
+  const columns = db.prepare('PRAGMA table_info(admins)').all().map((row) => row.name)
+  if (!columns.includes('must_change_password')) db.exec('ALTER TABLE admins ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0')
+  if (!columns.includes('password_updated_at')) db.exec('ALTER TABLE admins ADD COLUMN password_updated_at TEXT')
+}
+
+/**
+ * 老库升级：把历史遗留的弱口令（admin123 那批）整批轮换成随机口令。
+ * 与 seedIfEmpty 解耦——seed 在 dramas>0 时早退，线上库永远走不到，所以必须独立执行。
+ * 判定依据 password_updated_at IS NULL（新库 seed 会写入时间戳，因此不会被重复轮换）。
+ */
+export function ensureAdminCredentials() {
+  const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'admins'").get()
+  if (!exists) return { rotated: 0 }
+  if (process.env.MH_SKIP_ADMIN_ROTATION === '1') return { rotated: 0 }
+  const legacy = db.prepare(`SELECT id, username, display_name FROM admins
+    WHERE password_updated_at IS NULL OR password_updated_at = ''`).all()
+  if (legacy.length === 0) return { rotated: 0 }
+
+  const fixed = process.env.MH_ADMIN_INIT_PASSWORD ?? ''
+  const update = db.prepare(`UPDATE admins SET password_hash = ?, salt = ?, must_change_password = 1,
+    password_updated_at = ? WHERE id = ?`)
+  const issued = []
+  for (const row of legacy) {
+    const salt = randomBytes(16).toString('hex')
+    const password = fixed || randomInitPassword()
+    update.run(hashPassword(password, salt), salt, new Date().toISOString(), row.id)
+    issued.push([row.username, row.display_name ?? '', password])
+  }
+  if (!fixed) writeInitialAdminPasswords(issued)
+  else console.log(`[admin] ${issued.length} 个历史账号已按要求轮换为 MH_ADMIN_INIT_PASSWORD`)
+  console.warn(`[admin] 已轮换 ${issued.length} 个历史后台账号口令（原弱口令失效），请查看 storage/admin-initial-passwords.txt`)
+  return { rotated: issued.length }
+}
+
+/**
+ * 播放签名密钥：老库里可能还是仓库里的公开常量 'dev-link-secret'，
+ * 那样 UA 绑定与短 TTL 的强度等于 0。这里无条件自检并轮换。
+ */
+export function ensureLinkSecret() {
+  const site = getSetting('site', {})
+  const current = String(site?.linkSecret ?? '')
+  if (current && current !== 'dev-link-secret' && current.length >= 16) return { rotated: false }
+  const fromEnv = String(process.env.MH_LINK_SECRET ?? '')
+  const next = fromEnv.length >= 16 ? fromEnv : randomBytes(24).toString('hex')
+  setSetting('site', { ...site, linkSecret: next })
+  console.warn('[security] 播放签名密钥缺失或仍是公开常量，已生成新密钥（旧的播放链接失效，重新播放即可）')
+  return { rotated: true }
+}
+
 export function seedIfEmpty() {
   if (count('dramas') > 0) return { seeded: false }
 
@@ -543,16 +644,24 @@ export function seedIfEmpty() {
     for (const menuCode of expandWithAncestors(perms)) insertRolePerm.run(role.id, menuCode)
   }
 
-  // 管理员：admin 超管；其余为演示角色
-  const salt = 'demo-salt'
-  const insertAdmin = db.prepare('INSERT OR IGNORE INTO admins (username, password_hash, salt, display_name) VALUES (?, ?, ?, ?)')
+  // 管理员：随机强口令（或用 MH_ADMIN_INIT_PASSWORD 指定），首次登录强制修改
+  const insertAdmin = db.prepare(`INSERT OR IGNORE INTO admins
+    (username, password_hash, salt, display_name, must_change_password, password_updated_at) VALUES (?, ?, ?, ?, 1, ?)`)
   const admins = [
     ['admin', '超级管理员'],
     ['ops01', '内容运营小王'],
     ['fin01', '财务小李'],
     ['cs01', '客服小张'],
   ]
-  for (const [username, displayName] of admins) insertAdmin.run(username, hashPassword('admin123', salt), salt, displayName)
+  const fixedInitPassword = process.env.MH_ADMIN_INIT_PASSWORD ?? ''
+  const issued = []
+  for (const [username, displayName] of admins) {
+    const salt = randomBytes(16).toString('hex')
+    const password = fixedInitPassword || randomInitPassword()
+    const info = insertAdmin.run(username, hashPassword(password, salt), salt, displayName, new Date().toISOString())
+    if (Number(info.changes ?? 0) > 0) issued.push([username, displayName, password])
+  }
+  if (issued.length > 0 && !fixedInitPassword) writeInitialAdminPasswords(issued)
   const insertAdminRole = db.prepare('INSERT OR IGNORE INTO admin_roles (admin_id, role_id) VALUES (?, ?)')
   const roleOf = (code) => db.prepare('SELECT id FROM roles WHERE code = ?').get(code).id
   insertAdminRole.run(db.prepare("SELECT id FROM admins WHERE username = 'admin'").get().id, roleOf('super_admin'))
@@ -645,8 +754,13 @@ export function seedIfEmpty() {
       }
     }
 
-    db.prepare("INSERT INTO settings (key, value) VALUES ('site', ?)").run(JSON.stringify({ name: '影巢', currency: 'CNY', usdtRate: 7.2, linkSecret: process.env.MH_LINK_SECRET ?? 'dev-link-secret' }))
-    db.prepare("INSERT INTO settings (key, value) VALUES ('pay', ?)").run(JSON.stringify({ alipay: { enabled: false }, usdt: { enabled: true, network: 'TRC20', address: 'TDemoAddressForLocalTesting', minConfirmations: 19 }, mock: { enabled: true } }))
+    db.prepare("INSERT INTO settings (key, value) VALUES ('site', ?)").run(JSON.stringify({
+    name: '影巢', currency: 'CNY', usdtRate: 7.2,
+    linkSecret: (String(process.env.MH_LINK_SECRET ?? '').length >= 16)
+      ? process.env.MH_LINK_SECRET
+      : randomBytes(24).toString('hex'),
+  }))
+    db.prepare("INSERT INTO settings (key, value) VALUES ('pay', ?)").run(JSON.stringify({ alipay: { enabled: false }, usdt: { enabled: true, network: 'TRC20', address: '', minConfirmations: 19 }, mock: { enabled: false } }))
     db.prepare("INSERT INTO settings (key, value) VALUES ('smtp', ?)").run(JSON.stringify({
       enabled: false, host: '', port: 465, secure: true, user: '', pass: '', from: '', fromName: '影巢',
     }))
@@ -792,6 +906,38 @@ export function getSetting(key, fallback) {
 export function setSetting(key, value) {
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .run(key, JSON.stringify(value))
+}
+
+/**
+ * 支付面收口（老库升级同样生效）：
+ * - 模拟支付渠道默认关闭，只有显式 MH_ALLOW_SIM_PAY=1（本地/演练）才启用
+ * - USDT 确认数缺省补到 19，避免「监听阈值 1、入账阈值 19」两套口径
+ */
+export function ensurePaySafety() {
+  const allowSim = process.env.MH_ALLOW_SIM_PAY === '1'
+  const pay = getSetting('pay', {}) ?? {}
+  let changed = false
+  if (pay.mock?.enabled && !allowSim) {
+    pay.mock = { ...pay.mock, enabled: false }
+    changed = true
+  }
+  const minConf = Number(pay.usdt?.minConfirmations ?? 0)
+  if (!Number.isFinite(minConf) || minConf < 1) {
+    pay.usdt = { ...(pay.usdt ?? {}), minConfirmations: 19 }
+    changed = true
+  }
+  if (changed) setSetting('pay', pay)
+
+  const mockRow = db.prepare("SELECT * FROM pay_channels WHERE channel_code = 'mock' LIMIT 1").get()
+  if (mockRow && mockRow.status === 'enabled' && !allowSim) {
+    db.prepare("UPDATE pay_channels SET status = 'disabled', is_default = 0 WHERE id = ?").run(mockRow.id)
+  }
+  // 本地调试显式开启模拟支付时，把 mock 渠道一起启用，否则下单报 channel_disabled
+  if (mockRow && mockRow.status !== 'enabled' && allowSim) {
+    db.prepare("UPDATE pay_channels SET status = 'enabled' WHERE id = ?").run(mockRow.id)
+    setSetting('pay', { ...pay, mock: { ...(pay.mock ?? {}), enabled: true } })
+  }
+  return { allowSim, disabledMock: Boolean(mockRow && !allowSim) }
 }
 
 /** 补齐缺失的默认设置行（老库升级用）。 */
