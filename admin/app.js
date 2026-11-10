@@ -1193,6 +1193,12 @@ async function pageEmail() {
         ` : ''}
 
         ${isOauth ? `
+        <p class="muted" style="margin:8px 0 0">
+          没有 clientId？→ 打开
+          <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noreferrer">Azure 应用注册</a>
+          → 新注册（账户类型选「个人 Microsoft 账户」）→ 身份验证里打开「允许公共客户端流」→
+          API 权限添加「Office 365 Exchange Online → SMTP.Send（委派）」→ 复制「应用程序(客户端) ID」填到下面。
+        </p>
         <div class="form-row" style="margin-top:10px">
           <label style="flex:1">tokenUrl <input id="ch-token-url" value="${esc(channel.oauth2.tokenUrl ?? '')}" style="width:100%" /></label>
           <label style="flex:1">deviceUrl <input id="ch-device-url" value="${esc(channel.oauth2.deviceUrl ?? '')}" style="width:100%" /></label>
