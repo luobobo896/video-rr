@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>影巢 · 组件规范（C 端 / B 端统一）</title>
+<link rel="stylesheet" href="./tokens.css" />
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); padding: 48px 56px 96px; }
+  h1 { font-size: 28px; letter-spacing: -0.01em; margin: 0 0 6px; }
+  .sub { color: var(--text-2); font-size: var(--fs-13); max-width: 720px; line-height: 1.7; }
+  h2 { font-size: var(--fs-18); margin: 56px 0 6px; display: flex; align-items: baseline; gap: 10px; }
+  h2 .idx { font-size: var(--fs-12); color: var(--brand-2); font-weight: 700; letter-spacing: .08em; }
+  .note { color: var(--text-2); font-size: var(--fs-13); margin: 0 0 20px; line-height: 1.7; max-width: 860px; }
+  .note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-12); color: var(--text); background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 4px; }
+
+  .panel { border: 1px solid var(--line); border-radius: var(--r-lg); padding: 24px; background: color-mix(in oklab, var(--surface) 55%, transparent); }
+  .row { display: flex; flex-wrap: wrap; gap: var(--sp-5); align-items: flex-end; }
+  .cell { display: flex; flex-direction: column; gap: var(--sp-2); }
+  .cap { font-size: var(--fs-11); color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .cap b { color: var(--text-2); font-weight: 600; }
+
+  table.spec { width: 100%; border-collapse: collapse; font-size: var(--fs-13); }
+  table.spec th, table.spec td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.spec th { color: var(--text-2); font-weight: 600; font-size: var(--fs-12); text-transform: uppercase; letter-spacing: .06em; }
+  table.spec td code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-12); }
+
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-3); }
+  .swatch { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+  .swatch .chip { height: 44px; }
+  .swatch .meta { padding: 8px 10px; font-size: var(--fs-11); color: var(--text-2); display: flex; justify-content: space-between; gap: 6px; }
+
+  .align-demo { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }
+  .align-demo .ghost-line { position: relative; }
+  .align-demo .rule { position: absolute; left: 0; right: 0; height: 1px; background: var(--brand-2); opacity: .5; }
+  /* 展示"聚焦态"但不抢焦点（不用 autofocus，避免打开页面就滚动） */
+  .demo-focus { border-color: var(--brand) !important; box-shadow: 0 0 0 var(--ring) color-mix(in oklab, var(--brand) 22%, transparent); }
+
+  .dont { border: 1px dashed color-mix(in oklab, var(--bad) 55%, transparent); border-radius: var(--r-md); padding: 18px; position: relative; background: color-mix(in oklab, var(--bad) 6%, transparent); }
+  .dont::before { content: "反例 · 不要这样做"; position: absolute; top: -10px; left: 14px; background: var(--bg); padding: 0 8px; font-size: var(--fs-11); color: var(--bad); letter-spacing: .04em; }
+  .dont .row { gap: 18px; }
+  .bad-btn-1 { height: 34px; padding: 10px 22px; border-radius: 999px; background: linear-gradient(135deg, var(--brand), var(--brand-2)); color: #fff; font-size: 13px; border: 0; display: inline-flex; align-items: center; }
+  .bad-btn-2 { height: 28px; padding: 4px 9px; border-radius: 4px; background: #1a1f2b; color: #e8ebf2; border: 1px solid #2a2f3a; font-size: 12px; display: inline-flex; align-items: center; }
+  .bad-input { height: 29px; padding: 6px 8px; border-radius: 4px; border: 1px solid #2a2f3a; background: #14171d; color: #e8ebf2; font-size: 12px; width: 180px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
+  .brands { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
+  .brand-card { border: 1px solid var(--line); border-radius: var(--r-lg); padding: 20px; }
+  .brand-card h3 { margin: 0 0 4px; font-size: var(--fs-14); }
+  .brand-card p { margin: 0 0 16px; color: var(--text-2); font-size: var(--fs-12); }
+</style>
+</head>
+<body>
+
+<h1>影巢 · 组件规范</h1>
+<p class="sub">
+  C 端（内容消费）与 B 端（运营台）共用一套组件几何：高度、圆角、字号、间距、描边完全一致，只有品牌色按端区分。
+  唯一来源是 <code>shared/tokens.css</code>，两端文件由 <code>node scripts/sync-tokens.mjs</code> 生成，禁止手改产物。
+</p>
+
+<!-- ============ 01 尺寸体系 ============ -->
+<h2><span class="idx">01</span>尺寸体系</h2>
+<p class="note">
+  控件高度只有三档：<code>--h-sm 32</code> / <code>--h-md 40</code> / <code>--h-lg 48</code>。
+  默认（md）用于所有主要操作；sm 只用于表格行内、工具栏、二次确认等密集区域；lg 用于登录页、付费墙等单任务场景。
+  横向内边距按尺寸递进：<code>12 / 18 / 24</code>；输入框统一 <code>12</code>（按钮需要更强的视觉重量，所以比输入框宽）。
+</p>
+<div class="panel">
+  <table class="spec">
+    <thead><tr><th>令牌</th><th>sm</th><th>md（默认）</th><th>lg</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>高度</code></td><td>32px</td><td>40px</td><td>48px</td><td>触控最小 40，表格内允许 32</td></tr>
+      <tr><td><code>按钮横向 padding</code></td><td>12px</td><td>18px</td><td>24px</td><td>按钮文字需要呼吸感</td></tr>
+      <tr><td><code>输入框横向 padding</code></td><td>12px</td><td>12px</td><td>12px</td><td>输入框统一，避免光标贴边</td></tr>
+      <tr><td><code>圆角</code></td><td>8px</td><td>10px</td><td>14px</td><td>胶囊形（999）仅用于标签/头像</td></tr>
+      <tr><td><code>字号</code></td><td>13px</td><td>14px</td><td>16px</td><td>正文 ≥13，正文块 ≥14</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ 02 按钮 ============ -->
+<h2><span class="idx">02</span>按钮：5 种类型 × 3 档尺寸</h2>
+<p class="note">
+  类型只有五种：<b>主要</b>（一个页面最多一个）、<b>次要</b>（描边）、<b>文字</b>（行内低权重）、<b>危险</b>（破坏性操作）、<b>禁用态</b>。
+  不再新增第六种；颜色差异只能通过品牌令牌实现。
+</p>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:26px">
+    <div class="cell"><button class="btn primary">开通会员</button><span class="cap"><b>主要</b> 40px / 18px / r10</span></div>
+    <div class="cell"><button class="btn">＋ 收藏</button><span class="cap"><b>次要</b> 40px / 18px / r10</span></div>
+    <div class="cell"><button class="btn text">查看全部</button><span class="cap"><b>文字</b> 行内 / 无高度</span></div>
+    <div class="cell"><button class="btn danger">发起退款</button><span class="cap"><b>危险</b> 40px / 18px</span></div>
+    <div class="cell"><button class="btn" disabled>已售罄</button><span class="cap"><b>禁用</b> opacity .45</span></div>
+    <div class="cell"><button class="btn primary" aria-busy="true">支付中…</button><span class="cap"><b>加载</b> 同主要，文案变化</span></div>
+  </div>
+
+  <div class="row">
+    <div class="cell"><button class="btn sm primary">保存</button><span class="cap"><b>sm 主要</b> 32 / 12 / r8 / 13px</span></div>
+    <div class="cell"><button class="btn sm">通过</button><span class="cap"><b>sm 次要</b> 32 / 12 / r8</span></div>
+    <div class="cell"><button class="btn sm danger">驳回</button><span class="cap"><b>sm 危险</b> 32 / 12 / r8</span></div>
+    <div class="cell"><button class="btn lg primary">立即播放</button><span class="cap"><b>lg 主要</b> 48 / 24 / r14 / 16px</span></div>
+    <div class="cell"><button class="btn lg">登录 / 注册</button><span class="cap"><b>lg 次要</b> 48 / 24 / r14</span></div>
+  </div>
+
+  <table class="spec" style="margin-top:28px">
+    <thead><tr><th>类型</th><th>背景</th><th>文字</th><th>描边</th><th>使用场景</th></tr></thead>
+    <tbody>
+      <tr><td>主要 <code>.btn.primary</code></td><td>品牌渐变 135°</td><td>品牌对比色</td><td>无</td><td>付费、播放、提交表单</td></tr>
+      <tr><td>次要 <code>.btn</code></td><td>surface</td><td>正文色</td><td>1px line-strong</td><td>收藏、取消、次级操作</td></tr>
+      <tr><td>文字 <code>.btn.text</code></td><td>透明</td><td>品牌 2</td><td>无</td><td>表格行内、查看更多</td></tr>
+      <tr><td>危险 <code>.btn.danger</code></td><td>透明 → hover 12% 危险色</td><td>危险色</td><td>1px 危险色 45%</td><td>退款、删除、禁用用户</td></tr>
+      <tr><td>禁用</td><td>继承类型</td><td>继承</td><td>继承</td><td>未满足前置条件时，必须同时给原因提示</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ============ 03 输入框 ============ -->
+<h2><span class="idx">03</span>输入框：三档尺寸 × 六种状态</h2>
+<p class="note">
+  原生 <code>&lt;input&gt;</code> / <code>&lt;select&gt;</code> / <code>&lt;textarea&gt;</code> 与自定义容器（付费墙、播放器工具条、表格行内编辑、树工具栏）
+  全部映射到同一组类与几何：高度 40（密集区 32）、左右 12、圆角 10、1px 描边、聚焦 2px 品牌光环。原生 select 的浏览器箭头已被统一替换。
+</p>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:24px">
+    <div class="cell"><input class="input" placeholder="请输入邮箱" value="user@example.com" /><span class="cap"><b>默认 md</b> 40 / 12 / r10</span></div>
+    <div class="cell"><input class="input demo-focus" placeholder="聚焦态" /><span class="cap"><b>聚焦</b> 品牌描边 + 2px 光环</span></div>
+    <div class="cell"><input class="input" value="已禁用" disabled /><span class="cap"><b>禁用</b> opacity .55</span></div>
+    <div class="cell"><input class="input" value="格式错误" aria-invalid="true" /><span class="cap"><b>错误</b> 危险色 + 光环</span></div>
+    <div class="cell"><input class="input sm" placeholder="表格内 sm" /><span class="cap"><b>sm</b> 32 / 12 / r8 / 13px</span></div>
+    <div class="cell"><input class="input lg" placeholder="登录页 lg" /><span class="cap"><b>lg</b> 48 / 12 / r14 / 16px</span></div>
+  </div>
+
+  <div class="row" style="margin-bottom:24px">
+    <div class="cell"><select class="input"><option>全部状态</option><option>已支付</option></select><span class="cap"><b>原生 select</b> 箭头统一</span></div>
+    <div class="cell"><textarea class="input" rows="2" placeholder="多行输入（简介、退款原因）"></textarea><span class="cap"><b>textarea</b> 高度随 rows，内边距 8×12</span></div>
+    <div class="cell"><label class="field"><span>邮箱</span><input placeholder="you@example.com" /></label><span class="cap"><b>.field</b> 标签 12px + 间距 8</span></div>
+  </div>
+
+  <div class="align-demo">
+    <button class="btn primary">发送验证码</button>
+    <input class="input" placeholder="与按钮同高对齐" style="width:240px" />
+    <select class="input" style="width:140px"><option>支付宝</option></select>
+    <button class="btn">取消</button>
+    <span class="cap">三者基线/高度完全对齐（40px）——这是当前最容易做错的地方</span>
+  </div>
+</div>
+
+<!-- ============ 04 一致性 ============ -->
+<h2><span class="idx">04</span>一致性约束</h2>
+<div class="grid2">
+  <div class="panel">
+    <table class="spec">
+      <thead><tr><th>规则</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>同组件同几何</td><td>两端、所有页面的按钮/输入框只允许 32/40/48 三档，不允许出现 34px、29px 这类中间值</td></tr>
+        <tr><td>一页一个主要按钮</td><td>付费墙、登录页、编辑弹窗各只有一个 <code>.btn.primary</code></td></tr>
+        <tr><td>输入框不改宽</td><td>宽度由布局决定（<code>width:100%</code> 或容器宽度），不写死像素，除非是搜索框/验证码这类定长</td></tr>
+        <tr><td>原生与自定义对齐</td><td>自定义容器（如带图标的输入框）内部原生 input 必须 <code>height:100%; border:0; background:transparent</code>，外壳承担描边与圆角</td></tr>
+        <tr><td>状态语义统一</td><td>聚焦=品牌色、错误=危险色、禁用=opacity .55，任何页面都不例外</td></tr>
+        <tr><td>禁用必须给原因</td><td>按钮禁用时旁边要有文字说明（如"请先选择分集"），不能只有灰按钮</td></tr>
+        <tr><td>触控最小 40</td><td>C 端移动端可点区域不小于 40×40；表格内的 sm 按钮在移动端自动升为 md</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="dont">
+    <div class="row">
+      <span class="bad-btn-1">立即播放</span>
+      <span class="bad-btn-2">保存</span>
+      <input class="bad-input" placeholder="29px 高输入框" />
+    </div>
+    <p class="note" style="margin:16px 0 0;max-width:none">
+      左边三个来自改造前的旧样式：<code>height 34 / padding 10×22 / radius 999</code>、<code>height 28 / padding 4×9 / radius 4</code>、<code>height 29 / padding 6×8</code>。
+      同类控件出现 28、29、32、34、40 五种高度，用户在不同页面点击手感不一致，也是"看起来像两个产品拼起来"的根因。
+    </p>
+  </div>
+</div>
+
+<!-- ============ 05 品牌差异 ============ -->
+<h2><span class="idx">05</span>两端只差品牌色</h2>
+<p class="note">
+  同一套几何、同一套状态语义；C 端用暖红（内容消费、情绪化），B 端用功能蓝（长时间操作、需要冷静）。
+  <code>--brand</code> / <code>--brand-2</code> / <code>--brand-contrast</code> 三个令牌是唯一允许分端定义的颜色。
+</p>
+<div class="brands">
+  <div class="brand-card">
+    <h3>C 端 · 暖红</h3>
+    <p>--brand #ff3d6e · --brand-2 #ff7a45 · 对比色 #ffffff</p>
+    <div class="row">
+      <button class="btn primary">开通会员</button>
+      <button class="btn">＋ 收藏</button>
+      <input class="input" placeholder="邮箱" style="width:160px" />
+    </div>
+  </div>
+  <div class="brand-card" style="--brand:#4f7cff; --brand-2:#22d3ee; --brand-contrast:#06121a; --surface:#1a1f2b; --bg-elev:#141821; --line-strong:rgba(255,255,255,.16);">
+    <h3>B 端 · 功能蓝</h3>
+    <p>--brand #4f7cff · --brand-2 #22d3ee · 对比色 #06121a</p>
+    <div class="row">
+      <button class="btn primary">保存配置</button>
+      <button class="btn">测试连接</button>
+      <input class="input" placeholder="SMTP 主机" style="width:160px" />
+    </div>
+  </div>
+</div>
+
+<!-- ============ 06 色板 ============ -->
+<h2><span class="idx">06</span>色板与层级</h2>
+<div class="swatches">
+  <div class="swatch"><div class="chip" style="background:var(--bg)"></div><div class="meta"><span>--bg</span><span>页面底</span></div></div>
+  <div class="swatch"><div class="chip" style="background:var(--surface)"></div><div class="meta"><span>--surface</span><span>卡片/面板</span></div></div>
+  <div class="swatch"><div class="chip" style="background:var(--surface-2)"></div><div class="meta"><span>--surface-2</span><span>控件底</span></div></div>
+  <div class="swatch"><div class="chip" style="background:var(--line-strong)"></div><div class="meta"><span>--line-strong</span><span>控件描边</span></div></div>
+  <div class="swatch"><div class="chip" style="background:linear-gradient(135deg,var(--brand),var(--brand-2))"></div><div class="meta"><span>--brand</span><span>品牌</span></div></div>
+  <div class="swatch"><div class="chip" style="background:var(--ok)"></div><div class="meta"><span>--ok</span><span>成功</span></div></div>
+  <div class="swatch"><div class="chip" style="background:var(--warn)"></div><div class="meta"><span>--warn</span><span>警示</span></div></div>
+  <div class="swatch"><div class="chip" style="background:var(--bad)"></div><div class="meta"><span>--bad</span><span>危险</span></div></div>
+</div>
+
+</body>
+</html>
+

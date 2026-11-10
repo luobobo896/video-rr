@@ -1,0 +1,318 @@
+/* ============================================================
+   影巢 · 统一设计令牌 + 原子组件（C 端 / B 端唯一来源）
+   几何（高度/圆角/间距/字号/描边）两端必须一致；
+   仅品牌色与背景层级按端区分（C 端暖红 = 内容消费，B 端功能蓝 = 运营台）。
+   修改流程：只改 shared/tokens.css → 跑 node scripts/sync-tokens.mjs → 两端同步。
+   ============================================================ */
+:root {
+  /* 间距（4 的倍数） */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* 字号 / 行高 */
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+  --fs-20: 20px;
+  --lh-tight: 1.25;
+  --lh-base: 1.5;
+
+  /* 控件高度（唯一真相） */
+  --h-sm: 32px;
+  --h-md: 40px;
+  --h-lg: 48px;
+
+  /* 圆角 */
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  /* 描边 / 焦点环 */
+  --bw: 1px;
+  --ring: 2px;
+
+  /* 横向内边距（按钮按尺寸分档；输入框统一 12px，避免文字贴边） */
+  --pad-x-sm: 12px;
+  --pad-x-md: 18px;
+  --pad-x-lg: 24px;
+  --pad-x-input: 12px;
+
+  /* 动效 */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+
+/* @brand-start */
+  --bg: #0a0a0d;
+  --bg-soft: #121216;
+  --bg-elev: #17171d;
+  --surface: #1b1f28;
+  --surface-2: #14171d;
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --text: #f2f3f5;
+  --text-2: #9aa0aa;
+  --text-3: #6b7280;
+  --brand: #ff3d6e;
+  --brand-2: #ff7a45;
+  --brand-contrast: #ffffff;
+  --vip: #ffb020;
+  --ok: #4ade80;
+  --warn: #ffb84d;
+  --bad: #ff6b8a;
+  --shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
+  --sans: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", system-ui, -apple-system, "Segoe UI", sans-serif;
+/* @brand-end */
+}
+
+/* ===================== 按钮（三档尺寸 × 五种类型） ===================== */
+.btn,
+.btn-primary,
+.btn-ghost,
+.btn-login {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: var(--h-md);
+  padding: 0 var(--pad-x-md);
+  border: var(--bw) solid transparent;
+  border-radius: var(--r-md);
+  font-family: inherit;
+  font-size: var(--fs-14);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.btn:active, .btn-primary:active, .btn-ghost:active, .btn-login:active { transform: translateY(1px); }
+.btn:disabled, .btn[aria-disabled="true"], .btn-primary:disabled, .btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.btn:focus-visible, .btn-primary:focus-visible, .btn-ghost:focus-visible, .btn-login:focus-visible {
+  outline: var(--ring) solid color-mix(in oklab, var(--brand) 55%, transparent);
+  outline-offset: 2px;
+}
+
+/* 尺寸：仅 sm / md（默认）/ lg 三档 */
+.btn.sm { height: var(--h-sm); padding: 0 var(--pad-x-sm); font-size: var(--fs-13); border-radius: var(--r-sm); }
+.btn.lg { height: var(--h-lg); padding: 0 var(--pad-x-lg); font-size: var(--fs-16); border-radius: var(--r-lg); }
+
+/* 类型 1：主要 */
+.btn.primary,
+.btn-primary {
+  background: linear-gradient(135deg, var(--brand), var(--brand-2));
+  color: var(--brand-contrast);
+  border-color: transparent;
+}
+.btn.primary:hover, .btn-primary:hover { filter: brightness(1.06); }
+
+/* 类型 2：次要（描边）—— 兜底覆盖未标记类型的 .btn */
+.btn,
+.btn-ghost {
+  background: color-mix(in oklab, var(--surface) 92%, white 4%);
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.btn:hover, .btn-ghost:hover { border-color: color-mix(in oklab, var(--brand) 45%, var(--line-strong)); }
+
+/* 类型 3：文字 */
+.btn.text, .btn-text {
+  height: auto;
+  padding: 0 var(--sp-1);
+  background: transparent;
+  border-color: transparent;
+  color: var(--brand-2);
+  font-weight: 500;
+}
+.btn.text:hover, .btn-text:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+
+/* 类型 4：危险 */
+.btn.danger, .btn-danger { background: transparent; color: var(--bad); border-color: color-mix(in oklab, var(--bad) 45%, transparent); }
+.btn.danger:hover, .btn-danger:hover { background: color-mix(in oklab, var(--bad) 12%, transparent); }
+
+/* ===================== 输入框（原生 + 自定义，一套几何） ===================== */
+.input,
+.field input,
+.field textarea,
+.field select,
+.form-row input,
+.form-row select,
+.form input,
+.form select,
+.form textarea,
+.login-card input,
+.tree-toolbar input,
+.paywall-coupon input,
+.player-tools input,
+.player-tools select,
+table input,
+table select,
+textarea {
+  height: var(--h-md);
+  padding: 0 var(--pad-x-input);
+  border: var(--bw) solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--surface-2, var(--bg-elev)) 94%, white 3%);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-14);
+  line-height: 1;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+/* 小尺寸：表格内 / 工具栏 / 二次确认，统一 32px */
+table input,
+table select,
+.tree-toolbar input,
+.input.sm,
+.field input.sm,
+.form-row input.sm,
+.form-row select.sm { height: var(--h-sm); font-size: var(--fs-13); border-radius: var(--r-sm); }
+
+.input.lg,
+.field input.lg { height: var(--h-lg); font-size: var(--fs-16); }
+
+/* 多行输入：高度交给 rows，其余保持一致 */
+.field textarea,
+.form textarea,
+textarea.input {
+  height: auto;
+  min-height: calc(var(--h-md) * 2);
+  padding: var(--sp-2) var(--pad-x-input);
+  line-height: var(--lh-base);
+  resize: vertical;
+}
+
+.input::placeholder,
+.field input::placeholder,
+.field textarea::placeholder,
+.form-row input::placeholder,
+.login-card input::placeholder,
+.tree-toolbar input::placeholder,
+.paywall-coupon input::placeholder,
+.player-tools input::placeholder { color: var(--text-3); }
+
+.input:hover,
+.field input:hover,
+.field textarea:hover,
+.form-row input:hover,
+.form-row select:hover,
+.login-card input:hover,
+.tree-toolbar input:hover,
+.paywall-coupon input:hover,
+.player-tools input:hover,
+.player-tools select:hover,
+table input:hover,
+table select:hover { border-color: color-mix(in oklab, var(--line-strong) 55%, var(--brand) 45%); }
+
+.input:focus,
+.field input:focus,
+.field textarea:focus,
+.field select:focus,
+.form-row input:focus,
+.form-row select:focus,
+.form input:focus,
+.form select:focus,
+.form textarea:focus,
+.login-card input:focus,
+.tree-toolbar input:focus,
+.paywall-coupon input:focus,
+.player-tools input:focus,
+.player-tools select:focus,
+table input:focus,
+table select:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 var(--ring) color-mix(in oklab, var(--brand) 22%, transparent);
+}
+
+.input:disabled,
+.field input:disabled,
+.form-row input:disabled,
+.form-row select:disabled,
+table input:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.input[aria-invalid="true"],
+.field input[aria-invalid="true"],
+.form-row input[aria-invalid="true"] {
+  border-color: var(--bad);
+  box-shadow: 0 0 0 var(--ring) color-mix(in oklab, var(--bad) 20%, transparent);
+}
+
+/* 下拉箭头统一（抹平浏览器差异） */
+select,
+select.input,
+.field select,
+.form-row select,
+.form select,
+.player-tools select,
+table select {
+  appearance: none;
+  padding-right: calc(var(--pad-x-input) + 18px);
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-2) 50%),
+    linear-gradient(135deg, var(--text-2) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+/* ===================== 字段容器 ===================== */
+.field > span { font-size: var(--fs-12); color: var(--text-2); }
+.form-row { display: flex; gap: var(--sp-3); flex-wrap: wrap; align-items: center; }
+.form-row label { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-13); color: var(--text-2); }
+
+/* ===================== 复选框 / 单选：统一尺寸与强调色 ===================== */
+input[type="checkbox"], input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+/* ===================== 顶部搜索：容器承担几何，内部 input 透明 ===================== */
+.search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1;
+  max-width: 460px;
+  height: var(--h-md);
+  padding: 0 var(--pad-x-input);
+  border: var(--bw) solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: color-mix(in oklab, var(--surface-2, var(--bg-elev)) 94%, white 3%);
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.search:focus-within { border-color: var(--brand); box-shadow: 0 0 0 var(--ring) color-mix(in oklab, var(--brand) 20%, transparent); }
+.search input {
+  flex: 1;
+  height: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-14);
+}
+.search input:focus { outline: none; box-shadow: none; }
+
+/* 字段容器（补齐被覆盖的声明） */
+.field { display: flex; flex-direction: column; gap: var(--sp-2); font-size: var(--fs-13); color: var(--text-2); }
+
+/* 付费墙套餐行/渠道按钮：列表行不是胶囊，统一 r-md + 最小高度 */
+.plan-item, .plan-item.single, .channel {
+  border-radius: var(--r-md);
+  min-height: var(--h-md);
+}
+.plan-item { font-size: var(--fs-14); }

@@ -1,0 +1,9 @@
+{
+  "source": "shared/tokens.css",
+  "hash": "19151544d0da",
+  "generated": [
+    "public/tokens.css",
+    "admin/tokens.css"
+  ],
+  "generatedAt": "2026-11-10T03:47:01.676Z"
+}
