@@ -93,9 +93,14 @@ ok "签名到手" "$HLS"
 c() { "${CURL[@]}" -o /dev/null -w '%{http_code}' "$@"; }
 chk() { local got; got=$(c "${@:3}"); [ "$got" = "$2" ] && ok "$1" "$got" || bad "$1" "期望 $2 实际 $got"; }
 chk "带 Cookie master" 200 -b /tmp/pc.txt "$BASE/video$HLS"
-REND=$(printf '%s' "$PLAY" | jget data.hls | sed 's#/index\.m3u8$##')/720p/index.m3u8
-GOT=$(c -b /tmp/pc.txt "$BASE/video$REND"); case "$GOT" in 200) ok "同集子播放列表" "$GOT";; 404) ok "同集子播放列表" "404（无 720p 档，非鉴权问题）";; *) bad "同集子播放列表" "期望 200/404 实际 $GOT";; esac
-chk "带 Cookie 首分片" 200 -b /tmp/pc.txt "$BASE/video$DIR/720p/seg_000.ts"
+# 码率档位不写死：从 master 播放列表里取实际存在的那一档
+VARIANT=$("${CURL[@]}" -b /tmp/pc.txt "$BASE/video$HLS" | grep -v '^#' | grep -m1 'm3u8' | tr -d '\r')
+[ -n "$VARIANT" ] || VARIANT="360p/index.m3u8"
+chk "同集子播放列表" 200 -b /tmp/pc.txt "$BASE/video$DIR/$VARIANT"
+SEG=$("${CURL[@]}" -b /tmp/pc.txt "$BASE/video$DIR/$VARIANT" | grep -v '^#' | grep -m1 '\.ts$' | tr -d '\r')
+[ -n "$SEG" ] || SEG="seg_000.ts"
+SUBDIR=$(dirname "$VARIANT"); [ "$SUBDIR" = "." ] && SUBDIR=""
+chk "带 Cookie 首分片" 200 -b /tmp/pc.txt "$BASE/video$DIR/${SUBDIR:+$SUBDIR/}$SEG"
 chk "无 Cookie master" 403 "$BASE/video$HLS"
 chk "换 UA master" 403 -b /tmp/pc.txt -A 'Mozilla/5.0 (Different/1.0)' "$BASE/video$HLS"
 chk "源片仍拒" 403 -b /tmp/pc.txt "$BASE/video/media/uploads/ep-1.mp4"
