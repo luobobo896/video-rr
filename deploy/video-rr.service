@@ -1,0 +1,21 @@
+[Unit]
+Description=video-rr (影巢) Node API
+After=network.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/video-rr
+EnvironmentFile=/opt/video-rr/.env
+ExecStart=/usr/bin/node server/index.mjs
+Restart=always
+RestartSec=3
+LimitNOFILE=100000
+# 转码吃 CPU：限制一下，避免把宿主机其他服务饿死
+CPUWeight=80
+MemoryMax=3G
+StandardOutput=append:/var/log/video-rr.log
+StandardError=append:/var/log/video-rr.err.log
+
+[Install]
+WantedBy=multi-user.target

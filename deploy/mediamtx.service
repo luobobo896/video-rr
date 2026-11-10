@@ -1,0 +1,17 @@
+[Unit]
+Description=MediaMTX (RTMP ingest -> HLS) for video-rr
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/video-rr/storage/tools
+Environment=MTX_RTMPADDRESS=:1935
+Environment=MTX_HLSADDRESS=127.0.0.1:8890
+Environment=MTX_APIADDRESS=127.0.0.1:9997
+ExecStart=/opt/video-rr/storage/tools/mediamtx /opt/video-rr/storage/tools/mediamtx.yml
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

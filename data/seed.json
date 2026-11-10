@@ -1,0 +1,707 @@
+{
+  "meta": {
+    "source": "https://mh.yichengwlkj.com/pc?channel=CHANNEL_INDEX",
+    "capturedAt": "2026-11-10T00:53:37.141Z",
+    "note": "本地复刻演示数据；封面为原站 CDN 地址，正式上线请换自有素材"
+  },
+  "constants": {
+    "downloadPageBaiduV1": "{\"schemaVersion\":1,\"page\":\"baidu\",\"platforms\":{\"windows\":{\"url\":\"https://dlapp.jimihua.plus/pc/windows/1.25.0/RRClientSetup_win_rrsp_baidu_1.25.0.exe\"},\"mac\":{\"url\":\"https://dlapp.rrsp.com.cn/mac/1.2.3/rrsp_for_Mac_1.2.3_1.dmg\"}}}",
+    "DIS_DRAMA_REPLY": "1",
+    "pcdn_tx_httpconnecttimeout": "15000",
+    "mainTabCategoryText": "频道",
+    "uninstall_vip_award": "{\"vipDay\":1,\"deadlineDay\":30}",
+    "iosLogo": "http://img.bwcgee.cn/friday/icon/20261007/o_892ea164b6404c2085fd8409db8a9303.jpg",
+    "AI4K_EXPERIENCE_NOT_SECOND": "259200",
+    "androidDownLoadUrl": "https://download.duoduoshipin.vip/friday/application/20230818/o_981a264e0e5344838cd7c497a4c75a12.apk",
+    "jlspPreTaskCount": "10",
+    "mainTabMeNormalIcon": "http://img.bwcgee.cn/iconManage/20181127/o_1543304638986.png",
+    "sofaShareContent": "十分任性！砸锅卖铁！iPad 三角铁耳机 哈曼卡顿音乐卫星 来抢我就给！",
+    "pcdn_init_zijie": "1",
+    "ipadRrDownLoadUrl": "https://ios.rrmj.plus",
+    "downloadPageIOSV1": "{\"schemaVersion\":1,\"page\":\"common\",\"platforms\":{\"android\":{\"url\":\"\",\"title\":\"\",\"subtitle\":\"\",\"logo\":\"\"},\"harmony\":{\"url\":\"\",\"title\":\"\",\"subtitle\":\"\",\"logo\":\"\"},\"ios\":{\"url\":\"https://apps.apple.com/cn/app/id6798168719\",\"title\":\"<p><a href=\\\"https://apps.apple.com/cn/app/id6798168719\\\" target=\\\"_blank\\\" rel=\\\"noopener\\\">【IOS】Tufatv</a></p>\",\"subtitle\":\"<p><span style=\\\"color: #339966;\\\">支持投屏、弹幕、影评</span></p>\",\"logo\":\"https://img.qwapp.top/friday/icon/20261007/o_892ea164b6404c2085fd8409db8a9303.jpg\"},\"ipad\":{\"url\":\"\",\"title\":\"\",\"subtitle\":\"\",\"logo\":\"\"},\"windows\":{\"url\":\"\",\"title\":\"\",\"subtitle\":\"\",\"logo\":\"\"},\"windowsBeta\":{\"url\":\"\",\"title\":\"\",\"subtitle\":\"\",\"logo\":\"\"},\"mac\":{\"url\":\"https://dlapp.rrsp.com.cn/mac/1.2.3/rrsp_for_Mac_1.2.3_1.dmg\",\"title\":\"Mac版\",\"subtitle\":\"\",\"logo\":\"\"},\"web\":{\"url\":\"\",\"title\":\"\",\"subtitle\":\"\",\"logo\":\"\"},\"tv\":{\"url\":\"\",\"title\":\"\",\"subtitle\":\"\",\"logo\":\"\"}}}",
+    "rrmjPlusRakthaiAndroidDownLoadUrl": "https://dlapp.rrmj.plus/android/rrsp/download/rrsp_Replace_V10.14.2_rakthai.apk",
+    "user_comment_open_dd": "0",
+    "normalTopIcon": null,
+    "checkBindingMobile": "true",
+    "quickLookBubbleFlag": "1",
+    "pcdn_tx_pcdnconnecttimeout": "10000",
+    "showTipAdvertisingTrackingEnabled": "1",
+    "videojjSwitch": "0",
+    "H5_video_slogan": "了解更多海外文化，快来人人视频",
+    "RetryImageHost": "{\"img.qwapp.top\":\"img.ablicy.cn\"}",
+    "ShoppingUIWeb": "0",
+    "iosRrDownLoadUrl": "https://apps.apple.com/cn/app/id6798168719",
+    "iosSubtitle": "<p><span style=\"color: #339966;\">支持投屏、弹幕、影评</span></p>",
+    "vipRenewalReminderTitle": "续费成功可激活更多权益",
+    "IpadVipNative": "0",
+    "walletSwitch": "ON",
+    "yybDownLoadUrl": "http://img.bwcgee.cn/wondefulSectionCover/20190816/o_1565927247183.png?imageslim",
+    "setting_render_timeout": "20",
+    "HDRTryoutTimeLimit": "300",
+    "rrmj_key": "rrmj2016",
+    "unicomSwitch": "1",
+    "androidXbRrDownLoadUrl": "https://dlapp.rrsp.com.cn/android/rrsp/download/RRSP_10.40.2_android_rrsp_xb_RRSP_signed.apk",
+    "jlspPlayletRewardCount": "3",
+    "jxxVIPNative": "0",
+    "mainTabMeSelectedIcon": "http://img.bwcgee.cn/iconManage/20181127/o_1543304671593.png",
+    "jlspPreTaskFlag": "0",
+    "pcdn_tx_cdncachesize": "2097152",
+    "ipadDownLoadUrl": "https://apps.apple.com/cn/app/id1671097384",
+    "inspire_video": "0",
+    "RRTopIcon": null,
+    "pcdn_tx_pcdnreadtimeout": "10000",
+    "WX_share_description": "最新影视推荐 最多欧美视频 最快海外趣闻就在人人视频",
+    "sofaAgainTextSuccess": "再抢一个沙发!\n万一PAD就是你的呢",
+    "mainTabBackground": "https://img.bwcgee.cn/static/images/icon_mobile/20180110/tabbarxhdpi.png",
+    "AD_SKIP_MIDDLE_MIN_TIME": "15",
+    "pcdn_tx_pcdnretrycount": "3",
+    "iosLogodd48": "{\"icon\":\"http://img.bwcgee.cn/friday/banner/20250208/o_b60a28d1ece7456ca286f7737449468e.png\",\"name\":\"人人视频\"}",
+    "rewardedVideoDownloadBoostSeconds": "60",
+    "popup_frequency": "1",
+    "OaIdUrl": "https://dlapp.rrmj.plus/static/android/file/20260227/com.example.pptv.cert.pem",
+    "sofaImgSuccess": "https://img.bwcgee.cn/static/images/20180607/ok.png",
+    "walletUserBindingLimit": "10",
+    "colorful_danmu_vip_level_limit": "3",
+    "vipOpeningReminderTitle": "成为会员可享更多权益",
+    "danmu_praise_count_choice": "3",
+    "gameSwitch": "true"
+  },
+  "banners": [
+    {
+      "id": 67825,
+      "name": "独一无二的浪漫",
+      "title": "Joy金贤镇，顶流和经纪人互为粉丝",
+      "image": "http://img.bwcgee.cn/friday/banner/20261103/o_0776cf5aa9a246d8939813dae795a4aa.jpg",
+      "targetUrl": "60535",
+      "type": "season"
+    },
+    {
+      "id": 67818,
+      "name": "黑鸽 第二季",
+      "title": "凯拉·奈特莉×本·卫肖再入谍局",
+      "image": "http://img.bwcgee.cn/friday/banner/20261103/o_0bc81b6271f74769ac25dca4374b72f1.jpg",
+      "targetUrl": "59135",
+      "type": "season"
+    },
+    {
+      "id": 46485,
+      "name": "复活男",
+      "title": "具教焕重生开打，爽感拉满！",
+      "image": "http://img.bwcgee.cn/friday/banner/20260928/o_6971419b385d4c0d91946a9d25dd4702.jpg",
+      "targetUrl": "60251",
+      "type": "season"
+    },
+    {
+      "id": 67817,
+      "name": "步步惊心(泰国版)",
+      "title": "经典穿越虐恋泰版重启！",
+      "image": "http://img.bwcgee.cn/friday/banner/20261103/o_ad0eb11ad0624e40aa6fc469a5a208c2.jpg",
+      "targetUrl": "57320",
+      "type": "season"
+    },
+    {
+      "id": 64432,
+      "name": "黄金时段",
+      "title": "罗伯特帕丁森真人秀猎捕暗黑升级",
+      "image": "http://img.bwcgee.cn/friday/banner/20261028/o_2cf01046990747b9b33621e49dbe0399.jpg",
+      "targetUrl": "60639",
+      "type": "season"
+    },
+    {
+      "id": 21313,
+      "name": "嗜血法医：杀魔复生 第二季",
+      "title": "杀魔复生第二局，德克斯特再开工！",
+      "image": "http://img.bwcgee.cn/friday/banner/20261027/o_3588de30f813408a82d8aab5b59f82d1.jpg",
+      "targetUrl": "58456",
+      "type": "season"
+    }
+  ],
+  "sections": [
+    {
+      "id": "sec1",
+      "title": "热播榜",
+      "items": [
+        {
+          "dramaId": 60310,
+          "title": "心动制造所",
+          "subTitle": "韩国浪漫喜剧",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261106/o_076cd245149e4b55be228328129ee1e5.jpg",
+          "dramaType": "TV",
+          "score": 8.9,
+          "feeMode": "free",
+          "badge": "热播榜·韩剧·第7名",
+          "labels": [
+            "心动实验室",
+            "人工浪漫",
+            "甜蜜圈套",
+            "意外情缘",
+            "双向奔赴",
+            "暧昧拉扯"
+          ]
+        },
+        {
+          "dramaId": 61020,
+          "title": "九皇叔的神医毒妃",
+          "subTitle": "全134集",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261026/o_0b912b90ece5417494da8600dbb31b0e.webp",
+          "dramaType": "PLAYLET",
+          "score": 6,
+          "feeMode": "free",
+          "badge": "",
+          "labels": [
+            "扮猪吃虎",
+            "马甲掉了一地",
+            "古装剧",
+            "救死扶伤",
+            "先婚后爱",
+            "古装穿越"
+          ]
+        },
+        {
+          "dramaId": 60590,
+          "title": "来看三刀",
+          "subTitle": "我弯给了一个叫三刀的男主播了！",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261014/o_9378b64a1c6a4e9581cbb810359dd767.png",
+          "dramaType": "PLAYLET",
+          "score": 8.9,
+          "feeMode": "free",
+          "badge": "短剧榜·AI短剧·第1名",
+          "labels": [
+            "生死局",
+            "快意人生",
+            "孤胆闯天涯",
+            "都市",
+            "喜剧",
+            "打斗"
+          ]
+        },
+        {
+          "dramaId": 59077,
+          "title": "再婚皇后",
+          "subTitle": "韩国宫廷古装剧",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20260826/o_c0d2a7ecb6e04426a4194325847ade01.png",
+          "dramaType": "TV",
+          "score": 8.8,
+          "feeMode": "free",
+          "badge": "热播榜·韩剧·第4名",
+          "labels": [
+            "破茧",
+            "觉醒路",
+            "宫廷博弈",
+            "爱恨双刃剑",
+            "逆袭复仇记",
+            "白切黑"
+          ]
+        },
+        {
+          "dramaId": 58963,
+          "title": "中头奖还是要上班",
+          "subTitle": "暴富打工人的秘密生存记",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261106/o_a7ccf1f5871145e9aedb7502dbdb9737.jpg",
+          "dramaType": "TV",
+          "score": 9.3,
+          "feeMode": "free",
+          "badge": "",
+          "labels": [
+            "一夜暴富",
+            "打工人爽片",
+            "职场反差",
+            "暴富仍打工",
+            "轻喜剧",
+            "职场"
+          ]
+        },
+        {
+          "dramaId": 58313,
+          "title": "黑帮领地 第二季",
+          "subTitle": "硬核黑帮大佬",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261106/o_ef9155877e014e06b86648c5a96217a3.jpg",
+          "dramaType": "TV",
+          "score": 8.9,
+          "feeMode": "free",
+          "badge": "热播榜·美剧·第1名",
+          "labels": [
+            "权谋家族史",
+            "家族权斗",
+            "黑帮闹剧",
+            "生死门",
+            "权力棋局",
+            "背叛风暴"
+          ]
+        },
+        {
+          "dramaId": 56052,
+          "title": "Running Man（2026）",
+          "subTitle": "韩国经典长寿综艺",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20260106/o_b1eb908eb71e4c4ab8b1d827435caae2.jpg",
+          "dramaType": "VARIETY",
+          "score": 9.6,
+          "feeMode": "free",
+          "badge": "",
+          "labels": [
+            "城市猎场",
+            "生死盟友",
+            "智斗连环计",
+            "倒计时危机",
+            "跑男",
+            "追逐"
+          ]
+        },
+        {
+          "dramaId": 61317,
+          "title": "午夜规则 第一季",
+          "subTitle": "神秘便利店",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261104/o_cd05860158ae4b62b77beb8f12f5c61f.webp",
+          "dramaType": "TV",
+          "score": 8.6,
+          "feeMode": "free",
+          "badge": "热搜榜·第2名",
+          "labels": [
+            "恐怖降临",
+            "夜半来客",
+            "秘密会反噬",
+            "越界终有代价",
+            "幽灵事件",
+            "灵异"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec2",
+      "title": "近期开播新剧",
+      "items": [
+        {
+          "dramaId": 1919,
+          "title": "我们这一天 第一季",
+          "subTitle": "暖心泪目",
+          "coverUrl": "http://img.bwcgee.cn/seasonCover/20210223/o_1614071928335.jpg",
+          "dramaType": "TV",
+          "score": 9.1,
+          "feeMode": "free",
+          "badge": "",
+          "labels": [
+            "命运交织",
+            "愈合心伤",
+            "2016",
+            "NBC",
+            "美国",
+            "荷尔蒙"
+          ]
+        },
+        {
+          "dramaId": 59918,
+          "title": "His late repentance",
+          "subTitle": "血债与情劫：七年后的生死救赎",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20260918/o_988e5b47d745496691fcaa8b17aa6cc1.png",
+          "dramaType": "PLAYLET",
+          "score": 6,
+          "feeMode": "free",
+          "badge": "",
+          "labels": [
+            "心碎",
+            "抱憾终身",
+            "爱成伤",
+            "都市",
+            "现言",
+            "追妻火葬场"
+          ]
+        },
+        {
+          "dramaId": 417,
+          "title": "不死法医",
+          "subTitle": "风流倜傥人见人爱的的高龄法医",
+          "coverUrl": "http://img.bwcgee.cn/img/img/20210705/o_99420dff7b7a4713b8e4d11248e35731.jpg",
+          "dramaType": "TV",
+          "score": 9.6,
+          "feeMode": "free",
+          "badge": "",
+          "labels": [
+            "永生之谜",
+            "历史回响",
+            "爱越生死",
+            "2014",
+            "ABC",
+            "美国"
+          ]
+        },
+        {
+          "dramaId": 58458,
+          "title": "终极名单 第二季",
+          "subTitle": "硬核大男主动作谍战爽剧",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261022/o_1970eb31f07e40efa903cb350ed09fd0.jpg",
+          "dramaType": "TV",
+          "score": 9.3,
+          "feeMode": "free",
+          "badge": "热播榜·美剧·第2名",
+          "labels": [
+            "跨国追凶",
+            "间谍迷踪",
+            "血债",
+            "暗夜中",
+            "生死赌局",
+            "复仇打斗"
+          ]
+        },
+        {
+          "dramaId": 58696,
+          "title": "怪物：丽兹·波顿的故事",
+          "subTitle": "拿起斧头的波顿",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20260806/o_01170b1bd1644083a53c16389c51d3db.webp",
+          "dramaType": "TV",
+          "score": 9.4,
+          "feeMode": "free",
+          "badge": "热播榜·美剧·第5名",
+          "labels": [
+            "真实犯罪",
+            "弑父者",
+            "血案真相",
+            "破碎的童年",
+            "传记",
+            "青年"
+          ]
+        },
+        {
+          "dramaId": 59730,
+          "title": "我的有罪之人",
+          "subTitle": "谎言与真心交织的财阀罗曼史",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261106/o_653c02b266504402b3f1534051973523.jpg",
+          "dramaType": "TV",
+          "score": 9.7,
+          "feeMode": "free",
+          "badge": "热播榜·第1名",
+          "labels": [
+            "救赎路",
+            "面具人生",
+            "CEO",
+            "高挑",
+            "继承人",
+            "宿命恋人"
+          ]
+        },
+        {
+          "dramaId": 58233,
+          "title": "百日谎言",
+          "subTitle": "韩国悬疑谍战剧",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261106/o_2b7c195e19b84fdeac446f97f3b05abc.jpg",
+          "dramaType": "TV",
+          "score": 9,
+          "feeMode": "free",
+          "badge": "热播榜·韩剧·第5名",
+          "labels": [
+            "假面恋",
+            "百日心跳",
+            "婚姻生活",
+            "婚恋纠葛",
+            "元气满满",
+            "继承人"
+          ]
+        },
+        {
+          "dramaId": 57732,
+          "title": "四手联弹，两首奏鸣曲",
+          "subTitle": "天才少年×野性天才",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20260911/o_ed460c3a2c974475965fa971f4e43284.jpg",
+          "dramaType": "TV",
+          "score": 9.5,
+          "feeMode": "free",
+          "badge": "",
+          "labels": [
+            "黑白键上的情",
+            "指尖的默契",
+            "双人琴梦",
+            "音乐",
+            "古典音乐",
+            "青年"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec3",
+      "title": "近期上线电影",
+      "items": [
+        {
+          "dramaId": 58168,
+          "title": "幻视任务",
+          "subTitle": "怪奇少年冒险",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261106/o_1c1129dad8fd4f2babfda3e908d40663.jpg",
+          "dramaType": "TV",
+          "score": 9.3,
+          "feeMode": "free",
+          "badge": "热播榜·美剧·第3名",
+          "labels": [
+            "时间裂缝",
+            "悲喜",
+            "Disney",
+            "灵魂伴侣",
+            "精英",
+            "勇敢坚强"
+          ]
+        },
+        {
+          "dramaId": 57854,
+          "title": "Doctor X：白色黑手党时代",
+          "subTitle": "韩国剧情片",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261106/o_4ea3d558fc4744088d2b7f70dc34a233.jpg",
+          "dramaType": "TV",
+          "score": 9.4,
+          "feeMode": "free",
+          "badge": "热播榜·第2名",
+          "labels": [
+            "黑道圣手",
+            "血色博弈",
+            "救赎迷局",
+            "救死扶伤",
+            "悬疑反转",
+            "黑社会"
+          ]
+        },
+        {
+          "dramaId": 61112,
+          "title": "极品小侯爷：我在大梁当纨绔",
+          "subTitle": "全500集",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20261026/o_e03b1fe34120404ba4d7f600ef2f01fa.webp",
+          "dramaType": "PLAYLET",
+          "score": 6,
+          "feeMode": "free",
+          "badge": "短剧榜·漫剧·第5名",
+          "labels": [
+            "扮猪吃虎",
+            "笑到捶地",
+            "真上头",
+            "古装剧",
+            "轻喜剧",
+            "古装穿越"
+          ]
+        },
+        {
+          "dramaId": 16178,
+          "title": "海蒂和爷爷",
+          "subTitle": "遇见你，治愈你",
+          "coverUrl": "http://img.bwcgee.cn/friday/drama/20230707/o_433a1f6d1a8f45a0b08afb93aca94f39.jpg",
+          "dramaType": "MOVIE",
+          "score": 9.6,
+          "feeMode": "vip",
+          "badge": "高分榜·电影·第3名",
+          "labels": [
+            "阿尔卑斯少女",
+            "爷孙情深",
+            "自然疗愈",
+            "亲情治愈",
+            "祖孙情深",
+            "风景"
+          ]
+        }
+      ]
+    }
+  ],
+  "rank": [],
+  "searchHot": [],
+  "detail": {
+    "seasonId": 60535,
+    "title": "独一无二的浪漫",
+    "subTitle": "改编自同名漫画",
+    "description": "待业中的独一，因朋友某次的介绍下，阴错阳差的开始了与演员无二无意的巧遇。在某次跟踪事件中，屡次的巧遇而遭到怀疑的独一，开始了与演员无二好笑又美丽的故事",
+    "year": 2026,
+    "area": "韩国",
+    "category": "剧情/爱情",
+    "author": {
+      "id": 6837803,
+      "nickName": "黑暗冥冥",
+      "headImgUrl": ""
+    },
+    "actors": [
+      {
+        "role": "主演"
+      },
+      {
+        "role": "主演"
+      }
+    ],
+    "episodes": [
+      {
+        "id": 454368,
+        "no": 1,
+        "title": "",
+        "duration": null,
+        "vip": false
+      },
+      {
+        "id": 454369,
+        "no": 2,
+        "title": "",
+        "duration": null,
+        "vip": false
+      }
+    ],
+    "coverUrl": ""
+  },
+  "searchResults": [
+    {
+      "dramaId": 59730,
+      "title": "我的有罪之人",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 9.7,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 61317,
+      "title": "午夜规则 第一季",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 8.7,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 58142,
+      "title": "末路兼职",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 6.1,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 59077,
+      "title": "再婚皇后",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 8.9,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 57854,
+      "title": "Doctor X：白色黑手党时代",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 9.4,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 1792,
+      "title": "怪奇物语 第一季",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 9.6,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 58233,
+      "title": "百日谎言",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 9.1,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 58147,
+      "title": "可能的爱情",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "MOVIE",
+      "score": 6.4,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 55948,
+      "title": "槲寄生谋杀案 第一季",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 7.6,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 60251,
+      "title": "复活男",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "MOVIE",
+      "score": 7.9,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 60779,
+      "title": "回信 花絮",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 7.3,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 60590,
+      "title": "来看三刀",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "PLAYLET",
+      "score": 8.9,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 36136,
+      "title": "绝望写手 第一季",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 8.7,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 58313,
+      "title": "黑帮领地 第二季",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 8.9,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    },
+    {
+      "dramaId": 1088,
+      "title": "都铎王朝 第一季",
+      "subTitle": "",
+      "coverUrl": "",
+      "dramaType": "TV",
+      "score": 7.7,
+      "feeMode": "",
+      "badge": "",
+      "labels": []
+    }
+  ]
+}

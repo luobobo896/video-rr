@@ -1,0 +1,12 @@
+# 运行期数据：数据库、上传源、HLS 切片、下载的工具二进制
+storage/
+!storage/.gitkeep
+
+# 日志与本地环境
+*.log
+.env
+node_modules/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db

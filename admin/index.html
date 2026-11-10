@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>影巢 · 运营后台</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="login" class="login">
+    <form class="login-card" id="login-form">
+      <h1>影巢 · 运营后台</h1>
+      <p>内容 / 运营 / 审核 / 转码 / 直播</p>
+      <label>账号<input id="login-user" value="admin" autocomplete="username" /></label>
+      <label>密码<input id="login-pass" type="password" value="admin123" autocomplete="current-password" /></label>
+      <button type="submit">登录</button>
+      <div class="login-tip" id="login-tip"></div>
+    </form>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <aside class="side">
+      <div class="brand"><span>影</span>影巢后台</div>
+      <nav id="nav"></nav>
+      <div class="side-foot">
+        <a href="/" target="_blank">打开 C 端 ↗</a>
+        <button id="logout">退出登录</button>
+      </div>
+    </aside>
+    <main class="content">
+      <header class="top">
+        <h2 id="page-title">概览</h2>
+        <div class="top-right" id="top-right"></div>
+      </header>
+      <section id="view"></section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script>
+  // 子路径部署：/video/ 或 /video-admin/ 时给前端一个 base
+  (function () {
+    var path = location.pathname.replace(/\/index\.html$/, '');
+    if (/\/$/.test(path)) path = path.slice(0, -1);
+    window.__MH_BASE = /^\/(video|video-admin)$/.test(path) ? path : '';
+  })();
+</script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
