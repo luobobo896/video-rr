@@ -135,6 +135,22 @@ const server = createServer(async (req, res) => {
       return serveFileWithRange(req, res, filePath)
     }
 
+    if (pathname === '/media/placeholder.svg') {
+      const title = (url.searchParams.get('t') ?? '影巢').slice(0, 24)
+      const hue = [...title].reduce((sum, ch) => sum + ch.codePointAt(0), 0) % 360
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600" viewBox="0 0 400 600">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="hsl(${hue}, 40%, 22%)"/><stop offset="1" stop-color="hsl(${(hue + 40) % 360}, 45%, 12%)"/>
+  </linearGradient></defs>
+  <rect width="400" height="600" fill="url(#g)"/>
+  <text x="200" y="300" text-anchor="middle" font-family="PingFang SC, Microsoft YaHei, sans-serif" font-size="26" fill="rgba(255,255,255,0.82)">${title.replace(/[<>&]/g, '')}</text>
+  <text x="200" y="340" text-anchor="middle" font-family="sans-serif" font-size="13" fill="rgba(255,255,255,0.45)">暂无海报</text>
+</svg>`
+      res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=86400' })
+      res.end(svg)
+      return
+    }
+
     if (pathname.startsWith('/media/images/')) {
       const filePath = join(ROOT, 'storage', 'images', pathname.replace('/media/images/', ''))
       if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }

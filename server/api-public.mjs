@@ -16,7 +16,7 @@ const toCard = (row) => ({
   dramaId: row.id,
   title: row.title,
   subTitle: row.sub_title,
-  coverUrl: row.cover_url,
+  coverUrl: row.cover_url || `/media/placeholder.svg?t=${encodeURIComponent(row.title ?? '')}`,
   dramaType: row.category,
   score: row.score,
   feeMode: row.fee_mode,

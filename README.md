@@ -81,6 +81,31 @@ mh-clone/
   docs/LIVE.md       直播部署与推流说明
 ```
 
+## 线上部署（HK 已上线）
+
+| 入口 | 地址 |
+|---|---|
+| C 端 | **https://hk.hsddns.com/video/** |
+| 后台 | **https://hk.hsddns.com/video-admin/**（`admin` / `admin123`，**上线后请立刻改密码**） |
+| 代码 | https://github.com/luobobo896/video-rr |
+
+服务器：Debian 13 / 8 核 / 7.8G 内存 / Node v24.21 / nginx 1.26 / ffmpeg 7.1。部署方式：
+
+```bash
+git clone https://github.com/luobobo896/video-rr.git /opt/video-rr
+cd /opt/video-rr && bash deploy/install-hk.sh      # 幂等：服务 + MediaMTX + nginx 子路径 + 并发参数
+bash deploy/verify-hk.sh                            # 验证：子路径、登录、转码、HLS 可达
+node deploy/loadtest.mjs --url https://127.0.0.1/video/media/hls/1/index.m3u8 \
+  --host hk.hsddns.com --insecure --concurrent 1000 --seconds 20
+```
+
+nginx 侧：`/video/` 静态 + `/video/api/` 反代 Node + `/video/media/hls/` 直接吐切片（sendfile/aio）+ `/video/live/` 反代 MediaMTX；后台同套规则。`worker_connections` 由 768 提到 65535，`worker_rlimit_nofile 100000`（脚本自动改，带备份）。
+
+**实测 1000 并发**（服务器本机 loopback，480p 切片）：8318 请求 / 0 错误 / 峰值并发 1000 / **845.7 Mbps** / p50 1.24s、p95 6.94s。
+注意：客户端进程默认 `ulimit -n 1024` 会先把自己卡死（表现为大量 error），压测前 `ulimit -n 65535`。
+
+素材：原站 CDN（`img.bwcgee.cn`）对 HK 服务器返回 403，且 HTTPS 页面不能加载 http 图片，所以封面/横幅已**镜像到本地** `storage/images/`（`scripts/mirror-images.mjs` + `scripts/rewrite-cover-urls.mjs`），线上走 `/video/media/images/`。缺封面的剧集自动用 `/media/placeholder.svg?t=剧名` 生成占位图。
+
 ## 上生产还缺什么
 
 1. **多码率**：现在单档 720p；要 1080p/480p 就用同一份源跑三档 + 生成 master playlist（HLS `EXT-X-STREAM-INF`）。
