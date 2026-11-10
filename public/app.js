@@ -21,27 +21,35 @@ const topbar = $('#topbar')
 
 const NAV_MAIN = [
   ['精选', '#/home'],
-  // 「全部」指向分类页的 ALL：服务端 type=all 时不加 d.category 条件，
-  // 返回全站已上架内容 + 真实 total + facets，是筛选条唯一能覆盖全集入口
-  ['全部', '#/category/ALL'],
+  // 「分类」进的是全部分类页（频道/排序/地区/类型/年份/标签六排筛选），
+  // 分类页的 ALL 不加 d.category 条件，返回全站已上架内容 + 真实 total + facets
+  ['分类', '#/category/ALL'],
   ['电影', '#/category/MOVIE'],
   ['电视剧', '#/category/TV'],
   ['短剧', '#/category/PLAYLET'],
+  ['动漫', '#/category/ANIME'],
   ['综艺', '#/category/VARIETY'],
+  ['纪录片', '#/category/DOCUMENTARY'],
 ]
 
 // 内容类型的中文名（服务端 dramaType 是 MOVIE/TV/PLAYLET/VARIETY 这类枚举，
 // 详情页 meta 行直接渲染会露出英文，C 端读起来像内部字段）
 const DRAMA_CATEGORY_LABEL = {
   MOVIE: '电影', TV: '电视剧', PLAYLET: '短剧', VARIETY: '综艺',
-  COMIC: '动漫', DOCUMENTARY: '纪录片',
+  ANIME: '动漫', COMIC: '动漫', DOCUMENTARY: '纪录片',
 }
 const categoryLabel = (value) => DRAMA_CATEGORY_LABEL[value] ?? value ?? ''
+// 榜单口径对齐参考站顶部 9 个榜：热播 / 热搜 / 飙升 / 期待 / 经典 / 短剧 / 季度 / 高分 / 冷门佳作
 const NAV_RANK = [
   ['热播榜', '#/rank?type=HOT'],
-  ['飙升榜', '#/rank?type=RISE'],
-  ['经典榜', '#/rank?type=CLASSIC'],
   ['热搜榜', '#/rank?type=SEARCH'],
+  ['飙升榜', '#/rank?type=RISE'],
+  ['期待榜', '#/rank?type=EXPECT'],
+  ['经典榜', '#/rank?type=CLASSIC'],
+  ['短剧榜', '#/rank?type=PLAYLIST'],
+  ['季度榜', '#/rank?type=QUARTER'],
+  ['高分榜', '#/rank?type=HIGHRATE'],
+  ['冷门佳作', '#/rank?type=HIDDEN'],
 ]
 
 const state = {
@@ -611,6 +619,9 @@ function openModal(title, body) {
 
 function vipFloat() {
   if (state.vipDismissed || document.querySelector('.vip-float')) return
+  // 会员浮层只在「有片可看」的页面出现：首页与详情页。分类/榜单/搜索/播放页不挂，
+  // 否则在长列表和播放器上挡住内容（参考站也没有全站挂浮层）。
+  if (!/^#\/(home|drama\/)/.test(location.hash || '#/home')) return
   const price = Number(state.constants.vipPrice)
   if (!Number.isFinite(price) || price <= 0) return
   const node = document.createElement('div')
@@ -713,84 +724,117 @@ async function renderHome() {
 // 分类页排序：服务端 sort=new|score|play
 const CATEGORY_SORTS = [['new', '最新'], ['score', '评分'], ['play', '最多播放']]
 
-async function renderCategory(type) {
+async function renderCategory(type, params = new URLSearchParams()) {
   const pageSize = 24
-  // type=ALL 是「全站」入口，映射漏了会让标题直接显示 "ALL · 影巢"
-  const label = type === 'ALL' ? '全部' : categoryLabel(type)
-  document.title = `${label} · 影巢`
-  // 服务端筛选：/api/category 支持 year/area/sort，total 是「筛选后的真实总数」，
-  // facets 是与当前筛选无关的全集，所以筛选项一次拿到即可，不需要再靠已加载条目聚合。
-  const query = { year: '', area: '', sort: 'new' }
+  // 「全部分类」：频道 / 排序 / 地区 / 类型 / 年份 / 标签 —— 六排筛选项全部来自服务端 facets，
+  // 空库也有完整分类树（枚举固定），数量按当前频道内统计。
+  const state = {
+    channel: String(type || 'ALL').toUpperCase(),
+    sort: params.get('sort') ?? 'hot',
+    region: params.get('region') ?? '',
+    year: params.get('year') ?? '',
+    genre: params.get('genre') ?? '',
+    tag: params.get('tag') ?? '',
+  }
   let page = 1
-  let total = 0
-  let baselineTotal = 0   // 首次（无 year/area）请求的 total = 本分类全量，用于"筛选命中 N / 共 M"
-  let exhausted = false
-  let facets = { years: [], areas: [] }
   let items = []
+  let total = 0
+  let baseline = 0
+  let exhausted = false
+  let expanded = false
+  let facets = { channels: [], sorts: [], regions: [], genres: [], years: [], tags: [] }
 
-  const fetchPage = (nextPage) => {
-    const params = new URLSearchParams({ type, page: String(nextPage), pageSize: String(pageSize), sort: query.sort })
-    if (query.year) params.set('year', query.year)
-    if (query.area) params.set('area', query.area)
-    return api(`/api/category?${params.toString()}`)
+  const channelLabel = () => (facets.channels.find((row) => row.value === state.channel) ?? { label: '全部' }).label
+  const hasFilter = () => Boolean(state.region || state.year || state.genre || state.tag)
+  const sortLabel = () => (facets.sorts.find((row) => row.value === state.sort) ?? { label: '最热' }).label
+
+  const buildQuery = (nextPage) => {
+    const query = new URLSearchParams({ type: state.channel, page: String(nextPage), pageSize: String(pageSize), sort: state.sort })
+    for (const key of ['region', 'year', 'genre', 'tag']) if (state[key]) query.set(key, state[key])
+    return query
+  }
+  // 筛选项写进 hash，分享/刷新后仍是同一份筛选结果（replaceState 不触发 hashchange，不会重复渲染）
+  const syncHash = () => {
+    const query = new URLSearchParams()
+    if (state.sort !== 'hot') query.set('sort', state.sort)
+    for (const key of ['region', 'year', 'genre', 'tag']) if (state[key]) query.set(key, state[key])
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    const next = `#/category/${state.channel}${suffix}`
+    if (location.hash !== next) window.history.replaceState(null, '', next)
   }
 
-  const first = await fetchPage(1)
+  const first = await api(`/api/category?${buildQuery(1).toString()}`)
   total = Number(first.total ?? 0)
-  baselineTotal = total
+  baseline = total
   items = first.list ?? []
-  facets = first.facets ?? facets
+  facets = { ...facets, ...(first.facets ?? {}) }
   exhausted = items.length < pageSize
 
+  document.title = `${state.channel === 'ALL' ? '全部分类' : channelLabel()} · 影巢`
   view.innerHTML = `
-    <div class="section-head" style="margin-top:26px">
-      <div class="section-title">${escapeHtml(label)}</div>
+    <div class="section-head" style="margin-top:22px">
+      <div class="section-title">${state.channel === 'ALL' ? '全部分类' : escapeHtml(channelLabel())}</div>
       <div class="section-hint" id="cat-hint"></div>
     </div>
     <div class="cat-filters" id="cat-filters"></div>
     <div class="grid" id="cat-grid"></div>
     <div id="cat-more-wrap" style="text-align:center;margin:24px 0"></div>`
 
-  // year/area 才是"筛选"（会减少结果）；sort 只改顺序，文案上要分开说，否则用户以为排序把片筛掉了
-  const hasFilter = () => Boolean(query.year || query.area)
-  const sortText = () => (CATEGORY_SORTS.find(([value]) => value === query.sort) ?? CATEGORY_SORTS[0])[1]
-
-  // facets 由服务端给（{value,label,count}，与当前筛选无关的全集），前端不再自行聚合
-  const facetRow = (title, key, list) => {
-    if (!list.length) return ''
+  const row = (title, key, list, options = {}) => {
+    if (!list || !list.length) return ''
+    const limit = options.limit ?? list.length
+    const shown = expanded || limit >= list.length ? list : list.slice(0, limit)
     const pill = (value, text, count) => {
-      const active = String(value) === String(query[key] ?? '')
-      const tail = count === undefined ? '' : `<em>${fmtCount(count)}</em>`
+      const active = String(value) === String(state[key] ?? '')
+      const tail = count === undefined || count === null ? '' : `<em>${fmtCount(count)}</em>`
       return `<button class="pill ${active ? 'active' : ''}" data-facet="${key}" data-value="${escapeHtml(String(value))}" aria-pressed="${active}">${escapeHtml(text)}${tail}</button>`
     }
+    const more = limit < list.length
+      ? `<button class="pill pill-more" data-expand="1">${expanded ? '收起选项' : `展开 ${list.length - limit} 项`}</button>`
+      : (options.collapsible && expanded ? '<button class="pill pill-more" data-expand="1">收起选项</button>' : '')
     return `<div class="filter-row"><span class="filter-label">${title}</span>
-      <div class="subtabs">${pill('', '全部')}${list.map((facet) => pill(facet.value, facet.label ?? facet.value, facet.count)).join('')}</div></div>`
+      <div class="subtabs">${pill('', '全部')}${shown.map((facet) => pill(facet.value, facet.label ?? facet.value, facet.count)).join('')}${options.collapsible ? more : ''}</div></div>`
   }
 
   const paintFilters = () => {
     const bar = $('#cat-filters')
     if (!bar) return
-    const sortHtml = CATEGORY_SORTS.map(([value, text]) => {
-      const active = query.sort === value
-      return `<button class="pill ${active ? 'active' : ''}" data-facet="sort" data-value="${value}" aria-pressed="${active}">${text}</button>`
-    }).join('')
-    bar.innerHTML = `${facetRow('年份', 'year', facets.years ?? [])}${facetRow('地区', 'area', facets.areas ?? [])}
-      <div class="filter-row"><span class="filter-label">排序</span><div class="subtabs">${sortHtml}</div></div>`
+    const channelRow = row('频道', 'channel', facets.channels ?? [])
+    const sortRow = row('排序', 'sort', facets.sorts ?? [])
+    const regionRow = row('地区', 'region', facets.regions ?? [])
+    const genreRow = row('类型', 'genre', (facets.genres ?? []).map((g) => ({ value: g.value, label: g.label, count: g.count })))
+    const yearRow = row('年份', 'year', facets.years ?? [])
+    const tagRow = expanded ? row('标签', 'tag', facets.tags ?? [], { limit: 24 }) : ''
+    bar.innerHTML = `${channelRow}${sortRow}${regionRow}${genreRow}${yearRow}
+      ${tagRow}
+      <div class="filter-foot">
+        <button class="btn-ghost sm" data-expand="1">${expanded ? '收起选项' : '更多筛选（标签）'}</button>
+        ${hasFilter() ? '<button class="btn-ghost sm" id="cat-reset">清空筛选</button>' : ''}
+      </div>`
   }
 
   const paintGrid = () => {
     const hint = $('#cat-hint')
     if (hint) {
-      // total 是服务端返回的「筛选后真实总数」，baselineTotal 是本分类全量（首次无筛选请求）
-      hint.textContent = hasFilter()
-        ? `筛选命中 ${total} 部 / 本分类 ${baselineTotal} 部 · 按${sortText()}`
-        : `共 ${total} 部 · 按${query.sort === 'new' ? '更新时间' : sortText() + '排序'}`
+      const parts = []
+      parts.push(hasFilter() ? `筛选命中 ${total} 部 / 共 ${baseline} 部` : `共 ${total} 部`)
+      parts.push(`按${sortLabel()}`)
+      if (state.region) parts.push((facets.regions.find((r) => r.value === state.region) ?? {}).label ?? state.region)
+      if (state.year) parts.push((facets.years.find((r) => r.value === state.year) ?? {}).label ?? state.year)
+      if (state.genre) parts.push(state.genre)
+      const activeTag = (facets.tags ?? []).find((tag) => String(tag.value) === String(state.tag))
+      if (activeTag) parts.push(`#${activeTag.label}`)
+      hint.textContent = parts.filter(Boolean).join(' · ')
     }
     const grid = $('#cat-grid')
     if (!grid) return
     grid.innerHTML = items.length
       ? items.map((item) => posterCard(item, { plays: true })).join('')
-      : `<div class="empty" style="grid-column:1 / -1">${hasFilter() ? `当前筛选没有内容 · 本分类共 ${baselineTotal} 部` : '该分类暂无内容'}</div>`
+      : `<div class="empty" style="grid-column:1 / -1">
+           ${hasFilter() ? `没有符合条件的内容 · <button class="btn-ghost sm" id="cat-reset-2">清空筛选</button>` : '这个分类暂时还没有内容'}
+         </div>`
+    const reset2 = $('#cat-reset-2')
+    if (reset2) reset2.addEventListener('click', () => { void applyPatch({ region: '', year: '', genre: '', tag: '' }) })
     const wrap = $('#cat-more-wrap')
     if (!wrap) return
     wrap.innerHTML = items.length < total && !exhausted ? '<button class="btn-ghost" id="cat-more">加载更多</button>' : ''
@@ -801,7 +845,7 @@ async function renderCategory(type) {
       more.textContent = '加载中…'
       try {
         page += 1
-        const next = await fetchPage(page)
+        const next = await api(`/api/category?${buildQuery(page).toString()}`)
         const list = next.list ?? []
         if (list.length < pageSize) exhausted = true
         total = Number(next.total ?? total)
@@ -816,38 +860,68 @@ async function renderCategory(type) {
     })
   }
 
-  $('#cat-filters').addEventListener('click', async (event) => {
-    const button = event.target.closest('[data-facet]')
-    if (!button || button.disabled) return
-    const key = button.dataset.facet
-    const value = button.dataset.value ?? ''
-    const previous = { ...query }
-    const before = { year: query.year, area: query.area, sort: query.sort }
-    query[key] = key === 'sort' ? (value || 'new') : value
-    if (before.year === query.year && before.area === query.area && before.sort === query.sort) return
+  // 所有筛选变化都走这里：改状态 → 从第 1 页重取 → 重画；失败回滚
+  const applyPatch = async (patch) => {
+    const previous = { ...state }
+    Object.assign(state, patch)
+    if (state.channel === previous.channel) { /* 频道变了要重取，其余也一样 */ }
+    syncHash()
     paintFilters()
     const hint = $('#cat-hint')
     if (hint) hint.textContent = '筛选中…'
-    // 筛选变化 = 从第 1 页重新取，不复用旧累积：服务端 total 已是筛选后的真实总数，
-    // 分页语义必须重新从 page=1 开始，否则"加载更多"会跳过区间。
     try {
-      const data = await fetchPage(1)
+      const data = await api(`/api/category?${buildQuery(1).toString()}`)
       page = 1
       total = Number(data.total ?? 0)
       items = data.list ?? []
-      facets = data.facets ?? facets
+      facets = { ...facets, ...(data.facets ?? {}) }
       exhausted = items.length < pageSize
+      // 无筛选时的 total 就是该频道全量，作为「筛选命中 N / 共 M」的分母
+      if (!hasFilter()) baseline = total
     } catch (error) {
-      Object.assign(query, previous)
+      Object.assign(state, previous)
+      syncHash()
       paintFilters()
       paintGrid()
       toast(error.message)
       return
     }
+    if (patch.channel) document.title = `${state.channel === 'ALL' ? '全部分类' : channelLabel()} · 影巢`
+    const title = document.querySelector('.section-title')
+    if (title) title.textContent = state.channel === 'ALL' ? '全部分类' : channelLabel()
+    paintFilters()
     paintGrid()
-    // 埋点：value 传命中数（筛选后的 total），meta 带完整筛选维度，便于后台做筛选漏斗
-    track('category_filter', { dramaId: null, value: total, meta: { year: query.year, area: query.area, sort: query.sort, type } })
+    track('category_filter', {
+      dramaId: null,
+      value: total,
+      meta: { channel: state.channel, sort: state.sort, region: state.region, year: state.year, genre: state.genre, tag: state.tag },
+    })
+  }
+
+  $('#cat-filters').addEventListener('click', (event) => {
+    const expander = event.target.closest('[data-expand]')
+    if (expander) {
+      expanded = !expanded
+      paintFilters()
+      return
+    }
+    if (event.target.closest('#cat-reset')) {
+      void applyPatch({ region: '', year: '', genre: '', tag: '', sort: 'hot' })
+      return
+    }
+    const button = event.target.closest('[data-facet]')
+    if (!button || button.disabled) return
+    const key = button.dataset.facet
+    const value = button.dataset.value ?? ''
+    const next = key === 'channel'
+      ? { channel: value || 'ALL' }
+      : key === 'sort'
+        ? { sort: value || 'hot' }
+        : { [key]: String(state[key]) === String(value) ? '' : value }   // 再点一次同一个筛选项 = 取消
+    if (key === 'channel') { expanded = expanded; }
+    void applyPatch(next)
   })
+
   paintFilters()
   paintGrid()
   vipFloat()
@@ -1706,7 +1780,7 @@ async function route() {
   }
   try {
     if (segments[0] === 'home' || segments.length === 0) await renderHome()
-    else if (segments[0] === 'category') await renderCategory(segments[1] ?? 'ALL')
+    else if (segments[0] === 'category') await renderCategory(segments[1] ?? 'ALL', params)
     else if (segments[0] === 'rank') await renderRank(params)
     else if (segments[0] === 'search') await renderSearch(params)
     else if (segments[0] === 'drama') await renderDrama(segments[1])

@@ -56,7 +56,9 @@ export const ADMIN_OPTIONS = {
     { value: 'MOVIE', label: '电影' },
     { value: 'TV', label: '电视剧' },
     { value: 'PLAYLET', label: '短剧 / 漫剧' },
+    { value: 'ANIME', label: '动漫' },
     { value: 'VARIETY', label: '综艺' },
+    { value: 'DOCUMENTARY', label: '纪录片' },
   ],
   accessModes: [
     { value: 'free', label: '免费' },

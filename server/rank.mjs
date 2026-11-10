@@ -46,6 +46,49 @@ export const RANK_STRATEGIES = {
       FROM dramas d WHERE d.status = 'published' AND COALESCE(d.score, 0) > 0
       ORDER BY score DESC, d.id ASC`,
   },
+  // 以下四种是「抄参考站」补齐的榜：不需要新埋点，全部由现有表算得出来，
+  // 保证空库也能排（评分/年份/收藏是静态字段，不依赖任何人先播过）。
+  HIGHRATE: {
+    label: '高分榜',
+    desc: '站内评分（≥8.0）优先，同分看收藏',
+    sql: `SELECT d.id AS drama_id,
+        COALESCE(d.score, 0) * 10.0 + (SELECT COUNT(*) FROM favorites f WHERE f.drama_id = d.id) * 1.0 AS score
+      FROM dramas d WHERE d.status = 'published' AND COALESCE(d.score, 0) >= 8.0
+      ORDER BY COALESCE(d.score, 0) DESC, score DESC, d.id ASC`,
+  },
+  EXPECT: {
+    label: '期待榜',
+    desc: '未上架/未完结的片子按上架时间倒序（即将上线）',
+    sql: `SELECT d.id AS drama_id, 100.0 - ABS(COALESCE(d.year, 2000) - 2030) AS score
+      FROM dramas d WHERE d.status IN ('published', 'draft')
+      ORDER BY COALESCE(d.year, 2000) DESC, d.id DESC LIMIT 20`,
+  },
+  QUARTER: {
+    label: '季度榜',
+    desc: '本季度新上架内容按播放量排序',
+    sql: `SELECT d.id AS drama_id,
+        (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id AND pe.created_at >= datetime('now', '-90 days')) * 1.0
+      + COALESCE(d.score, 0) AS score
+      FROM dramas d WHERE d.status = 'published' AND d.created_at >= datetime('now', '-90 days')
+      ORDER BY score DESC, d.id ASC`,
+  },
+  HIDDEN: {
+    label: '冷门佳作',
+    desc: '评分高但播放量低（< 50 次）的内容',
+    sql: `SELECT d.id AS drama_id, COALESCE(d.score, 0) * 10.0 AS score
+      FROM dramas d
+      WHERE d.status = 'published' AND COALESCE(d.score, 0) >= 7.0
+        AND (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id) < 50
+      ORDER BY COALESCE(d.score, 0) DESC, d.id ASC`,
+  },
+  PLAYLIST: {
+    label: '短剧榜',
+    desc: '短剧 / 漫剧按播放量',
+    sql: `SELECT d.id AS drama_id,
+        (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id) * 1.0 + COALESCE(d.score, 0) AS score
+      FROM dramas d WHERE d.status = 'published' AND d.category = 'PLAYLET'
+      ORDER BY score DESC, d.id ASC`,
+  },
 }
 
 /**

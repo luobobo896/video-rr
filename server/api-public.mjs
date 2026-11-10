@@ -25,6 +25,54 @@ const one = (sql, ...args) => db.prepare(sql).get(...args)
 /** 单次播放链接的最长有效期：覆盖整集时长，默认 2 小时（可用 MH_PLAY_TTL_MAX 调整）。 */
 const PLAY_TTL_MAX = Math.max(LINK_TTL, Math.min(4 * 3600, Number(process.env.MH_PLAY_TTL_MAX ?? 7200) || 7200))
 
+/* ---------- 「全部分类」筛选taxonomy：固定枚举，空库也有完整分类树 ---------- */
+export const CATEGORY_CHANNELS = [
+  { value: 'ALL', label: '全部' },
+  { value: 'TV', label: '电视剧' },
+  { value: 'MOVIE', label: '电影' },
+  { value: 'PLAYLET', label: '短剧' },
+  { value: 'ANIME', label: '动漫' },
+  { value: 'VARIETY', label: '综艺' },
+  { value: 'DOCUMENTARY', label: '纪录片' },
+]
+export const CATEGORY_SORTS = [
+  { value: 'hot', label: '最热' },
+  { value: 'new', label: '最新' },
+  { value: 'score', label: '好评' },
+  { value: 'discuss', label: '讨论最多' },
+  { value: 'upcoming', label: '即将上线' },
+]
+/** 地区按 area 文本匹配；negate 的「其他」= 不属于任何已知地区 */
+export const CATEGORY_REGIONS = [
+  { value: 'US', label: '美国', areas: ['美国'] },
+  { value: 'UK', label: '英国', areas: ['英国'] },
+  { value: 'KR', label: '韩国', areas: ['韩国'] },
+  { value: 'JP', label: '日本', areas: ['日本'] },
+  { value: 'TH', label: '泰国', areas: ['泰国'] },
+  { value: 'CN', label: '内地', areas: ['内地', '中国大陆', '中国'] },
+  { value: 'HK', label: '中国香港', areas: ['中国香港', '香港'] },
+  { value: 'TW', label: '中国台湾', areas: ['中国台湾', '台湾'] },
+  { value: 'OTHER', label: '其他', areas: [], negate: true },
+]
+/** 类型按标签名匹配（值即标签名，一级标签会带上其子标签） */
+export const CATEGORY_GENRES = [
+  '剧情', '喜剧', '动作', '冒险', '爱情', '动画', '歌舞', '医疗', '科幻', '奇幻',
+  '悬疑', '惊悚', '犯罪', '传记', '历史', '战争', '灾难', '美食', '真人秀', '脱口秀',
+]
+const CURRENT_YEAR = new Date().getFullYear() + 1
+export const CATEGORY_YEARS = [
+  { value: String(CURRENT_YEAR), label: String(CURRENT_YEAR), from: CURRENT_YEAR, to: CURRENT_YEAR },
+  { value: String(CURRENT_YEAR - 1), label: String(CURRENT_YEAR - 1), from: CURRENT_YEAR - 1, to: CURRENT_YEAR - 1 },
+  { value: String(CURRENT_YEAR - 2), label: String(CURRENT_YEAR - 2), from: CURRENT_YEAR - 2, to: CURRENT_YEAR - 2 },
+  { value: String(CURRENT_YEAR - 3), label: String(CURRENT_YEAR - 3), from: CURRENT_YEAR - 3, to: CURRENT_YEAR - 3 },
+  { value: String(CURRENT_YEAR - 4), label: String(CURRENT_YEAR - 4), from: CURRENT_YEAR - 4, to: CURRENT_YEAR - 4 },
+  { value: String(CURRENT_YEAR - 5), label: String(CURRENT_YEAR - 5), from: CURRENT_YEAR - 5, to: CURRENT_YEAR - 5 },
+  { value: '2011-2020', label: '2011—2020', from: 2011, to: 2020 },
+  { value: '2000-2010', label: '2000—2010', from: 2000, to: 2010 },
+  { value: '1990s', label: '90年代', from: 1990, to: 1999 },
+  { value: '1980s', label: '80年代', from: 1980, to: 1989 },
+]
+
 export function send(res, data, code = '0000', msg = 'Success', status = 200) {
   const body = JSON.stringify({ requestId: `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`, code, msg, data })
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
@@ -155,10 +203,14 @@ export async function handlePublic(pathname, url, req, res) {
         vipPrice: site.vipPrice ?? (plan ? Number(plan.price_cny).toFixed(2) : ''),
         vipMonthlyPrice: planMonthly,
         vipUnit: site.vipUnit ?? '元/月',
-        categories: [
-          { code: 'TV', name: '电视剧' }, { code: 'MOVIE', name: '电影' },
-          { code: 'PLAYLET', name: '短剧' }, { code: 'VARIETY', name: '综艺' },
-        ],
+        categories: CATEGORY_CHANNELS.filter((row) => row.value !== 'ALL').map((row) => ({ code: row.value, name: row.label })),
+        taxonomy: {
+          channels: CATEGORY_CHANNELS,
+          sorts: CATEGORY_SORTS,
+          regions: CATEGORY_REGIONS.map((row) => ({ value: row.value, label: row.label })),
+          genres: CATEGORY_GENRES,
+          years: CATEGORY_YEARS.map((row) => ({ value: row.value, label: row.label })),
+        },
         pay: {
           channels,
           alipay: live.some((channel) => channel.code === 'alipay'),
@@ -194,34 +246,116 @@ export async function handlePublic(pathname, url, req, res) {
     }
 
     if (pathname === '/api/category') {
-      // 服务端筛选：type / year / area / sort（new|score|play）+ 分页；total 为筛选后的真实总数
-      const type = (url.searchParams.get('type') ?? 'TV').trim()
-      const page = Math.max(1, Number(url.searchParams.get('page') ?? 1))
-      const pageSize = Math.min(60, Math.max(1, Number(url.searchParams.get('pageSize') ?? 24)))
+      // 「全部分类」筛选：频道 / 排序 / 地区 / 类型（按标签名）/ 年份（单年或年代桶）/ 标签 + 分页
+      // total 为筛选后的真实总数；facets 的计数按当前频道内统计，用于给筛选项打数量
+      const p = url.searchParams
+      const channel = (p.get('type') ?? p.get('channel') ?? 'ALL').trim().toUpperCase()
+      const page = Math.max(1, Number(p.get('page') ?? 1))
+      const pageSize = Math.min(60, Math.max(1, Number(p.get('pageSize') ?? 24)))
+      const sort = (p.get('sort') ?? 'hot').trim().toLowerCase()
+
       const where = ["d.status = 'published'"]
       const params = []
-      // 前端默认路由是 #/category/ALL（大写），这里统一按不区分大小写处理，避免筛成 category='ALL' 返回 0 条
-      if (type && type.toLowerCase() !== 'all') { where.push('d.category = ?'); params.push(type.toUpperCase()) }
-      const year = Number(url.searchParams.get('year') ?? 0)
-      if (year > 1900) { where.push('d.year = ?'); params.push(year) }
-      const area = (url.searchParams.get('area') ?? '').trim()
-      if (area) { where.push('d.area = ?'); params.push(area) }
-      const sort = url.searchParams.get('sort') ?? 'new'
-      const orderBy = sort === 'score' ? 'd.score DESC, d.id DESC'
-        : sort === 'play' ? 'play_count DESC, d.id DESC' : 'd.id DESC'
-      const clause = where.join(' AND ')
-      const rows = all(`SELECT d.*, (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id) AS play_count
-        FROM dramas d WHERE ${clause} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
-      ...params, pageSize, (page - 1) * pageSize)
-      const total = one(`SELECT COUNT(*) AS n FROM dramas d WHERE ${clause}`, ...params).n
-      // 筛选项（年份倒序、地区按数量）供前端渲染筛选条；不受当前筛选影响，始终是全集
-      const facets = {
-        years: all("SELECT year, COUNT(*) AS n FROM dramas WHERE status = 'published' AND year > 1900 GROUP BY year ORDER BY year DESC")
-          .map((row) => ({ value: Number(row.year), label: `${row.year} 年`, count: Number(row.n) })),
-        areas: all("SELECT area, COUNT(*) AS n FROM dramas WHERE status = 'published' AND TRIM(COALESCE(area,'')) <> '' GROUP BY area ORDER BY n DESC")
-          .map((row) => ({ value: row.area, label: row.area, count: Number(row.n) })),
+      const channelWhere = []
+      const channelParams = []
+      if (channel && channel !== 'ALL') {
+        channelWhere.push('d.category = ?')
+        channelParams.push(channel)
       }
-      return send(res, { page, pageSize, total, list: rows.map((drama) => cardOf(drama, userId, context)), facets })
+
+      // 地区：前端传标准 code（US/UK/KR/JP/TH/CN/HK/TW/OTHER），按 area 文本映射
+      const region = (p.get('region') ?? '').trim().toUpperCase()
+      const regionRule = CATEGORY_REGIONS.find((row) => row.value === region)
+      if (regionRule) {
+        if (regionRule.negate) {
+          const known = CATEGORY_REGIONS.filter((row) => !row.negate).flatMap((row) => row.areas)
+          where.push(`COALESCE(d.area, '') NOT IN (${known.map(() => '?').join(',')})`)
+          params.push(...known)
+        } else {
+          where.push(`d.area IN (${regionRule.areas.map(() => '?').join(',')})`)
+          params.push(...regionRule.areas)
+        }
+      }
+
+      // 年份：2026 这种单年，或 2011-2020 / 2000-2010 / 1990s / 1980s 这种区间
+      const year = (p.get('year') ?? '').trim()
+      const yearRule = CATEGORY_YEARS.find((row) => row.value === year)
+      if (yearRule && Number.isInteger(yearRule.from)) {
+        where.push('d.year >= ? AND d.year <= ?')
+        params.push(yearRule.from, yearRule.to)
+      }
+
+      // 类型：按标签名匹配（标签支持一级/二级，选一级时带上其子标签）
+      const genre = (p.get('genre') ?? '').trim()
+      if (genre) {
+        where.push(`d.id IN (SELECT dt.drama_id FROM drama_tags dt JOIN tags t ON t.id = dt.tag_id
+          WHERE t.name = ? OR t.parent_id IN (SELECT id FROM tags WHERE name = ?))`)
+        params.push(genre, genre)
+      }
+
+      // 标签：直接指定 tagId（后台/C 端标签墙进入）
+      const tagId = Number(p.get('tag') ?? 0)
+      if (tagId) {
+        where.push('d.id IN (SELECT drama_id FROM drama_tags WHERE tag_id = ?)')
+        params.push(tagId)
+      }
+
+      // 兼容旧参数（area 精确 / sort=play|new|score）
+      const legacyArea = (p.get('area') ?? '').trim()
+      if (!regionRule && legacyArea) { where.push('d.area = ?'); params.push(legacyArea) }
+
+      const orderBy = sort === 'new' ? 'd.year DESC, d.id DESC'
+        : sort === 'score' ? 'd.score DESC, d.id DESC'
+          : sort === 'discuss' ? 'discuss_count DESC, d.score DESC'
+            : sort === 'upcoming' ? 'd.year DESC, d.id DESC'
+              : 'hot_score DESC, d.score DESC'
+
+      // 热播 = 播放 + 完播×2 + 收藏×3（30 天），讨论 = 弹幕 + 评论
+      const FROM = `FROM dramas d
+        LEFT JOIN (SELECT drama_id, COUNT(*) AS play_count FROM play_events WHERE created_at >= datetime('now', '-30 days') GROUP BY drama_id) pe ON pe.drama_id = d.id
+        LEFT JOIN (SELECT e.drama_id, COUNT(*) AS danmu_count FROM danmus m JOIN episodes e ON e.id = m.episode_id WHERE m.status = 'approved' GROUP BY e.drama_id) dm ON dm.drama_id = d.id
+        LEFT JOIN (SELECT drama_id, COUNT(*) AS comment_count FROM comments WHERE status = 'approved' GROUP BY drama_id) cm ON cm.drama_id = d.id
+        LEFT JOIN (SELECT drama_id, COUNT(*) AS fav_count FROM favorites GROUP BY drama_id) fv ON fv.drama_id = d.id`
+      const SELECT = `SELECT d.*, COALESCE(pe.play_count, 0) AS play_count,
+        COALESCE(dm.danmu_count, 0) + COALESCE(cm.comment_count, 0) AS discuss_count,
+        (COALESCE(pe.play_count, 0) + COALESCE(dm.danmu_count, 0) * 2 + COALESCE(fv.fav_count, 0) * 3) AS hot_score`
+
+      const clause = where.join(' AND ')
+      const rows = all(`${SELECT} ${FROM} WHERE ${clause} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
+        ...params, pageSize, (page - 1) * pageSize)
+      const total = one(`SELECT COUNT(*) AS n ${FROM} WHERE ${clause}`, ...params).n
+
+      // 筛选项：全部来自固定枚举（空库也有完整分类树），计数按「当前频道内」统计
+      const channelClause = channelWhere.length ? `WHERE d.status = 'published' AND ${channelWhere.join(' AND ')}` : "WHERE d.status = 'published'"
+      const countBy = (sql, argList = []) => Number(one(`SELECT COUNT(*) AS n ${FROM} ${channelClause} AND ${sql}`, ...channelParams, ...argList)?.n ?? 0)
+      const facets = {
+        channels: CATEGORY_CHANNELS.map((row) => ({
+          value: row.value, label: row.label, count: row.value === 'ALL'
+            ? Number(one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'published'").n)
+            : Number(one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'published' AND category = ?", row.value).n),
+        })),
+        sorts: CATEGORY_SORTS.map((row) => ({ value: row.value, label: row.label })),
+        regions: CATEGORY_REGIONS.map((row) => ({
+          value: row.value,
+          label: row.label,
+          count: row.negate
+            ? countBy(`COALESCE(d.area, '') NOT IN (${CATEGORY_REGIONS.filter((item) => !item.negate).flatMap((item) => item.areas).map(() => '?').join(',')})`,
+              CATEGORY_REGIONS.filter((item) => !item.negate).flatMap((item) => item.areas))
+            : countBy(`d.area IN (${row.areas.map(() => '?').join(',')})`, row.areas),
+        })),
+        genres: CATEGORY_GENRES.map((label) => ({ value: label, label, count: countBy(
+          `d.id IN (SELECT dt.drama_id FROM drama_tags dt JOIN tags t ON t.id = dt.tag_id WHERE t.name = ? OR t.parent_id IN (SELECT id FROM tags WHERE name = ?))`,
+          [label, label]) })),
+        years: CATEGORY_YEARS.map((row) => ({ value: row.value, label: row.label, count: countBy('d.year >= ? AND d.year <= ?', [row.from, row.to]) })),
+        tags: all(`SELECT t.id, t.name, (SELECT COUNT(*) FROM drama_tags dt WHERE dt.tag_id = t.id) AS n FROM tags t WHERE t.status = 'active' ORDER BY n DESC, t.sort LIMIT 24`)
+          .map((row) => ({ value: Number(row.id), label: row.name, count: Number(row.n) })),
+      }
+      return send(res, {
+        page, pageSize, total,
+        list: rows.map((drama) => cardOf(drama, userId, context)),
+        facets,
+        active: { channel, sort, region, year, genre, tagId },
+      })
     }
 
     if (pathname === '/api/rank') {

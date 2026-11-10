@@ -410,3 +410,30 @@ button { font-family: inherit; cursor: pointer; }
   .cat-filters .subtabs::-webkit-scrollbar { display: none; }
   .cat-filters .subtabs .pill { flex: 0 0 auto; }
 }
+
+/* 全部分类页：六排筛选（频道/排序/地区/类型/年份/标签）。
+   参考站（人人视频）的筛选行是「窄标签 + 药丸按钮」，这里沿用同一密度：
+   label 固定宽度保证竖排对齐，pill 换行不压缩，展开项在行尾单独一个弱按钮。 */
+.cat-filters .filter-label { flex: 0 0 44px; }
+.filter-row .subtabs { align-items: center; }
+.pill-more { background: transparent !important; color: var(--text-3); border: 1px dashed rgba(255,255,255,0.18); }
+.pill-more:hover { color: #fff; border-color: rgba(255,255,255,0.4); }
+.filter-foot { display: flex; gap: 10px; align-items: center; margin-top: 2px; }
+.filter-foot .btn-ghost { background: rgba(255,255,255,0.06); }
+#cat-reset { color: var(--text-3); }
+#cat-reset:hover { color: #fff; }
+@media (max-width: 900px) {
+  .cat-filters .filter-label { flex: 0 0 38px; font-size: 11px; }
+  .filter-foot { flex-wrap: wrap; }
+}
+
+/* 分类页筛选在窄屏必须「每行内部横滑」，而不是把整页撑宽：
+   .cat-filters 是 grid，grid 子项默认 min-width:auto，长 pill 行会顶出视口。
+   给行与容器都压 min-width:0，横滑交给 .subtabs。 */
+.cat-filters { min-width: 0; overflow: hidden; }
+.cat-filters .filter-row { min-width: 0; }
+.cat-filters .filter-row .subtabs { min-width: 0; overflow-x: auto; overflow-y: hidden; }
+@media (max-width: 900px) {
+  .cat-filters .filter-row { width: 100%; }
+  .cat-filters .filter-row .subtabs { flex-wrap: nowrap; }
+}
