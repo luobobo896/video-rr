@@ -49,6 +49,11 @@ export function inspect(req, pathname, method) {
   const ip = clientIpOf(req)
   const ua = req.headers['user-agent'] ?? ''
 
+  // 本机（nginx 反代 / 健康检查 / 内部脚本）不做 UA 与限流拦截
+  if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost' || ip === '::ffff:127.0.0.1') {
+    return { blocked: false }
+  }
+
   // 1) UA 黑名单（空 UA 也拦，正常浏览器一定带 UA）
   if (pathname.startsWith('/api/') || pathname.startsWith('/media/')) {
     if (UA_EMPTY_ALLOW.test(ua) || UA_BLOCK.test(ua)) {
