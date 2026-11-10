@@ -135,7 +135,12 @@ function readResponse(socket, timeoutMs = 15000) {
 async function command(socket, line, expect = [250, 235, 220, 221, 334, 354]) {
   socket.write(`${line}\r\n`)
   const response = await readResponse(socket)
-  if (!expect.includes(response.code)) throw new Error(`SMTP 命令失败（${line.split(' ')[0]}）：${response.text.slice(0, 200)}`)
+  if (!expect.includes(response.code)) {
+    // 凭据行是 base64，不能出现在错误里（避免口令经日志/接口泄露）
+    const isCredential = /^[A-Za-z0-9+/=]{8,}$/.test(line)
+    const label = isCredential ? 'AUTH ***' : line.split(' ')[0]
+    throw new Error(`SMTP 命令失败（${label}，${response.code}）：${response.text.slice(0, 160)}`)
+  }
   return response
 }
 
