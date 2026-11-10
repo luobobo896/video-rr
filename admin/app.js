@@ -130,7 +130,7 @@ async function route() {
 /* ---------------- 概览 ---------------- */
 async function pageDashboard() {
   const stats = await api('/admin/api/stats')
-  $('#top-right').innerHTML = `<span class="muted">更新于 ${esc(new Date(stats.updatedAt).toLocaleTimeString())}</span>`
+  $('#top-right').innerHTML = `<span class="muted">更新于 ${new Date().toLocaleTimeString('zh-CN')}</span>`
   view.innerHTML = `
     <div class="cards">
       ${card('剧集', fmt(stats.dramas), '部')}
