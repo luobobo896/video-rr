@@ -16,6 +16,7 @@ import { handleAdmin } from './api-admin.mjs'
 import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
 import { verifyLink } from './entitlements.mjs'
 import { closeExpiredOrders } from './commerce.mjs'
+import { inspect, sweep } from './ratelimit.mjs'
 
 mkdirSync(UPLOAD_DIR, { recursive: true })
 mkdirSync(HLS_DIR, { recursive: true })
@@ -178,6 +179,16 @@ const server = createServer(async (req, res) => {
   const pathname = url.pathname
 
   try {
+    // 反爬与限流（UA 黑名单 / 滑动窗口限流 / 内容枚举探测）
+    const patrol = inspect(req, pathname, req.method ?? 'GET')
+    if (patrol.blocked) {
+      const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+      if (patrol.retryAfter) headers['retry-after'] = String(patrol.retryAfter)
+      res.writeHead(patrol.status, headers)
+      res.end(JSON.stringify({ code: patrol.reason, msg: patrol.status === 429 ? '请求过于频繁，请稍后再试' : '当前访问方式被拒绝', data: null }))
+      return
+    }
+
     // nginx auth_request：校验播放签名（Cookie 或 query），命中返回 204
     if (pathname === '/media-auth') {
       const original = String(req.headers['x-original-uri'] ?? '')
@@ -209,6 +220,19 @@ const server = createServer(async (req, res) => {
       const filePath = join(HLS_DIR, pathname.replace('/media/hls/', ''))
       if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
       return serveFileWithRange(req, res, filePath, 'private, max-age=600')
+    }
+
+    if (pathname === '/robots.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'public, max-age=3600' })
+      res.end([
+        'User-agent: *',
+        'Disallow: /api/',
+        'Disallow: /admin/',
+        'Disallow: /media/',
+        'Allow: /$',
+        '',
+      ].join('\n'))
+      return
     }
 
     if (pathname === '/media/uploads' || pathname.startsWith('/media/uploads/')) {
@@ -287,6 +311,10 @@ setInterval(() => {
   try { closeExpiredOrders() } catch (error) { console.error('[closeExpiredOrders]', error) }
 }, 60_000).unref()
 
+setInterval(() => {
+  try { sweep() } catch (error) { console.error('[ratelimit-sweep]', error) }
+}, 120_000).unref()
+
 // 每 10 分钟清理过期验证码与 30 天前的发送日志
 setInterval(() => {
   try {
@@ -306,3 +334,4 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`  后台      http://127.0.0.1:${PORT}/admin   （admin / admin123，另含 ops01/fin01/cs01）`)
   console.log(`  数据库    ${seed.seeded ? '已按种子初始化' : '沿用现有'}：${stats.dramas} 部剧 / ${stats.episodes} 集 / ${stats.plans} 个套餐`)
 })
+

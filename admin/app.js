@@ -7,7 +7,9 @@ const nav = $('#nav')
 
 const NAV = [
   ['dashboard', '概览', 'dashboard.read'],
+  ['analytics', '经营数据', 'analytics.read'],
   ['dramas', '剧集管理', 'content.drama.read'],
+  ['tags', '标签管理', 'tag.read'],
   ['policies', '付费策略', 'content.drama.read'],
   ['plans', '套餐定价', 'commerce.plan.write'],
   ['coupons', '优惠券', 'commerce.coupon.write'],
@@ -124,6 +126,8 @@ async function route() {
     else if (key === 'audit') await pageAudit()
     else if (key === 'pay') await pagePay()
     else if (key === 'email') await pageEmail()
+    else if (key === 'analytics') await pageAnalytics()
+    else if (key === 'tags') await pageTags()
   } catch (error) {
     // 单页渲染失败不影响其它页面：给出错误、页面名与重试入口
     console.error('[admin]', key, error)
@@ -239,6 +243,8 @@ async function pageDramas() {
 async function pageDramaEdit(id) {
   const data = await api(`/admin/api/dramas/${id}`)
   const drama = data.drama
+  const allTags = await api('/admin/api/tags').then((result) => result.list).catch(() => [])
+  const currentTags = new Set((drama.tags ?? []).map((tag) => Number(tag.id ?? tag.tag_id)))
   view.innerHTML = `
     <div class="panel">
       <h3>编辑剧集 #${id}<span class="spacer"></span><a class="btn" href="#/dramas">返回列表</a></h3>
@@ -253,15 +259,32 @@ async function pageDramaEdit(id) {
         <label>收费<select id="f-feeMode"><option value="free" ${drama.fee_mode === 'free' ? 'selected' : ''}>免费</option><option value="vip" ${drama.fee_mode === 'vip' ? 'selected' : ''}>VIP</option></select></label>
         <label>状态<select id="f-status"><option value="published" ${drama.status === 'published' ? 'selected' : ''}>已上架</option><option value="draft" ${drama.status === 'draft' ? 'selected' : ''}>草稿</option></select></label>
       </div>
-      <label class="muted">简介</label>
+      <label class="muted">标签<span class="spacer"></span></label>
+    <div class="tag-picker" style="display:flex;flex-wrap:wrap;gap:10px;margin:8px 0 14px">
+      ${allTags.length === 0
+        ? '<span class="muted">还没有标签，先去「标签管理」新建</span>'
+        : allTags.map((tag) => `<label style="display:inline-flex;align-items:center;gap:6px;font-size:13px">
+            <input type="checkbox" class="f-tag" value="${tag.id}" ${currentTags.has(Number(tag.id)) ? 'checked' : ''} />${esc(tag.name)}
+          </label>`).join('')}
+    </div>
+    <label class="muted">简介</label>
       <textarea id="f-description" rows="3" style="width:100%;margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel-2);color:var(--text)">${esc(drama.description ?? '')}</textarea>
       <div style="margin-top:12px;display:flex;gap:8px">
         <button class="btn primary" id="save-drama">保存</button>
+        <button class="btn" id="save-tags">保存标签</button>
         <a class="btn" href="#/dramas/${id}/episodes">管理分集与视频 →</a>
       </div>
     </div>`
 
-  $('#save-drama').addEventListener('click', async () => {
+    $('#save-tags')?.addEventListener('click', async () => {
+    const tagIds = [...view.querySelectorAll('.f-tag:checked')].map((node) => Number(node.value))
+    try {
+      await api(`/admin/api/dramas/${id}/tags`, { method: 'POST', body: { tagIds } })
+      toast('标签已保存')
+    } catch (error) { toast(error.message) }
+  })
+
+    $('#save-drama').addEventListener('click', async () => {
     await api(`/admin/api/dramas/${id}`, {
       method: 'PUT',
       body: {
@@ -681,7 +704,9 @@ async function pageOrders() {
     <td>${esc(order.channel)}</td>
     <td>${pillOf(order.status)}</td>
     <td class="muted">${esc(order.paid_at ?? order.created_at)}</td>
-    <td>${['paid', 'fulfilled'].includes(order.status) ? `<button class="btn sm danger" data-refund="${order.id}">发起退款</button>` : '—'}</td>
+    <td>${['paid', 'fulfilled'].includes(order.status)
+      ? `<button class="btn sm danger" data-refund="${order.id}">发起退款</button>`
+      : `<button class="btn sm" data-confirm="${order.id}">确认到账</button>`}</td>
   </tr>`)
   view.innerHTML = panel('订单', `
     <p class="muted">已支付合计 ¥${total.toFixed(2)}（最近 100 笔）</p>
@@ -691,6 +716,17 @@ async function pageOrders() {
     const result = await api('/admin/api/close-expired', { method: 'POST', body: {} })
     toast(`已关闭 ${result.closed} 笔`)
     await pageOrders()
+  })
+  view.querySelectorAll('[data-confirm]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const orderId = Number(button.dataset.confirm)
+      const txid = prompt('链上 txid / 流水号（USDT 建议填写，留空则记人工补单）') ?? ''
+      try {
+        await api(`/admin/api/orders/${orderId}/confirm`, { method: 'POST', body: { txid: txid || undefined } })
+        toast('已确认到账并发放权益')
+        await pageOrders()
+      } catch (error) { toast(error.message) }
+    })
   })
   view.querySelectorAll('[data-refund]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -1414,6 +1450,146 @@ async function pageEmail() {
       const min = Math.min(...channels2.map((item) => item.priority))
       await api('/admin/api/email-channels', { method: 'POST', body: { id: button.dataset.top, priority: min - 10 } })
       await pageEmail()
+    })
+  }
+}
+
+/* ---------------- 经营数据（播放 / 用户 / 订单 / 订阅多维统计） ---------------- */
+async function pageAnalytics() {
+  const days = Number(localStorage.getItem('mh-analytics-days') ?? 7)
+  const data = await api(`/admin/api/analytics?days=${days}`)
+  const bars = (rows, key, label) => {
+    const max = Math.max(1, ...rows.map((row) => Number(row[key] ?? 0)))
+    return `<div class="bars">${rows.map((row) => `<div class="bar-row">
+      <span class="bar-label">${esc(row.day ?? row.date ?? '')}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${Math.round((Number(row[key] ?? 0) / max) * 100)}%"></span></span>
+      <span class="bar-value">${fmt(row[key] ?? 0)}</span>
+    </div>`).join('') || '<div class="muted">该区间暂无数据</div>'}</div>`
+  }
+
+  view.innerHTML = panel('经营数据', `
+    <div class="form-row" style="margin-bottom:12px">
+      ${[7, 14, 30].map((n) => `<button class="btn sm ${days === n ? 'primary' : ''}" data-days="${n}">近 ${n} 天</button>`).join('')}
+      <span class="spacer" style="flex:1"></span>
+      <span class="muted">统计区间：${esc(data.range.since)} 起</span>
+    </div>
+
+    <div class="cards">
+      ${card('播放量', fmt(data.totals.plays), `次（历史 ${fmt(data.totals.playsAllTime)}）`)}
+      ${card('独立观众', fmt(data.totals.viewers), '人')}
+      ${card('人均播放', String(data.totals.playsPerViewer), '次/人')}
+      ${card('被播放剧集', fmt(data.totals.dramasPlayed), '部')}
+      ${card('收入', `¥${fmt(data.money.revenue)}`, `客单价 ¥${data.money.aov}`)}
+      ${card('支付转化', `${data.funnel.payRate}%`, `${data.funnel.paid}/${data.funnel.orders} 单`)}
+      ${card('新增用户', fmt(data.users.newInRange), `累计 ${fmt(data.users.total)}`)}
+      ${card('活跃订阅', fmt(data.subscriptions.active), '个')}
+    </div>
+
+    <div class="split" style="margin-top:16px">
+      <div class="panel">
+        <h3>播放趋势（按日）</h3>
+        ${bars(data.playsByDay, 'plays')}
+        <h3 style="margin-top:18px">新增用户（按日）</h3>
+        ${bars(data.users.newByDay, 'n')}
+      </div>
+      <div class="panel">
+        <h3>播放来源</h3>
+        <table><thead><tr><th>来源</th><th>次数</th></tr></thead><tbody>
+          ${(data.sourceSplit.length ? data.sourceSplit : [{ source: '—', n: 0 }]).map((row) => `<tr><td>${row.source === 'trial' ? '试看' : row.source === 'play' ? '正常播放' : esc(row.source)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
+        </tbody></table>
+        <h3 style="margin-top:18px">订阅分布</h3>
+        <table><thead><tr><th>套餐</th><th>人数</th></tr></thead><tbody>
+          ${(data.subscriptions.byPlan.length ? data.subscriptions.byPlan : [{ name: '—', n: 0 }]).map((row) => `<tr><td>${esc(row.name)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
+        </tbody></table>
+      </div>
+    </div>
+
+    <div class="split" style="margin-top:16px">
+      <div class="panel">
+        <h3>热门内容 Top 10</h3>
+        <table><thead><tr><th>剧集</th><th>播放</th><th>观众</th></tr></thead><tbody>
+          ${(data.topDramas.length ? data.topDramas : [{ title: '—', plays: 0, viewers: 0 }]).map((row) => `<tr><td>${esc(row.title)}</td><td>${fmt(row.plays)}</td><td>${fmt(row.viewers)}</td></tr>`).join('')}
+        </tbody></table>
+      </div>
+      <div class="panel">
+        <h3>收款渠道</h3>
+        <table><thead><tr><th>渠道</th><th>订单</th><th>收入</th></tr></thead><tbody>
+          ${(data.byChannel.length ? data.byChannel : [{ channel: '—', orders: 0, revenue: 0 }]).map((row) => `<tr><td>${esc(row.channel)}</td><td>${fmt(row.orders)}</td><td>¥${fmt(row.revenue)}</td></tr>`).join('')}
+        </tbody></table>
+        <h3 style="margin-top:18px">订单漏斗</h3>
+        <table><tbody>
+          <tr><td>下单</td><td>${fmt(data.funnel.orders)}</td></tr>
+          <tr><td>已支付</td><td>${fmt(data.funnel.paid)}</td></tr>
+          <tr><td>超时关闭</td><td>${fmt(data.funnel.closed)}</td></tr>
+          <tr><td>已退款</td><td>${fmt(data.funnel.refunded)}</td></tr>
+          <tr><td>退款中</td><td>${fmt(data.money.pendingRefunds)}</td></tr>
+        </tbody></table>
+      </div>
+    </div>`)
+
+  for (const button of view.querySelectorAll('[data-days]')) {
+    button.addEventListener('click', async () => {
+      localStorage.setItem('mh-analytics-days', button.dataset.days)
+      await pageAnalytics()
+    })
+  }
+}
+
+/* ---------------- 标签管理 ---------------- */
+async function pageTags() {
+  const data = await api('/admin/api/tags')
+  const rows = data.list.map((tag) => `<tr>
+    <td>${tag.id}</td>
+    <td><input value="${esc(tag.name)}" data-name="${tag.id}" style="width:180px" /></td>
+    <td><input type="number" value="${tag.sort}" data-sort="${tag.id}" style="width:80px" /></td>
+    <td>${fmt(tag.dramaCount)}</td>
+    <td><span class="pill ${tag.status === 'active' ? 'ok' : ''}">${tag.status === 'active' ? '启用' : '停用'}</span></td>
+    <td>
+      <button class="btn sm" data-save="${tag.id}">保存</button>
+      <button class="btn sm danger" data-del="${tag.id}">删除</button>
+    </td>
+  </tr>`).join('')
+
+  view.innerHTML = panel('标签管理', `
+    <p class="muted">标签用于 C 端筛选与详情展示；改完后到「剧集管理」里给剧集打标。删除标签会同时解除剧集关联。</p>
+    <div class="form-row">
+      <label>新标签 <input id="tag-name" placeholder="如：甜宠 / 悬疑 / 高分" style="width:200px" /></label>
+      <label>排序 <input id="tag-sort" type="number" value="100" style="width:80px" /></label>
+      <button class="btn primary" id="tag-add">新增标签</button>
+      <span class="muted" id="tag-msg"></span>
+    </div>
+    <table style="margin-top:12px">
+      <thead><tr><th>ID</th><th>名称</th><th>排序</th><th>剧集数</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="muted">还没有标签</td></tr>'}</tbody>
+    </table>`)
+
+  $('#tag-add').addEventListener('click', async () => {
+    const name = $('#tag-name').value.trim()
+    if (!name) return
+    try {
+      await api('/admin/api/tags', { method: 'POST', body: { name, sort: Number($('#tag-sort').value || 100) } })
+      toast('标签已新增')
+      await pageTags()
+    } catch (error) { $('#tag-msg').textContent = error.message }
+  })
+
+  for (const button of view.querySelectorAll('[data-save]')) {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.save
+      const name = view.querySelector(`[data-name="${id}"]`).value.trim()
+      const sort = Number(view.querySelector(`[data-sort="${id}"]`).value || 100)
+      try {
+        await api('/admin/api/tags', { method: 'POST', body: { id: Number(id), name, sort } })
+        toast('已保存')
+        await pageTags()
+      } catch (error) { toast(error.message) }
+    })
+  }
+  for (const button of view.querySelectorAll('[data-del]')) {
+    button.addEventListener('click', async () => {
+      await api(`/admin/api/tags?id=${button.dataset.del}`, { method: 'DELETE' })
+      toast('已删除')
+      await pageTags()
     })
   }
 }

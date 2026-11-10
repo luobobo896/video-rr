@@ -329,6 +329,46 @@ CREATE TABLE IF NOT EXISTS danmus (
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 
+-- ===== 播放埋点（运营统计：播放量/独立观众/来源）=====
+CREATE TABLE IF NOT EXISTS play_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  drama_id INTEGER NOT NULL,
+  episode_id INTEGER,
+  episode_no INTEGER,
+  source TEXT NOT NULL DEFAULT 'play',       -- play | trial | preview
+  ip TEXT,
+  ua TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_play_events_time ON play_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_play_events_drama ON play_events(drama_id);
+
+-- ===== 标签（C 端筛选 / B 端管理）=====
+CREATE TABLE IF NOT EXISTS tags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  sort INTEGER NOT NULL DEFAULT 100,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS drama_tags (
+  drama_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (drama_id, tag_id)
+);
+
+-- ===== 安全事件（限流/反爬拦截留痕）=====
+CREATE TABLE IF NOT EXISTS security_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  ip TEXT,
+  path TEXT,
+  ua TEXT,
+  detail TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ===== 支付渠道（多渠道路由 + 敏感配置加密）=====
 CREATE TABLE IF NOT EXISTS pay_channels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -377,6 +417,9 @@ export const MENU_TREE = [
   { code: 'content.policy.write', name: '编辑付费策略', type: 'button', parent: 'content.policy', sort: 10 },
   { code: 'content.review', name: '内容审核', type: 'menu', parent: 'dir:content', sort: 40, path: '/review', icon: '🛡️' },
   { code: 'content.review.write', name: '审核弹幕/评论', type: 'button', parent: 'content.review', sort: 10 },
+  { code: 'content.tag', name: '标签管理', type: 'menu', parent: 'dir:content', sort: 50, path: '/tags', icon: '🏷️' },
+  { code: 'tag.read', name: '查看标签', type: 'button', parent: 'content.tag', sort: 10 },
+  { code: 'tag.write', name: '维护标签与打标', type: 'button', parent: 'content.tag', sort: 20 },
 
   { code: 'dir:commerce', name: '交易管理', type: 'dir', parent: null, sort: 30, path: '/commerce', icon: '💰' },
   { code: 'commerce.plan', name: '套餐定价', type: 'menu', parent: 'dir:commerce', sort: 10, path: '/plans', icon: '🏷️' },
@@ -385,6 +428,7 @@ export const MENU_TREE = [
   { code: 'commerce.coupon.write', name: '管理优惠券', type: 'button', parent: 'commerce.coupon', sort: 10 },
   { code: 'commerce.order', name: '订单', type: 'menu', parent: 'dir:commerce', sort: 30, path: '/orders', icon: '🧾' },
   { code: 'finance.order.read', name: '查看订单', type: 'button', parent: 'commerce.order', sort: 10 },
+  { code: 'finance.order.confirm', name: '确认到账/补单', type: 'button', parent: 'commerce.order', sort: 20 },
   { code: 'commerce.refund', name: '退款审核', type: 'menu', parent: 'dir:commerce', sort: 40, path: '/refunds', icon: '↩️' },
   { code: 'finance.refund.create', name: '发起退款', type: 'button', parent: 'commerce.refund', sort: 10 },
   { code: 'finance.refund.approve', name: '审批退款（双人复核）', type: 'button', parent: 'commerce.refund', sort: 20 },

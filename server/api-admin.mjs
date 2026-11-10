@@ -5,7 +5,7 @@ import { send } from './api-public.mjs'
 import { hasPermission, listAdmins, listAudit, listPermissionCatalog, listRoles, loadPrincipal, menuTree, roleMenuBinding, setAdminRoles, updateRoleMenus } from './rbac.mjs'
 import { audit } from './rbac.mjs'
 import {
-  commerceStats, createRefund, approveRefund, rejectRefund, reconcile, listOrders, closeExpiredOrders,
+  commerceStats, createRefund, approveRefund, rejectRefund, reconcile, listOrders, closeExpiredOrders, markPaid,
   listChannels, upsertChannel, setChannelStatus, setDefaultChannel, deleteChannel, testChannel, paymentOptions, channelConfig,
 } from './commerce.mjs'
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
@@ -14,6 +14,9 @@ import {
   PRESETS, channelList, emailSettings, isDevMail, markTest, removeChannel, saveEmailSettings, upsertChannel as upsertMailChannel, verifyChannel,
 } from './mail-channels.mjs'
 import { pollDeviceFlow, startDeviceFlow } from './mailer-oauth.mjs'
+import { analyticsReport } from './analytics.mjs'
+import { createTag, deleteTag, listTags, setDramaTags, tagsOfDrama, updateTag } from './tags.mjs'
+import { guardStats } from './ratelimit.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -43,6 +46,10 @@ const PERM = {
   plans: 'commerce.plan.write',
   coupons: 'commerce.coupon.write',
   orders: 'finance.order.read',
+  orderConfirm: 'finance.order.confirm',
+  tagRead: 'tag.read',
+  tagWrite: 'tag.write',
+  analytics: 'analytics.read',
   refundCreate: 'finance.refund.create',
   refundApprove: 'finance.refund.approve',
   reconcile: 'finance.reconcile.run',
@@ -138,7 +145,18 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     })
   }
 
-  if (seg[0] === 'dramas' && method === 'POST') {
+  if (seg[0] === 'dramas' && seg[1] && seg.length === 2 && method === 'GET') {
+    if (!guard(PERM.dramas)) return deny(PERM.dramas)
+    const drama = one('SELECT * FROM dramas WHERE id = ?', Number(seg[1]))
+    if (!drama) return send(res, {}, '0404', '剧集不存在', 404)
+    return send(res, {
+      drama: { ...drama, tags: tagsOfDrama(drama.id).map((tag) => ({ id: tag.id, name: tag.name })) },
+      policy: policyOf(drama.id) ?? null,
+      episodes: all('SELECT * FROM episodes WHERE drama_id = ? ORDER BY no', drama.id),
+    })
+  }
+
+  if (seg[0] === 'dramas' && seg.length === 1 && method === 'POST') {
     if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
     const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, score, status, sort)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -639,6 +657,11 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     if (!to) return send(res, {}, '0400', '请填写收件邮箱', 400)
     try {
       const result = await verifyChannel(id, { sendTo: to })
+      if (result.ok === false) {
+        markTest(id, { ok: false, message: result.error ?? '连接失败' })
+        log('admin.email.channel.test', 'email_channel', id, null, { to, ok: false, error: result.error })
+        return send(res, { ...result }, '0502', result.error ?? '连接失败', 502)
+      }
       markTest(id, { ok: true, message: result.note ?? '测试邮件已发送' })
       log('admin.email.channel.test', 'email_channel', id, null, { to, ok: true })
       return send(res, { ...result, to, channel: channel.name })
@@ -690,6 +713,72 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     }
   }
 
+  /* ---------------- 经营数据（播放/用户/订单/订阅多维） ---------------- */
+  if (pathname === '/admin/api/analytics' && method === 'GET') {
+    if (!guard(PERM.analytics)) return deny(PERM.analytics)
+    const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days') ?? 7)))
+    return send(res, analyticsReport({ days }))
+  }
+
+  /* ---------------- 风控 / 安全事件 ---------------- */
+  if (pathname === '/admin/api/security' && method === 'GET') {
+    if (!guard(PERM.audit)) return deny(PERM.audit)
+    const events = all("SELECT * FROM security_events ORDER BY id DESC LIMIT ?", Math.min(200, Number(url.searchParams.get('limit') ?? 50)))
+    return send(res, { ...guardStats(), events })
+  }
+
+  /* ---------------- 标签管理 ---------------- */
+  if (pathname === '/admin/api/tags' && method === 'GET') {
+    if (!guard(PERM.tagRead)) return deny(PERM.tagRead)
+    return send(res, { list: listTags({ withCount: true }) })
+  }
+
+  if (pathname === '/admin/api/tags' && method === 'POST') {
+    if (!guard(PERM.tagWrite)) return deny(PERM.tagWrite)
+    const tag = body?.id ? updateTag(body.id, body) : createTag(body ?? {})
+    log('admin.tag.save', 'tag', tag.id, null, { name: tag.name })
+    return send(res, { tag })
+  }
+
+  if (pathname === '/admin/api/tags' && method === 'DELETE') {
+    if (!guard(PERM.tagWrite)) return deny(PERM.tagWrite)
+    const id = Number(url.searchParams.get('id') ?? 0)
+    if (!id) return send(res, {}, '0400', '缺少 id', 400)
+    deleteTag(id)
+    log('admin.tag.delete', 'tag', id, null, null)
+    return send(res, { ok: true })
+  }
+
+  if (/^\/admin\/api\/dramas\/\d+\/tags$/.test(pathname) && method === 'POST') {
+    if (!guard(PERM.tagWrite)) return deny(PERM.tagWrite)
+    const dramaId = Number(pathname.split('/')[4])
+    const tags = setDramaTags(dramaId, body?.tagIds ?? [])
+    log('admin.drama.tags', 'drama', dramaId, null, { tagIds: tags.map((tag) => tag.id) })
+    return send(res, { tags: tags.map((tag) => ({ id: tag.id, name: tag.name })) })
+  }
+
+  /* ---------------- 订单：USDT 人工确认到账 / 补单 ---------------- */
+  if (/^\/admin\/api\/orders\/\d+\/confirm$/.test(pathname) && method === 'POST') {
+    if (!guard(PERM.orderConfirm)) return deny(PERM.orderConfirm)
+    const orderId = Number(pathname.split('/')[4])
+    const order = one('SELECT * FROM orders WHERE id = ?', orderId)
+    if (!order) return send(res, {}, '0404', '订单不存在', 404)
+    if (['paid', 'fulfilled'].includes(order.status)) return send(res, { ok: true, already: true })
+    try {
+      const result = markPaid({
+        orderId,
+        channel: order.channel,
+        channelTxnId: String(body?.txid ?? `manual-${order.id}-${Date.now()}`),
+        amount: order.amount_cny,
+        raw: { operator: principal.admin.username, note: body?.note ?? '' },
+      })
+      log('admin.order.confirm', 'order', orderId, { status: order.status }, { status: 'paid', txn: body?.txid ?? 'manual' })
+      return send(res, { ok: true, order: result.order })
+    } catch (error) {
+      return send(res, { error: error.message }, error.code ?? '0400', error.message, error.status ?? 400)
+    }
+  }
+
   if (pathname === '/admin/api/pay-settings' && method === 'GET') {
     if (!guard(PERM.paySettings)) return deny(PERM.paySettings)
     const pay = getSetting('pay', {})
@@ -709,3 +798,7 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
 
   return send(res, {}, '0404', '接口不存在', 404)
 }
+
+
+
+

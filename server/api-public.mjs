@@ -10,6 +10,8 @@ import { isDevMail } from './mailer.mjs'
 import {
   decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, secureLink,
 } from './entitlements.mjs'
+import { recordPlay } from './analytics.mjs'
+import { listTags, tagsOfDrama, dramaIdsByTag } from './tags.mjs'
 import {
   CommerceError, createOrder, handleAlipayNotify, handleUsdtNotify, listOrders, markPaid, mockPay, paymentOptions, validateCoupon,
   buildSimulatedAlipayNotify, syncAlipayOrder,
@@ -177,11 +179,26 @@ export async function handlePublic(pathname, url, req, res) {
 
     if (pathname === '/api/search') {
       const keyword = (url.searchParams.get('keyword') ?? '').trim()
+      const tagId = Number(url.searchParams.get('tag') ?? url.searchParams.get('tagId') ?? 0)
+
+      if (tagId) {
+        const ids = dramaIdsByTag(tagId)
+        if (ids.length === 0) return send(res, { keyword, tagId, total: 0, list: [] })
+        const placeholders = ids.map(() => '?').join(',')
+        const rows = all(`SELECT * FROM dramas WHERE status = 'published' AND id IN (${placeholders})
+          ORDER BY score DESC LIMIT 60`, ...ids)
+        return send(res, { keyword, tagId, total: rows.length, list: rows.map((drama) => cardOf(drama, userId, context)) })
+      }
+
       if (!keyword) return send(res, { keyword, total: 0, list: [] })
       const rows = all(`SELECT * FROM dramas WHERE status = 'published'
         AND (title LIKE ? OR sub_title LIKE ? OR description LIKE ?) ORDER BY score DESC LIMIT 30`,
       `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
       return send(res, { keyword, total: rows.length, list: rows.map((drama) => cardOf(drama, userId, context)) })
+    }
+
+    if (pathname === '/api/tags') {
+      return send(res, { list: listTags({ withCount: true }) })
     }
 
     /* ---------- 详情 / 权益 ---------- */
@@ -203,6 +220,7 @@ export async function handlePublic(pathname, url, req, res) {
           trialSeconds: episode.trialSeconds, price: episode.price,
         })),
         priceInfo: priceInfo(drama),
+        tags: tagsOfDrama(drama.id).map((tag) => ({ id: tag.id, name: tag.name })),
         hasSubscription: Boolean(context.subscription),
       })
     }
@@ -229,6 +247,7 @@ export async function handlePublic(pathname, url, req, res) {
         const trialHls = episode.hls_path ?? `/media/hls/${episode.id}/index.m3u8`
         const trialLink = episode.hls_path ? secureLink(trialHls, 180) : { url: null, sign: null, expires: 0 }
         if (episode.hls_path) setLinkCookies(res, trialLink, 180)
+        recordPlay({ userId, dramaId, episodeId: episode.id, episodeNo: no, source: 'trial', ip: clientIp(req), ua: req.headers['user-agent'] })
         return send(res, {
           dramaId, title: drama.title, episode: { id: episode.id, no: episode.no, title: episode.title },
           source: 'trial', hls: episode.hls_path, expiresIn: 180, trialSeconds: access.trialSeconds, danmu: [],
@@ -247,6 +266,7 @@ export async function handlePublic(pathname, url, req, res) {
       const hlsPath = episode.hls_path ?? null
       const link = hlsPath ? secureLink(hlsPath, 600) : { url: null, sign: null, expires: 0 }
       if (hlsPath) setLinkCookies(res, link, 600)
+      recordPlay({ userId, dramaId, episodeId: episode.id, episodeNo: no, source: 'play', ip: clientIp(req), ua: req.headers['user-agent'] })
       const danmu = all("SELECT time_ms, content FROM danmus WHERE episode_id = ? AND status = 'approved' ORDER BY time_ms", episode.id)
       return send(res, {
         dramaId, title: drama.title, episode: { id: episode.id, no: episode.no, title: episode.title },
