@@ -33,7 +33,9 @@ OPS=$($CURL -X POST "$BASE/video-admin/api/login" -H 'content-type: application/
 printf '  内容运营调退款列表       %s（应 403）\n' "$($CURL -o /dev/null -w '%{http_code}' "$BASE/video-admin/api/refunds" -H "authorization: Bearer $OPS")"
 
 echo "=== 4. C 端：登录 → 未授权播放 402 → 下单 → 支付 → 再播放 ==="
-USER=$($CURL -X POST "$BASE/video/api/auth/login" -H 'content-type: application/json' -d "{\"phone\":\"$(date +%s | tail -c 10 | sed 's/^/1/')\"}" | jq_get data.token)
+PHONE=$(printf '1%010d' $(( $(date +%s) % 10000000000 )))
+USER=$($CURL -X POST "$BASE/video/api/auth/login" -H 'content-type: application/json' -d "{\"phone\":\"$PHONE\"}" | jq_get data.token)
+echo "  测试用户 $PHONE"
 DRAMA=$($CURL "$BASE/video/api/home" | python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(d['sections'][0]['items'][0]['dramaId'])")
 echo "  测试剧集 #$DRAMA"
 printf '  未订阅播放第 5 集        %s（应 402）\n' "$($CURL -o /dev/null -w '%{http_code}' "$BASE/video/api/play/$DRAMA/5" -H "authorization: Bearer $USER")"
