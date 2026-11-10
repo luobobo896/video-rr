@@ -135,6 +135,12 @@ const server = createServer(async (req, res) => {
       return serveFileWithRange(req, res, filePath)
     }
 
+    if (pathname.startsWith('/media/images/')) {
+      const filePath = join(ROOT, 'storage', 'images', pathname.replace('/media/images/', ''))
+      if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
+      return serveFileWithRange(req, res, filePath)
+    }
+
     if (pathname.startsWith('/admin/api/')) {
       const uploadMatch = /^\/admin\/api\/episodes\/(\d+)\/upload$/.exec(pathname)
       if (uploadMatch && req.method === 'POST') {

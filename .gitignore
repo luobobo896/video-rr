@@ -1,5 +1,7 @@
 # 运行期数据：数据库、上传源、HLS 切片、下载的工具二进制
-storage/
+# 但镜像后的站点素材要随仓库发布（服务器访问原 CDN 被 403，素材必须自带）
+storage/*
+!storage/images/
 !storage/.gitkeep
 
 # 日志与本地环境
