@@ -101,8 +101,13 @@ node deploy/loadtest.mjs --url https://127.0.0.1/video/media/hls/1/index.m3u8 \
 
 nginx 侧：`/video/` 静态 + `/video/api/` 反代 Node + `/video/media/hls/` 直接吐切片（sendfile/aio）+ `/video/live/` 反代 MediaMTX；后台同套规则。`worker_connections` 由 768 提到 65535，`worker_rlimit_nofile 100000`（脚本自动改，带备份）。
 
-**实测 1000 并发**（服务器本机 loopback，480p 切片）：8318 请求 / 0 错误 / 峰值并发 1000 / **845.7 Mbps** / p50 1.24s、p95 6.94s。
-注意：客户端进程默认 `ulimit -n 1024` 会先把自己卡死（表现为大量 error），压测前 `ulimit -n 65535`。
+**实测 1000 并发**（服务器本机 loopback，480p 切片）：11116 请求 / 0 错误 / 峰值并发 1000 / **1146 Mbps**；3000 并发同样 0 错误。注意：loopback 只证明「软件能扛」，不代表公网出口。
+
+**公网出口实测只有 ≈19 Mbps**（8 路并行仍 2.27 MB/s，上下行对称）→ 单机最多约 **22 人 480p / 8 人 720p**。要做到 1000–5000 人点播，必须「切片上对象存储 + CDN」，或换 ≥1 Gbps 独服；详细换算、成本与改造步骤见 **[deploy/CAPACITY.md](deploy/CAPACITY.md)**。
+
+小结：**Node 够用**（只做 API/后台/鉴权，视频字节由 nginx 或 CDN 出）；决定并发的是带宽与 CDN，不是 Node。
+
+## 上生产还缺什么
 
 素材：原站 CDN（`img.bwcgee.cn`）对 HK 服务器返回 403，且 HTTPS 页面不能加载 http 图片，所以封面/横幅已**镜像到本地** `storage/images/`（`scripts/mirror-images.mjs` + `scripts/rewrite-cover-urls.mjs`），线上走 `/video/media/images/`。缺封面的剧集自动用 `/media/placeholder.svg?t=剧名` 生成占位图。
 
