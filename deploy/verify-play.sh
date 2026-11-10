@@ -31,16 +31,7 @@ U=$("${CURL[@]}" -X POST "$BASE/video/api/auth/email/login" -H 'content-type: ap
 [ -n "$U" ] || { echo "C 端登录失败"; exit 1; }
 ok "登录" "${EMAIL}"
 
-PICK=$("${CURL[@]}" "$BASE/video/api/home" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)['data']
-for sec in d.get('sections',[]):
-    for it in sec.get('items',[]):
-        print(it.get('dramaId')); raise SystemExit" )
-TRIES=0
-for DID in $(printf '%s' "$PICK"); do :; done
-# 逐集探测：从首页前若干部剧集里找一集能签发出 hls 的
-for DID in $("${CURL[@]}" "$BASE/video/api/home" | python3 -c "
+HOMEDRAMAS=$("${CURL[@]}" "$BASE/video/api/home" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)['data']
 ids=[]
@@ -48,13 +39,35 @@ for sec in d.get('sections',[]):
     for it in sec.get('items',[]):
         x=it.get('dramaId')
         if x and x not in ids: ids.append(x)
-print(' '.join(str(i) for i in ids[:12]))"); do
-  for EP in 1 2 3; do
-    PLAY=$("${CURL[@]}" "$BASE/video/api/play/$DID/$EP" -H "authorization: Bearer $U")
-    HLS=$(printf '%s' "$PLAY" | jget data.hls)
-    [ -n "$HLS" ] && break 2
+print(' '.join(str(i) for i in ids[:12]))")
+
+scan() { # 扫首页前若干剧集的前 3 集，找到能签发出 hls 的那一集
+  for DID in $HOMEDRAMAS; do
+    for EP in 1 2 3; do
+      PLAY=$("${CURL[@]}" "$BASE/video/api/play/$DID/$EP" -H "authorization: Bearer $U")
+      HLS=$(printf '%s' "$PLAY" | jget data.hls)
+      [ -n "$HLS" ] && return 0
+    done
   done
-done
+  return 1
+}
+
+scan || true
+if [ -z "${HLS:-}" ]; then
+  # 未订阅时播放一律 402：用「下单 → 后台人工确认到账」把权益打通，再重扫
+  ORDER=$("${CURL[@]}" -X POST "$BASE/video/api/orders" -H "authorization: Bearer $U" \
+    -H 'content-type: application/json' -d '{"productType":"subscription","planId":1}' | jget data.outTradeNo)
+  if [ -n "$ORDER" ]; then
+    OID=$("${CURL[@]}" "$BASE/video-admin/api/orders?kw=$ORDER" -H "authorization: Bearer $T" | python3 -c "
+import sys,json
+rows=json.load(sys.stdin).get('data',{}).get('list',[])
+print(rows[0]['id'] if rows else '')")
+    [ -n "$OID" ] && "${CURL[@]}" -X POST "$BASE/video-admin/api/orders/$OID/confirm" \
+      -H "authorization: Bearer $T" -H 'content-type: application/json' -d '{"note":"播放链路验收"}' > /dev/null
+    ok "订阅开通" "$ORDER"
+  fi
+  scan || true
+fi
 if [ -z "${HLS:-}" ]; then echo "  未找到已就绪片源，无法验证播放链路（后台转码完成后再跑）"; exit 2; fi
 DIR=$(printf '%s' "$HLS" | sed 's#/index\.m3u8$##')
 ok "签名到手" "$HLS"
