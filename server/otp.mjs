@@ -10,7 +10,7 @@
  */
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto'
 import { db } from './db.mjs'
-import { isDevMail, sendMail, smtpConfig } from './mailer.mjs'
+import { isDevMail, sendMail } from './mailer.mjs'
 
 const SECRET = process.env.MH_OTP_SECRET ?? process.env.MH_SECRET ?? 'mh-otp-dev-secret'
 const CODE_TTL_SECONDS = 300          // 5 分钟
@@ -135,7 +135,7 @@ export async function sendCode({ email: rawEmail, purpose = 'login', ip, userAge
     resendAfter: RESEND_COOLDOWN_SECONDS,
     delivered,
     // 只有「显式开发模式 + 未配置 SMTP」才回显验证码；一旦配好发信，验证码只进邮箱
-    devCode: process.env.MH_EMAIL_DEV === '1' && !smtpConfig() ? code : undefined,
+    devCode: process.env.MH_EMAIL_DEV === '1' && isDevMail() ? code : undefined,
   }
 }
 

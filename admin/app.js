@@ -1034,171 +1034,361 @@ async function pagePay() {
   })
 }
 
-/* ---------------- 邮件设置（多 Provider 可配置） ---------------- */
+/* ---------------- 邮件通道（厂家无关，可多条按优先级回退） ---------------- */
 async function pageEmail() {
-  const data = await api('/admin/api/email-settings')
-  const s = data.settings
-  const smtp = s.smtp ?? {}
-  view.innerHTML = panel('邮件设置', `
-    <p class="muted">验证码通过邮件发送。支持 SMTP / Resend / SendGrid；口令与 API Key 均 AES-256-GCM 加密入库，保存即生效。</p>
+  const data = await api('/admin/api/email-channels')
+  const channels = data.channels ?? []
+  const presets = data.presets ?? []
+  let editing = null
+
+  const typeLabel = { smtp: 'SMTP', oauth2: 'OAuth2', http: 'HTTP API', dev: '开发' }
+  const statusOf = (channel) => {
+    if (channel.enabled === false) return '<span class="pill">已停用</span>'
+    if (!channel.lastTest) return '<span class="pill">未测试</span>'
+    return channel.lastTest.ok ? '<span class="pill ok">可用</span>' : '<span class="pill bad">失败</span>'
+  }
+
+  const rows = channels
+    .slice()
+    .sort((a, b) => a.priority - b.priority)
+    .map((channel) => `<tr>
+      <td>${channel.priority}</td>
+      <td>${esc(channel.name)}</td>
+      <td><span class="pill">${typeLabel[channel.type] ?? channel.type}</span></td>
+      <td class="mono">${esc(channel.from || (channel.smtp?.host ?? channel.http?.url ?? ''))}</td>
+      <td>${statusOf(channel)}</td>
+      <td class="muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(channel.lastTest?.message ?? '')}</td>
+      <td style="white-space:nowrap">
+        <button class="btn sm" data-edit="${channel.id}">编辑</button>
+        <button class="btn sm" data-test="${channel.id}">测试</button>
+        <button class="btn sm" data-top="${channel.id}">置顶</button>
+        <button class="btn sm ${channel.enabled === false ? '' : 'danger'}" data-toggle="${channel.id}">${channel.enabled === false ? '启用' : '停用'}</button>
+        <button class="btn sm danger" data-del="${channel.id}">删除</button>
+      </td>
+    </tr>`)
+    .join('')
+
+  view.innerHTML = panel('邮件通道', `
+    <p class="muted">
+      验证码发信按「优先级」从小到大依次尝试，第一条失败自动回退到下一条。任何厂家都可接入：
+      SMTP 只要 host/端口/账号；支持 OAuth2 的厂家填 token 端点即可；纯 HTTP API（Resend、SendGrid、Mailgun、自建服务）用 URL + Body 模板。
+      密码/Key/refresh_token 全部 AES-256-GCM 加密存储。
+    </p>
     <div class="cards">
-      <div class="card"><div class="k">当前渠道</div><div class="v">${s.provider === 'dev' ? '<span class="pill">开发模式（验证码回显）</span>' : '<span class="pill ok">' + esc(s.provider) + '</span>'}</div></div>
-      <div class="card"><div class="k">发件人</div><div class="v">${esc(s.from || '—')}</div></div>
-      <div class="card"><div class="k">凭据</div><div class="v">${smtp.passSet || s.resend?.keySet || s.sendgrid?.keySet ? '已加密保存' : '未设置'}</div></div>
-    </div>
-
-    <div class="form-row" style="margin-top:16px">
-      <label>发送渠道
-        <select id="em-provider">
-          ${[['dev', '开发模式（不真实发信）'], ['smtp', 'SMTP（账号密码）'], ['microsoft', '微软 OAuth2（Outlook / Hotmail）'], ['resend', 'Resend API'], ['sendgrid', 'SendGrid API']]
-            .map(([value, label]) => `<option value="${value}" ${s.provider === value ? 'selected' : ''}>${label}</option>`).join('')}
-        </select>
-      </label>
-      <label>发件邮箱 <input id="em-from" value="${esc(s.from ?? '')}" placeholder="no-reply@example.com" style="width:260px" /></label>
-      <label>发件人名称 <input id="em-fromname" value="${esc(s.fromName ?? '影巢')}" style="width:120px" /></label>
-    </div>
-
-    <div class="panel" style="background:var(--panel-2);margin-top:12px" data-block="smtp">
-      <h3>SMTP 参数</h3>
-      <div class="form-row">
-        <label>主机 <input id="em-host" value="${esc(smtp.host ?? '')}" placeholder="smtp.example.com" style="width:230px" /></label>
-        <label>端口 <input id="em-port" type="number" value="${smtp.port ?? 465}" style="width:90px" /></label>
-        <label><input id="em-secure" type="checkbox" ${smtp.secure ? 'checked' : ''} /> SSL/TLS（465 勾选；587 不勾走 STARTTLS）</label>
-      </div>
-      <div class="form-row">
-        <label>账号 <input id="em-user" value="${esc(smtp.user ?? '')}" placeholder="完整邮箱地址" style="width:280px" /></label>
-        <label>口令 / 授权码 <input id="em-pass" type="password" placeholder="${smtp.passSet ? '已保存，留空不修改' : 'SMTP 密码或应用专用密码'}" style="width:240px" /></label>
-      </div>
-    </div>
-
-    <div class="panel" style="background:var(--panel-2);margin-top:12px" data-block="microsoft">
-      <h3>微软 OAuth2（outlook.com / hotmail.com / live.com）</h3>
-      <p class="muted" style="margin:4px 0 10px">
-        微软已关闭 SMTP 密码认证，必须用 OAuth2（XOAUTH2）。填 Azure 应用的 clientId（公共客户端，允许设备码流），
-        点「生成授权码」，在浏览器里输入 8 位码并同意，回来点「检查授权」即可，refresh_token 会加密保存。
-      </p>
-      <div class="form-row">
-        <label>clientId <input id="em-ms-client" value="${esc(s.microsoft?.clientId ?? '')}" placeholder="Azure 应用的应用程序(客户端) ID" style="width:340px" /></label>
-        <button class="btn" id="em-ms-start">① 生成授权码</button>
-        <button class="btn primary" id="em-ms-check" disabled>② 检查授权</button>
-      </div>
-      <div class="form-row" style="margin-top:10px">
-        <label>授权状态 <span id="em-ms-state" class="muted">${s.microsoft?.refreshTokenSet ? '已授权：' + esc(s.microsoft.account || '账号已绑定') : '未授权'}</span></label>
-      </div>
-      <div id="em-ms-code" style="display:none;margin-top:10px;padding:12px;border:1px dashed var(--line);border-radius:10px">
-        <div class="muted" style="font-size:12px">在浏览器打开下面链接，输入这 8 位码：</div>
-        <div style="font-size:22px;letter-spacing:.18em;font-weight:700;margin:6px 0" id="em-ms-usercode">—</div>
-        <div class="muted" style="font-size:12px" id="em-ms-uri"></div>
-      </div>
-    </div>
-
-    <div class="panel" style="background:var(--panel-2);margin-top:12px" data-block="resend">
-      <h3>Resend</h3>
-      <div class="form-row"><label>API Key <input id="em-resend" type="password" placeholder="${s.resend?.keySet ? '已保存，留空不修改' : 're_...'}" style="width:320px" /></label></div>
-    </div>
-
-    <div class="panel" style="background:var(--panel-2);margin-top:12px" data-block="sendgrid">
-      <h3>SendGrid</h3>
-      <div class="form-row"><label>API Key <input id="em-sendgrid" type="password" placeholder="${s.sendgrid?.keySet ? '已保存，留空不修改' : 'SG....'}" style="width:320px" /></label></div>
+      <div class="card"><div class="k">当前状态</div><div class="v">${data.devMode ? '<span class="pill">无可用通道（开发模式，验证码回显）</span>' : '<span class="pill ok">真实发信</span>'}</div></div>
+      <div class="card"><div class="k">通道数</div><div class="v">${channels.length}</div></div>
+      <div class="card"><div class="k">默认发件人</div><div class="v" style="font-size:14px">${esc(data.from || '未设置')}</div></div>
     </div>
 
     <div class="form-row" style="margin-top:14px">
-      <button class="btn primary" id="em-save">保存</button>
-      <input id="em-test-to" placeholder="测试收件邮箱（默认发件账号）" style="width:260px" />
-      <button class="btn" id="em-test">连接测试 + 发测试邮件</button>
+      <label>默认发件邮箱 <input id="em-from" value="${esc(data.from ?? '')}" placeholder="no-reply@yourdomain.com" style="width:260px" /></label>
+      <label>发件人名称 <input id="em-fromname" value="${esc(data.fromName ?? '影巢')}" style="width:120px" /></label>
+      <button class="btn" id="em-save-global">保存默认</button>
+      <span class="spacer" style="flex:1"></span>
+      <select id="em-preset">${presets.map((preset) => `<option value="${preset.id}">${esc(preset.name)}</option>`).join('')}</select>
+      <button class="btn primary" id="em-add">新增通道</button>
     </div>
-    <div id="em-msg" class="muted" style="min-height:20px;margin-top:10px"></div>
-    <p class="muted">${data.devMode ? '当前是开发模式：验证码只写日志并回显 devCode。切到 smtp/resend/sendgrid 并保存后，验证码将只发送到邮箱。' : ''}</p>`)
+    <p class="muted" id="em-preset-note"></p>
 
-  const syncBlocks = () => {
-    const provider = $('#em-provider').value
-    for (const block of view.querySelectorAll('[data-block]')) {
-      block.style.display = block.dataset.block === provider ? 'block' : 'none'
-    }
+    <table style="margin-top:12px">
+      <thead><tr><th>优先级</th><th>名称</th><th>类型</th><th>发件人 / 端点</th><th>状态</th><th>最近测试</th><th>操作</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7" class="muted">还没有通道。选一个厂家预设，点「新增通道」开始。</td></tr>'}</tbody>
+    </table>
+
+    <div id="em-form"></div>`)
+
+  const notePreset = () => {
+    const preset = presets.find((item) => item.id === $('#em-preset').value)
+    $('#em-preset-note').textContent = preset?.note ?? ''
   }
-  syncBlocks()
-  $('#em-provider').addEventListener('change', syncBlocks)
+  notePreset()
+  $('#em-preset').addEventListener('change', notePreset)
 
-  $('#em-save').addEventListener('click', async () => {
-    const payload = {
-      provider: $('#em-provider').value,
-      from: $('#em-from').value.trim(),
-      fromName: $('#em-fromname').value.trim(),
-      smtp: {
-        host: $('#em-host').value.trim(),
-        port: Number($('#em-port').value || 465),
-        secure: $('#em-secure').checked,
-        user: $('#em-user').value.trim(),
-        pass: $('#em-pass').value,
-      },
-      resend: { apiKey: $('#em-resend').value },
-      sendgrid: { apiKey: $('#em-sendgrid').value },
-    }
+  $('#em-save-global').addEventListener('click', async () => {
     try {
-      await api('/admin/api/email-settings', { method: 'PUT', body: payload })
-      $('#em-msg').textContent = '已保存并生效'
-      toast('邮件配置已保存')
+      await api('/admin/api/email-settings', { method: 'PUT', body: { from: $('#em-from').value.trim(), fromName: $('#em-fromname').value.trim() } })
+      toast('默认发件人已保存')
       await pageEmail()
-    } catch (error) { $('#em-msg').textContent = error.message }
+    } catch (error) { toast(error.message) }
   })
 
-  $('#em-test').addEventListener('click', async () => {
-    const to = $('#em-test-to').value.trim()
-    $('#em-msg').textContent = '正在连接并发信…'
-    try {
-      const result = await api('/admin/api/email-settings/test', { method: 'POST', body: { to } })
-      $('#em-msg').textContent = `成功：${result.provider ?? 'smtp'}${result.host ? ' ' + result.host + ':' + result.port : ''}，测试邮件已发往 ${result.to}`
-      toast('测试邮件已发送')
-    } catch (error) {
-      $('#em-msg').textContent = error.message
+  $('#em-add').addEventListener('click', () => {
+    const presetId = $('#em-preset').value
+    const preset = presets.find((item) => item.id === presetId)
+    editing = {
+      id: '',
+      name: preset?.name ?? '新通道',
+      type: preset?.type ?? 'smtp',
+      enabled: true,
+      priority: (channels.at(-1)?.priority ?? 0) + 10,
+      from: data.from ?? '',
+      fromName: data.fromName ?? '影巢',
+      smtp: { host: preset?.host ?? '', port: preset?.port ?? 465, secure: preset?.secure ?? true, user: '', authMode: preset?.authMode ?? 'login' },
+      oauth2: { tokenUrl: 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token', deviceUrl: 'https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode', clientId: '', scope: 'https://outlook.office.com/SMTP.Send offline_access', account: '' },
+      http: { url: preset?.url ?? '', method: preset?.method ?? 'POST', headers: preset?.headers ?? { 'content-type': 'application/json' }, body: preset?.body ?? '' },
+      presetId,
     }
+    renderForm()
   })
 
-  /* 微软设备码授权：生成 → 用户输入 → 轮询 */
-  let deviceCode = null
-  let msTimer = null
-  const stopPolling = () => { if (msTimer) { clearInterval(msTimer); msTimer = null } }
+  const renderForm = () => {
+    const channel = editing
+    if (!channel) { $('#em-form').innerHTML = ''; return }
+    const isHttp = channel.type === 'http'
+    const isOauth = channel.type === 'oauth2'
+    $('#em-form').innerHTML = `
+      <div class="panel" style="background:var(--panel-2);margin-top:16px">
+        <h3>${channel.id ? '编辑通道' : '新增通道'} · ${esc(channel.name)}</h3>
+        <div class="form-row">
+          <label>名称 <input id="ch-name" value="${esc(channel.name)}" style="width:180px" /></label>
+          <label>类型
+            <select id="ch-type">
+              ${[['smtp', 'SMTP（账号密码）'], ['oauth2', 'OAuth2（XOAUTH2）'], ['http', 'HTTP API']]
+                .map(([value, label]) => `<option value="${value}" ${channel.type === value ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+          </label>
+          <label>优先级 <input id="ch-priority" type="number" value="${channel.priority}" style="width:80px" /></label>
+          <label>发件邮箱 <input id="ch-from" value="${esc(channel.from ?? '')}" style="width:230px" /></label>
+          <label>发件人名称 <input id="ch-fromname" value="${esc(channel.fromName ?? '影巢')}" style="width:110px" /></label>
+        </div>
 
-  $('#em-ms-start').addEventListener('click', async () => {
-    const clientId = $('#em-ms-client').value.trim()
-    if (!clientId) { $('#em-msg').textContent = '请先填写 clientId'; return }
-    try {
-      const result = await api('/admin/api/email-settings/oauth/start', { method: 'POST', body: { clientId } })
-      deviceCode = result.deviceCode
-      $('#em-ms-code').style.display = 'block'
-      $('#em-ms-usercode').textContent = result.userCode
-      $('#em-ms-uri').textContent = result.verificationUri
-      $('#em-ms-state').textContent = `等待授权（${Math.round(result.expiresIn / 60)} 分钟内有效）`
-      $('#em-ms-check').disabled = false
-      $('#em-msg').textContent = ''
-      const poll = async () => {
-        try {
-          const checked = await api('/admin/api/email-settings/oauth/poll', { method: 'POST', body: { clientId, deviceCode } })
-          if (checked.pending || checked.ok) return
-        } catch { /* 授权失败时停轮询，等用户手动点检查 */ }
+        ${isHttp ? `
+        <div class="form-row" style="margin-top:10px">
+          <label>请求方法
+            <select id="ch-method">${['POST', 'PUT', 'GET'].map((m) => `<option ${channel.http.method === m ? 'selected' : ''}>${m}</option>`).join('')}</select>
+          </label>
+          <label style="flex:1">URL <input id="ch-url" value="${esc(channel.http.url ?? '')}" placeholder="https://api.example.com/send" style="width:100%" /></label>
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          <label style="flex:1">Headers(JSON) <textarea id="ch-headers" rows="2" style="width:100%">${esc(JSON.stringify(channel.http.headers ?? {}, null, 1))}</textarea></label>
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          <label style="flex:1">Body 模板 <textarea id="ch-body" rows="4" style="width:100%">${esc(channel.http.body ?? '')}</textarea></label>
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          <label>API Key <input id="ch-apikey" type="password" placeholder="${channel.http.apiKeySet ? '已保存，留空不修改' : '写入模板 {{apiKey}} 使用'}" style="width:260px" /></label>
+        </div>
+        <p class="muted">占位符：{{apiKey}} {{from}} {{fromName}} {{to}} {{subject}} {{text}} {{html}} {{timestamp}}</p>
+        ` : ''}
+
+        ${isOauth ? `
+        <div class="form-row" style="margin-top:10px">
+          <label style="flex:1">tokenUrl <input id="ch-token-url" value="${esc(channel.oauth2.tokenUrl ?? '')}" style="width:100%" /></label>
+          <label style="flex:1">deviceUrl <input id="ch-device-url" value="${esc(channel.oauth2.deviceUrl ?? '')}" style="width:100%" /></label>
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          <label>clientId <input id="ch-client" value="${esc(channel.oauth2.clientId ?? '')}" style="width:300px" /></label>
+          <label>clientSecret <input id="ch-secret" type="password" placeholder="${channel.oauth2.clientSecretSet ? '已保存，留空不修改' : '公共客户端可留空'}" style="width:200px" /></label>
+          <label style="flex:1">scope <input id="ch-scope" value="${esc(channel.oauth2.scope ?? '')}" style="width:100%" /></label>
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          <button class="btn" id="ch-oauth-start">① 生成授权码</button>
+          <button class="btn primary" id="ch-oauth-check" disabled>② 检查授权</button>
+          <span class="muted" id="ch-oauth-state">${channel.oauth2.refreshTokenSet ? '已授权' + (channel.oauth2.account ? '：' + esc(channel.oauth2.account) : '') : '未授权'}</span>
+        </div>
+        <div id="ch-oauth-code" style="display:none;margin-top:10px;padding:12px;border:1px dashed var(--line);border-radius:10px">
+          <div class="muted" style="font-size:12px">浏览器打开下面链接并输入这串码：</div>
+          <div style="font-size:22px;letter-spacing:.18em;font-weight:700;margin:6px 0" id="ch-usercode">—</div>
+          <div class="muted" style="font-size:12px" id="ch-uri"></div>
+        </div>
+        ` : ''}
+
+        ${channel.type === 'smtp' || isOauth ? `
+        <div class="form-row" style="margin-top:10px">
+          <label>SMTP 主机 <input id="ch-host" value="${esc(channel.smtp.host ?? '')}" placeholder="smtp.example.com" style="width:210px" /></label>
+          <label>端口 <input id="ch-port" type="number" value="${channel.smtp.port ?? 465}" style="width:80px" /></label>
+          <label><input id="ch-secure" type="checkbox" ${channel.smtp.secure ? 'checked' : ''} /> SSL（465 勾选；587 不勾走 STARTTLS）</label>
+          ${isOauth ? '' : `<label>认证方式
+            <select id="ch-auth">
+              ${[['login', 'AUTH LOGIN'], ['plain', 'AUTH PLAIN'], ['auto', '自动（按服务器能力）'], ['none', '不认证']]
+                .map(([value, label]) => `<option value="${value}" ${channel.smtp.authMode === value ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+          </label>`}
+        </div>
+        ${isOauth ? '' : `
+        <div class="form-row" style="margin-top:10px">
+          <label>账号 <input id="ch-user" value="${esc(channel.smtp.user ?? '')}" placeholder="完整邮箱地址" style="width:260px" /></label>
+          <label>密码 / 授权码 <input id="ch-pass" type="password" placeholder="${channel.smtp.passSet ? '已保存，留空不修改' : 'SMTP 密码或应用专用密码'}" style="width:240px" /></label>
+        </div>`}
+        ` : ''}
+
+        <div class="form-row" style="margin-top:14px">
+          <button class="btn primary" id="ch-save">保存通道</button>
+          <input id="ch-test-to" placeholder="测试收件邮箱" style="width:230px" />
+          <button class="btn" id="ch-test">连接测试 + 发测试邮件</button>
+          <button class="btn" id="ch-cancel">取消</button>
+          <span class="muted" id="ch-msg"></span>
+        </div>
+      </div>`
+
+    let deviceCode = null
+    let timer = null
+    const stop = () => { if (timer) { clearInterval(timer); timer = null } }
+
+    $('#ch-cancel').addEventListener('click', () => { stop(); editing = null; renderForm() })
+
+    $('#ch-type').addEventListener('change', () => { collect(); editing.type = $('#ch-type').value; renderForm() })
+    $('#ch-name')?.addEventListener('input', () => { editing.name = $('#ch-name').value })
+
+    const collect = () => {
+      if (!editing) return
+      editing.name = $('#ch-name').value.trim() || editing.name
+      editing.type = $('#ch-type').value
+      editing.priority = Number($('#ch-priority').value || 100)
+      editing.from = $('#ch-from').value.trim()
+      editing.fromName = $('#ch-fromname').value.trim()
+      if (editing.type === 'http') {
+        editing.http.method = $('#ch-method').value
+        editing.http.url = $('#ch-url').value.trim()
+        try { editing.http.headers = JSON.parse($('#ch-headers').value || '{}') } catch { /* 保留原值 */ }
+        editing.http.body = $('#ch-body').value
+        const apiKey = $('#ch-apikey').value
+        if (apiKey) editing.http.apiKeyInput = apiKey
+      } else {
+        editing.smtp.host = $('#ch-host').value.trim()
+        editing.smtp.port = Number($('#ch-port').value || 465)
+        editing.smtp.secure = $('#ch-secure').checked
+        if ($('#ch-auth')) editing.smtp.authMode = $('#ch-auth').value
+        if ($('#ch-user')) editing.smtp.user = $('#ch-user').value.trim()
+        if ($('#ch-pass')?.value) editing.smtp.passInput = $('#ch-pass').value
+        if (editing.type === 'oauth2') {
+          editing.oauth2.tokenUrl = $('#ch-token-url').value.trim()
+          editing.oauth2.deviceUrl = $('#ch-device-url').value.trim()
+          editing.oauth2.clientId = $('#ch-client').value.trim()
+          editing.oauth2.scope = $('#ch-scope').value.trim()
+          if ($('#ch-secret').value) editing.oauth2.clientSecretInput = $('#ch-secret').value
+          editing.smtp.user = $('#ch-from').value.trim()
+        }
       }
-      msTimer = setInterval(poll, Math.max(5, result.interval ?? 5) * 1000)
-    } catch (error) {
-      $('#em-msg').textContent = error.message
     }
-  })
 
-  $('#em-ms-check').addEventListener('click', async () => {
-    const clientId = $('#em-ms-client').value.trim()
-    if (!clientId || !deviceCode) { $('#em-msg').textContent = '请先生成授权码'; return }
-    $('#em-msg').textContent = '正在检查授权…'
-    try {
-      const result = await api('/admin/api/email-settings/oauth/poll', { method: 'POST', body: { clientId, deviceCode } })
-      if (result.pending) { $('#em-msg').textContent = '还没完成授权，请在浏览器里输入验证码并同意'; return }
-      stopPolling()
-      $('#em-ms-state').textContent = `已授权：${result.account || '账号已绑定'}`
-      $('#em-msg').textContent = '授权成功，已切换为微软 OAuth2 发信'
-      toast('微软邮箱授权成功')
+    $('#ch-save').addEventListener('click', async () => {
+      collect()
+      const payload = {
+        id: editing.id || undefined,
+        name: editing.name,
+        type: editing.type,
+        enabled: true,
+        priority: editing.priority,
+        from: editing.from,
+        fromName: editing.fromName,
+        presetId: editing.presetId,
+      }
+      if (editing.type === 'http') {
+        payload.http = { url: editing.http.url, method: editing.http.method, headers: editing.http.headers, body: editing.http.body }
+        if (editing.http.apiKeyInput) payload.apiKey = editing.http.apiKeyInput
+      } else {
+        payload.smtp = {
+          host: editing.smtp.host, port: editing.smtp.port, secure: editing.smtp.secure,
+          user: editing.smtp.user, authMode: editing.smtp.authMode,
+          ...(editing.smtp.passInput ? { pass: editing.smtp.passInput } : {}),
+        }
+        if (editing.type === 'oauth2') {
+          payload.oauth2 = {
+            tokenUrl: editing.oauth2.tokenUrl, deviceUrl: editing.oauth2.deviceUrl,
+            clientId: editing.oauth2.clientId, scope: editing.oauth2.scope,
+            ...(editing.oauth2.clientSecretInput ? { clientSecret: editing.oauth2.clientSecretInput } : {}),
+          }
+        }
+      }
+      try {
+        await api('/admin/api/email-channels', { method: 'POST', body: payload })
+        toast('通道已保存')
+        stop()
+        await pageEmail()
+      } catch (error) { $('#ch-msg').textContent = error.message }
+    })
+
+    $('#ch-test')?.addEventListener('click', async () => {
+      if (!editing.id) { $('#ch-msg').textContent = '请先保存通道再测试'; return }
+      const to = $('#ch-test-to').value.trim() || editing.from
+      $('#ch-msg').textContent = '正在测试…'
+      try {
+        const result = await api(`/admin/api/email-channels/${editing.id}/test`, { method: 'POST', body: { to } })
+        $('#ch-msg').textContent = result.note ?? `成功：${result.transport ?? ''}，测试邮件已发往 ${result.to}`
+        toast('测试通过')
+      } catch (error) { $('#ch-msg').textContent = error.message }
+    })
+
+    $('#ch-oauth-start')?.addEventListener('click', async () => {
+      collect()
+      try {
+        await api('/admin/api/email-channels', { method: 'POST', body: { id: editing.id || undefined, name: editing.name, type: 'oauth2', enabled: true, priority: editing.priority, from: editing.from, fromName: editing.fromName, smtp: { host: editing.smtp.host, port: editing.smtp.port, secure: editing.smtp.secure, user: editing.from }, oauth2: { tokenUrl: editing.oauth2.tokenUrl, deviceUrl: editing.oauth2.deviceUrl, clientId: editing.oauth2.clientId, scope: editing.oauth2.scope, ...(editing.oauth2.clientSecretInput ? { clientSecret: editing.oauth2.clientSecretInput } : {}) } } })
+        const fresh = (await api('/admin/api/email-channels')).channels
+        const mine = fresh.find((item) => item.type === 'oauth2' && item.oauth2.clientId === editing.oauth2.clientId)
+        if (!mine) throw new Error('通道保存失败，请先点保存')
+        editing.id = mine.id
+        const started = await api(`/admin/api/email-channels/${mine.id}/oauth/start`, { method: 'POST', body: {} })
+        deviceCode = started.deviceCode
+        $('#ch-oauth-code').style.display = 'block'
+        $('#ch-usercode').textContent = started.userCode
+        $('#ch-uri').textContent = started.verificationUri
+        $('#ch-oauth-state').textContent = `等待授权（${Math.round(started.expiresIn / 60)} 分钟内有效）`
+        $('#ch-oauth-check').disabled = false
+        timer = setInterval(async () => {
+          try {
+            const result = await api(`/admin/api/email-channels/${mine.id}/oauth/poll`, { method: 'POST', body: { deviceCode } })
+            if (result.ok) { stop(); $('#ch-oauth-state').textContent = '已授权：' + (result.account || '完成'); toast('授权成功'); await pageEmail() }
+          } catch { stop() }
+        }, Math.max(5, started.interval ?? 5) * 1000)
+      } catch (error) { $('#ch-msg').textContent = error.message }
+    })
+
+    $('#ch-oauth-check')?.addEventListener('click', async () => {
+      if (!editing.id || !deviceCode) { $('#ch-msg').textContent = '请先生成授权码'; return }
+      try {
+        const result = await api(`/admin/api/email-channels/${editing.id}/oauth/poll`, { method: 'POST', body: { deviceCode } })
+        if (result.pending) { $('#ch-msg').textContent = '还没完成授权，请在浏览器输入验证码并同意'; return }
+        stop()
+        $('#ch-oauth-state').textContent = '已授权：' + (result.account || '完成')
+        toast('授权成功')
+        await pageEmail()
+      } catch (error) { $('#ch-msg').textContent = error.message }
+    })
+  }
+
+  for (const button of view.querySelectorAll('[data-edit]')) {
+    button.addEventListener('click', async () => {
+      const channel = (await api('/admin/api/email-channels')).channels.find((item) => item.id === button.dataset.edit)
+      editing = { ...channel, smtp: { ...channel.smtp }, oauth2: { ...channel.oauth2 }, http: { ...channel.http } }
+      renderForm()
+      $('#em-form').scrollIntoView({ block: 'start', behavior: 'smooth' })
+    })
+  }
+  for (const button of view.querySelectorAll('[data-test]')) {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.test
+      button.disabled = true
+      try {
+        const result = await api(`/admin/api/email-channels/${id}/test`, { method: 'POST', body: {} })
+        toast(result.note ?? '测试邮件已发送')
+      } catch (error) { toast(error.message) }
+      button.disabled = false
       await pageEmail()
-    } catch (error) {
-      $('#em-msg').textContent = error.message
-    }
-  })
+    })
+  }
+  for (const button of view.querySelectorAll('[data-toggle]')) {
+    button.addEventListener('click', async () => {
+      const channel = (await api('/admin/api/email-channels')).channels.find((item) => item.id === button.dataset.toggle)
+      await api('/admin/api/email-channels', { method: 'POST', body: { id: channel.id, enabled: channel.enabled === false } })
+      await pageEmail()
+    })
+  }
+  for (const button of view.querySelectorAll('[data-del]')) {
+    button.addEventListener('click', async () => {
+      await api(`/admin/api/email-channels/${button.dataset.del}`, { method: 'DELETE' })
+      toast('已删除')
+      await pageEmail()
+    })
+  }
+  for (const button of view.querySelectorAll('[data-top]')) {
+    button.addEventListener('click', async () => {
+      const channels2 = (await api('/admin/api/email-channels')).channels
+      const min = Math.min(...channels2.map((item) => item.priority))
+      await api('/admin/api/email-channels', { method: 'POST', body: { id: button.dataset.top, priority: min - 10 } })
+      await pageEmail()
+    })
+  }
 }
 
 /* 启动 */

@@ -10,8 +10,10 @@ import {
 } from './commerce.mjs'
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
 import { policyOf } from './entitlements.mjs'
-import { emailConfig, saveEmailConfig, sendMail, verifySmtp } from './mailer.mjs'
-import { pollDeviceCode, startDeviceCode } from './mailer-oauth.mjs'
+import {
+  PRESETS, channelList, emailSettings, isDevMail, markTest, removeChannel, saveEmailSettings, upsertChannel as upsertMailChannel, verifyChannel,
+} from './mail-channels.mjs'
+import { pollDeviceFlow, startDeviceFlow } from './mailer-oauth.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -594,85 +596,96 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     return send(res, result)
   }
 
-  if (pathname === '/admin/api/email-settings' && method === 'GET') {
+  /* ---------------- 邮件通道（厂家无关，可多条按优先级回退） ---------------- */
+  if (pathname === '/admin/api/email-channels' && method === 'GET') {
     if (!guard(PERM.emailRead)) return deny(PERM.emailRead)
-    const config = emailConfig()
+    const settings = emailSettings()
     return send(res, {
-      settings: {
-        provider: config.provider,
-        from: config.from,
-        fromName: config.fromName,
-        smtp: { host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure, user: config.smtp.user, passSet: config.smtp.passSet },
-        resend: { keySet: config.resend.keySet },
-        sendgrid: { keySet: config.sendgrid.keySet },
-        microsoft: { clientId: config.microsoft.clientId, account: config.microsoft.account, refreshTokenSet: config.microsoft.refreshTokenSet },
-      },
-      devMode: config.provider === 'dev',
+      channels: channelList(),
+      presets: PRESETS,
+      from: settings.from ?? '',
+      fromName: settings.fromName ?? '影巢',
+      devMode: isDevMail(),
     })
   }
 
-  if (pathname === '/admin/api/email-settings/oauth/start' && method === 'POST') {
+  if (pathname === '/admin/api/email-channels' && method === 'POST') {
     if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
-    const clientId = String(body?.clientId ?? emailConfig().microsoft.clientId ?? '').trim()
-    if (!clientId) return send(res, {}, '0400', '请先填写 Azure 应用的 clientId', 400)
+    const channel = upsertMailChannel(body ?? {})
+    log('admin.email.channel.save', 'email_channel', channel.id, null, { type: channel.type, name: channel.name })
+    return send(res, { ok: true, channel: channelList().find((item) => item.id === channel.id) })
+  }
+
+  if (pathname.startsWith('/admin/api/email-channels/') && method === 'DELETE') {
+    if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
+    removeChannel(pathname.split('/').pop())
+    log('admin.email.channel.remove', 'email_channel', pathname.split('/').pop(), null, null)
+    return send(res, { ok: true })
+  }
+
+  if (pathname === '/admin/api/email-settings' && method === 'PUT') {
+    if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
+    const settings = saveEmailSettings({ from: String(body?.from ?? '').trim(), fromName: String(body?.fromName ?? '').trim() })
+    return send(res, { ok: true, from: settings.from, fromName: settings.fromName })
+  }
+
+  if (/^\/admin\/api\/email-channels\/[\w-]+\/test$/.test(pathname) && method === 'POST') {
+    if (!guard(PERM.emailRead)) return deny(PERM.emailRead)
+    const id = pathname.split('/')[4]
+    const channel = channelList().find((item) => item.id === id)
+    if (!channel) return send(res, {}, '0404', '通道不存在', 404)
+    const to = String(body?.to ?? channel.from ?? '').trim()
+    if (!to) return send(res, {}, '0400', '请填写收件邮箱', 400)
     try {
-      const started = await startDeviceCode(clientId)
+      const result = await verifyChannel(id, { sendTo: to })
+      markTest(id, { ok: true, message: result.note ?? '测试邮件已发送' })
+      log('admin.email.channel.test', 'email_channel', id, null, { to, ok: true })
+      return send(res, { ...result, to, channel: channel.name })
+    } catch (error) {
+      markTest(id, { ok: false, message: error.message })
+      log('admin.email.channel.test', 'email_channel', id, null, { to, ok: false, error: error.message })
+      return send(res, { error: error.message }, '0502', error.message, 502)
+    }
+  }
+
+  if (/^\/admin\/api\/email-channels\/[\w-]+\/oauth\/start$/.test(pathname) && method === 'POST') {
+    if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
+    const id = pathname.split('/')[4]
+    const channel = emailSettings().channels.find((item) => item.id === id)
+    if (!channel) return send(res, {}, '0404', '通道不存在', 404)
+    try {
+      const started = await startDeviceFlow({
+        deviceUrl: channel.oauth2?.deviceUrl,
+        clientId: channel.oauth2?.clientId,
+        scope: channel.oauth2?.scope,
+      })
       return send(res, started)
     } catch (error) {
       return send(res, { error: error.message }, '0502', error.message, 502)
     }
   }
 
-  if (pathname === '/admin/api/email-settings/oauth/poll' && method === 'POST') {
+  if (/^\/admin\/api\/email-channels\/[\w-]+\/oauth\/poll$/.test(pathname) && method === 'POST') {
     if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
-    const clientId = String(body?.clientId ?? emailConfig().microsoft.clientId ?? '').trim()
-    const deviceCode = String(body?.deviceCode ?? '')
-    if (!clientId || !deviceCode) return send(res, {}, '0400', '缺少 clientId 或 deviceCode', 400)
+    const id = pathname.split('/')[4]
+    const channel = emailSettings().channels.find((item) => item.id === id)
+    if (!channel) return send(res, {}, '0404', '通道不存在', 404)
     try {
-      const result = await pollDeviceCode(clientId, deviceCode)
+      const result = await pollDeviceFlow({
+        tokenUrl: channel.oauth2?.tokenUrl,
+        clientId: channel.oauth2?.clientId,
+        deviceCode: String(body?.deviceCode ?? ''),
+        scope: channel.oauth2?.scope,
+      })
       if (!result.done) {
         if (result.pending) return send(res, { pending: true, error: result.error })
         return send(res, { pending: false, error: result.error, description: result.description }, '0400', result.description || result.error || '授权失败', 400)
       }
-      const account = result.account || ''
-      const next = saveEmailConfig({
-        provider: 'microsoft',
-        from: account,
-        microsoft: { clientId, refreshToken: result.refreshToken, account },
-      })
-      setSetting('email', next)
-      log('admin.email.oauth', 'settings', 'email', null, { provider: 'microsoft', account })
-      return send(res, { ok: true, account, provider: 'microsoft' })
+      upsertMailChannel({ id, oauth2: { refreshToken: result.refreshToken, account: result.account }, from: channel.from || result.account, enabled: true })
+      log('admin.email.channel.oauth', 'email_channel', id, null, { account: result.account })
+      return send(res, { ok: true, account: result.account })
     } catch (error) {
       return send(res, { error: error.message }, '0502', error.message, 502)
-    }
-  }
-
-  if (pathname === '/admin/api/email-settings' && method === 'PUT') {
-    if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
-    const before = emailConfig()
-    const next = saveEmailConfig(body ?? {})
-    setSetting('email', next)
-    log('admin.email.settings', 'settings', 'email',
-      { provider: before.provider, host: before.smtp.host, user: before.smtp.user },
-      { provider: next.provider, host: next.smtp.host, user: next.smtp.user })
-    return send(res, { ok: true, provider: next.provider })
-  }
-
-  if (pathname === '/admin/api/email-settings/test' && method === 'POST') {
-    if (!guard(PERM.emailRead)) return deny(PERM.emailRead)
-    const config = emailConfig()
-    const to = String(body?.to ?? config.smtp.user ?? config.from ?? '').trim()
-    if (!to) return send(res, {}, '0400', '请填写收件邮箱', 400)
-    const verify = await verifySmtp()
-    if (!verify.ok) return send(res, verify, '0502', `连接失败：${verify.error}`, 502)
-    try {
-      const result = await sendMail({ to, subject: '影巢 · 邮件通道测试', text: `这是一封测试邮件，收到即表示发信配置可用。\n时间：${new Date().toLocaleString('zh-CN')}\n渠道：${config.provider}` })
-      log('admin.email.test', 'settings', 'email', null, { to, provider: config.provider, delivered: result.delivered })
-      return send(res, { ...verify, to, delivered: result.delivered, dev: result.dev })
-    } catch (error) {
-      log('admin.email.test', 'settings', 'email', null, { to, provider: config.provider, error: error.message })
-      return send(res, { verify, error: error.message }, '0502', `发送失败：${error.message}`, 502)
     }
   }
 
