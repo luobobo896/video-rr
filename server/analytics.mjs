@@ -54,12 +54,12 @@ const dateRange = (days) => {
 export function analyticsReport({ days = 7 } = {}) {
   const since = dateRange(days)
   const plays = all(`SELECT date(created_at) AS day, COUNT(*) AS plays, COUNT(DISTINCT COALESCE(user_id, ip)) AS viewers
-    FROM play_events WHERE date(created_at) >= date(?) GROUP BY day ORDER BY day`, since)
+    FROM play_events WHERE created_at >= ? GROUP BY day ORDER BY day`, since)
 
   const totals = {
-    plays: one('SELECT COUNT(*) AS n FROM play_events WHERE date(created_at) >= date(?)', since).n,
-    viewers: one('SELECT COUNT(DISTINCT COALESCE(user_id, ip)) AS n FROM play_events WHERE date(created_at) >= date(?)', since).n,
-    dramasPlayed: one('SELECT COUNT(DISTINCT drama_id) AS n FROM play_events WHERE date(created_at) >= date(?)', since).n,
+    plays: one('SELECT COUNT(*) AS n FROM play_events WHERE created_at >= ?', since).n,
+    viewers: one('SELECT COUNT(DISTINCT COALESCE(user_id, ip)) AS n FROM play_events WHERE created_at >= ?', since).n,
+    dramasPlayed: one('SELECT COUNT(DISTINCT drama_id) AS n FROM play_events WHERE created_at >= ?', since).n,
     playsAllTime: one('SELECT COUNT(*) AS n FROM play_events').n,
   }
 
@@ -70,45 +70,45 @@ export function analyticsReport({ days = 7 } = {}) {
     GROUP BY p.drama_id ORDER BY plays DESC LIMIT 10`, since)
 
   const sourceSplit = all(`SELECT source, COUNT(*) AS n FROM play_events
-    WHERE date(created_at) >= date(?) GROUP BY source ORDER BY n DESC`, since)
+    WHERE created_at >= ? GROUP BY source ORDER BY n DESC`, since)
 
   const ordersByDay = all(`SELECT date(created_at) AS day,
       COUNT(*) AS orders,
       COALESCE(SUM(CASE WHEN status IN ('paid','fulfilled') THEN amount_cny ELSE 0 END), 0) AS revenue
-    FROM orders WHERE date(created_at) >= date(?) GROUP BY day ORDER BY day`, since)
+    FROM orders WHERE created_at >= ? GROUP BY day ORDER BY day`, since)
 
   const byChannel = all(`SELECT channel, COUNT(*) AS orders,
       COALESCE(SUM(CASE WHEN status IN ('paid','fulfilled') THEN amount_cny ELSE 0 END), 0) AS revenue
-    FROM orders WHERE date(created_at) >= date(?) GROUP BY channel ORDER BY revenue DESC`, since)
+    FROM orders WHERE created_at >= ? GROUP BY channel ORDER BY revenue DESC`, since)
 
   const byProduct = all(`SELECT product_type, COUNT(*) AS orders,
       COALESCE(SUM(CASE WHEN status IN ('paid','fulfilled') THEN amount_cny ELSE 0 END), 0) AS revenue
-    FROM orders WHERE date(created_at) >= date(?) GROUP BY product_type`, since)
+    FROM orders WHERE created_at >= ? GROUP BY product_type`, since)
 
   const funnel = {
-    orders: one('SELECT COUNT(*) AS n FROM orders WHERE date(created_at) >= date(?)', since).n,
-    paid: one("SELECT COUNT(*) AS n FROM orders WHERE date(created_at) >= date(?) AND status IN ('paid','fulfilled')", since).n,
-    closed: one("SELECT COUNT(*) AS n FROM orders WHERE date(created_at) >= date(?) AND status = 'closed'", since).n,
-    refunded: one("SELECT COUNT(*) AS n FROM orders WHERE date(created_at) >= date(?) AND status = 'refunded'", since).n,
+    orders: one('SELECT COUNT(*) AS n FROM orders WHERE created_at >= ?', since).n,
+    paid: one("SELECT COUNT(*) AS n FROM orders WHERE created_at >= ? AND status IN ('paid','fulfilled')", since).n,
+    closed: one("SELECT COUNT(*) AS n FROM orders WHERE created_at >= ? AND status = 'closed'", since).n,
+    refunded: one("SELECT COUNT(*) AS n FROM orders WHERE created_at >= ? AND status = 'refunded'", since).n,
   }
   funnel.payRate = funnel.orders ? Number(((funnel.paid / funnel.orders) * 100).toFixed(2)) : 0
 
   const revenue = one(`SELECT COALESCE(SUM(amount_cny),0) AS n FROM orders
-    WHERE date(created_at) >= date(?) AND status IN ('paid','fulfilled')`, since).n
+    WHERE created_at >= ? AND status IN ('paid','fulfilled')`, since).n
   const paidCount = funnel.paid
   const money = {
     revenue,
     aov: paidCount ? Number((revenue / paidCount).toFixed(2)) : 0,
-    refunded: one("SELECT COALESCE(SUM(refunded_amount),0) AS n FROM orders WHERE status = 'refunded' AND date(created_at) >= date(?)", since).n,
+    refunded: one("SELECT COALESCE(SUM(refunded_amount),0) AS n FROM orders WHERE status = 'refunded' AND created_at >= ?", since).n,
     pendingRefunds: one("SELECT COUNT(*) AS n FROM refunds WHERE status = 'pending'").n,
   }
 
   const users = {
     total: one('SELECT COUNT(*) AS n FROM users').n,
-    newInRange: one('SELECT COUNT(*) AS n FROM users WHERE date(created_at) >= date(?)', since).n,
-    newByDay: all('SELECT date(created_at) AS day, COUNT(*) AS n FROM users WHERE date(created_at) >= date(?) GROUP BY day ORDER BY day', since),
+    newInRange: one('SELECT COUNT(*) AS n FROM users WHERE created_at >= ?', since).n,
+    newByDay: all('SELECT date(created_at) AS day, COUNT(*) AS n FROM users WHERE created_at >= ? GROUP BY day ORDER BY day', since),
     paying: one(`SELECT COUNT(DISTINCT user_id) AS n FROM orders
-      WHERE status IN ('paid','fulfilled') AND date(created_at) >= date(?)`, since).n,
+      WHERE status IN ('paid','fulfilled') AND created_at >= ?`, since).n,
   }
 
   const subscriptions = {
@@ -128,7 +128,7 @@ export function analyticsReport({ days = 7 } = {}) {
   const perViewer = totals.viewers ? Number((totals.plays / totals.viewers).toFixed(2)) : 0
 
   /* ---------- 漏斗上游（曝光 → 详情 → 付费墙 → 下单 → 支付）---------- */
-  const countOf = (type) => one('SELECT COUNT(*) AS n FROM track_events WHERE type = ? AND date(created_at) >= date(?)', type, since).n
+  const countOf = (type) => one('SELECT COUNT(*) AS n FROM track_events WHERE type = ? AND created_at >= ?', type, since).n
   const upstream = {
     detailViews: countOf('detail_view'),
     paywallViews: countOf('paywall_view'),
@@ -143,23 +143,23 @@ export function analyticsReport({ days = 7 } = {}) {
   upstream.orderToPaid = funnel.payRate
 
   const trackByType = all(`SELECT type, COUNT(*) AS n FROM track_events
-    WHERE date(created_at) >= date(?) GROUP BY type ORDER BY n DESC`, since)
+    WHERE created_at >= ? GROUP BY type ORDER BY n DESC`, since)
   const trackByDay = all(`SELECT date(created_at) AS day, type, COUNT(*) AS n FROM track_events
-    WHERE date(created_at) >= date(?) GROUP BY day, type ORDER BY day`, since)
+    WHERE created_at >= ? GROUP BY day, type ORDER BY day`, since)
   const completion = one(`SELECT COUNT(*) AS n, COALESCE(AVG(value),0) AS avgRate FROM track_events
-    WHERE type = 'play_end' AND value IS NOT NULL AND date(created_at) >= date(?)`, since)
+    WHERE type = 'play_end' AND value IS NOT NULL AND created_at >= ?`, since)
   const completionStats = {
     samples: completion.n,
     avgRate: Number(Number(completion.avgRate ?? 0).toFixed(3)),
     finished: one(`SELECT COUNT(*) AS n FROM track_events
-      WHERE type = 'play_end' AND COALESCE(value,0) >= 0.9 AND date(created_at) >= date(?)`, since).n,
+      WHERE type = 'play_end' AND COALESCE(value,0) >= 0.9 AND created_at >= ?`, since).n,
   }
   const topDetailViews = all(`SELECT t.drama_id AS dramaId, d.title, COUNT(*) AS n, COALESCE(AVG(t.value),0) AS avgRate
     FROM track_events t LEFT JOIN dramas d ON d.id = t.drama_id
     WHERE t.type = 'detail_view' AND date(t.created_at) >= date(?)
     GROUP BY t.drama_id ORDER BY n DESC LIMIT 10`, since)
   const searchTerms = all(`SELECT path AS term, COUNT(*) AS n FROM track_events
-    WHERE type = 'search' AND date(created_at) >= date(?) AND path <> ''
+    WHERE type = 'search' AND created_at >= ? AND path <> ''
     GROUP BY path ORDER BY n DESC LIMIT 10`, since)
 
   return {

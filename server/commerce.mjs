@@ -431,6 +431,29 @@ export function listOrders({ limit = 100, status, userId } = {}) {
     ${where} ORDER BY o.id DESC LIMIT ?`, ...args, Math.min(300, Number(limit) || 100))
 }
 
+/** 订单列表的统一出口：前端不再需要在 snake_case / camelCase 之间猜字段。 */
+export function orderDto(row) {
+  return {
+    id: row.id,
+    outTradeNo: row.out_trade_no,
+    productType: row.product_type,
+    planId: row.plan_id ?? null,
+    planName: row.plan_name ?? null,
+    dramaId: row.drama_id ?? null,
+    dramaTitle: row.drama_title ?? null,
+    amount: row.amount_cny,
+    channel: row.channel,
+    status: row.status,
+    createdAt: row.created_at,
+    paidAt: row.paid_at ?? null,
+    closedAt: row.closed_at ?? null,
+    expiresAt: row.expires_at ?? null,
+    usdt: row.usdt_amount
+      ? { amount: row.usdt_amount, rate: row.usdt_rate, address: row.usdt_address }
+      : null,
+  }
+}
+
 /** 订单超时关单（定时任务每分钟跑）。 */
 export function closeExpiredOrders() {
   const result = run(`UPDATE orders SET status = 'closed'

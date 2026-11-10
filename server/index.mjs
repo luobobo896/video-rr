@@ -15,7 +15,7 @@ import { handlePublic } from './api-public.mjs'
 import { handleAdmin } from './api-admin.mjs'
 import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
 import { verifyLink } from './entitlements.mjs'
-import { closeExpiredOrders } from './commerce.mjs'
+import { closeExpiredOrders, reconcile } from './commerce.mjs'
 import { inspect, sweep } from './ratelimit.mjs'
 import { connectRedis, redisStatus } from './redis.mjs'
 
@@ -378,6 +378,18 @@ setInterval(() => {
 setInterval(() => {
   scanOnce().catch((error) => console.error('[usdt-watch]', error.message))
 }, 60_000).unref()
+
+// 每 6 小时自动对账一次（此前只能人工点「对账」，渠道回调丢失后无人发现）
+setInterval(async () => {
+  try {
+    const report = reconcile()
+    const issues = Number(report.missingPayment ?? 0) + Number(report.orphanPayment ?? 0) + Number(report.stuckPaid ?? 0)
+    if (issues > 0) console.warn('[reconcile] 发现差异', report)
+    else console.log('[reconcile] 正常')
+  } catch (error) {
+    console.error('[reconcile]', error.message)
+  }
+}, 6 * 3600_000).unref()
 
 connectRedis().catch(() => {})
 // 复位上次进程中断的转码任务

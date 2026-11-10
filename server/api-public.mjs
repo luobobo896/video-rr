@@ -15,7 +15,7 @@ import { recordEvent, recordPlay } from './analytics.mjs'
 import { clientIpOf } from './ratelimit.mjs'
 import { listTags, tagsOfDrama } from './tags.mjs'
 import {
-  CommerceError, createOrder, handleAlipayNotify, listOrders, markPaid, mockPay, paymentOptions, validateCoupon,
+  CommerceError, createOrder, handleAlipayNotify, listOrders, markPaid, mockPay, orderDto, paymentOptions, validateCoupon,
   buildSimulatedAlipayNotify, syncAlipayOrder, payUrlFor,
 } from './commerce.mjs'
 
@@ -390,7 +390,7 @@ export async function handlePublic(pathname, url, req, res) {
 
     if (pathname === '/api/orders' && method === 'GET') {
       if (!userId) return fail(res, '0401', '请先登录', 401)
-      return send(res, { list: listOrders({ userId, limit: 50 }) })
+      return send(res, { list: listOrders({ userId, limit: 50 }).map(orderDto) })
     }
 
     if (pathname.startsWith('/api/orders/')) {
