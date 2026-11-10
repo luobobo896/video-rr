@@ -19,17 +19,23 @@ const view = $('#view')
 const sidebar = $('#sidebar')
 const topbar = $('#topbar')
 
+// 频道导航对齐参考站：主线是「精选 + 频道 + 地区快捷入口 + 即将上线」。
+// 美剧/韩剧/日剧/英剧不是独立频道，而是「电视剧 + 地区筛选」的快捷入口，
+// 这样既不用多一套内容模型，也不会出现点进去全是空列表的独立频道。
 const NAV_MAIN = [
   ['精选', '#/home'],
-  // 「分类」进的是全部分类页（频道/排序/地区/类型/年份/标签六排筛选），
-  // 分类页的 ALL 不加 d.category 条件，返回全站已上架内容 + 真实 total + facets
   ['分类', '#/category/ALL'],
   ['电影', '#/category/MOVIE'],
   ['电视剧', '#/category/TV'],
+  ['美剧', '#/category/TV?region=US'],
+  ['韩剧', '#/category/TV?region=KR'],
+  ['日剧', '#/category/TV?region=JP'],
+  ['英剧', '#/category/TV?region=UK'],
   ['短剧', '#/category/PLAYLET'],
   ['动漫', '#/category/ANIME'],
   ['综艺', '#/category/VARIETY'],
   ['纪录片', '#/category/DOCUMENTARY'],
+  ['即将上线', '#/category/ALL?sort=upcoming'],
 ]
 
 // 内容类型的中文名（服务端 dramaType 是 MOVIE/TV/PLAYLET/VARIETY 这类枚举，
