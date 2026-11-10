@@ -1,5 +1,6 @@
 /** 影巢运营后台（原生 ESM，无构建）。 */
 const BASE = window.__MH_BASE || ''
+const mediaUrl = (url) => (!url ? '' : /^https?:/i.test(url) ? url : BASE + url)
 const $ = (selector, root = document) => root.querySelector(selector)
 const view = $('#view')
 const nav = $('#nav')
@@ -162,7 +163,7 @@ async function pageDramas() {
         <tbody>
           ${data.list.map((row) => `
             <tr>
-              <td><img class="mini" src="${esc(row.cover_url)}" alt="" onerror="this.style.visibility='hidden'" /></td>
+              <td><img class="mini" src="${esc(mediaUrl(row.cover_url))}" alt="" onerror="this.style.visibility='hidden'" /></td>
               <td>${esc(row.title)}<div class="muted">${esc(row.sub_title ?? '')}</div></td>
               <td>${esc(row.category ?? '')}</td>
               <td>${row.fee_mode === 'vip' ? '<span class="pill warn">VIP</span>' : '<span class="pill">免费</span>'}</td>
@@ -330,7 +331,7 @@ async function pageOps() {
       <h3>首页 Banner<span class="spacer"></span><button class="btn primary" id="add-banner">新增 Banner</button></h3>
       <table><thead><tr><th>图</th><th>名称/标题</th><th>跳转剧集</th><th>排序</th><th>启用</th><th>操作</th></tr></thead><tbody>
         ${banners.list.map((row) => `<tr>
-          <td><img class="mini" src="${esc(row.image)}" alt="" onerror="this.style.visibility='hidden'" /></td>
+          <td><img class="mini" src="${esc(mediaUrl(row.image))}" alt="" onerror="this.style.visibility='hidden'" /></td>
           <td>${esc(row.name)}<div class="muted">${esc(row.title ?? '')}</div></td>
           <td>#${esc(row.target_drama_id ?? '—')}</td>
           <td>${row.sort}</td>

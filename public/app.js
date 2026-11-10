@@ -1,5 +1,6 @@
 /** 影巢复刻站前端：hash 路由 + 原生模板渲染，零构建。 */
 const BASE = window.__MH_BASE || ''
+const mediaUrl = (url) => (!url ? '' : /^https?:/i.test(url) ? url : BASE + url)
 const $ = (selector, root = document) => root.querySelector(selector)
 const view = $('#view')
 const sidebar = $('#sidebar')
@@ -113,7 +114,7 @@ function posterCard(item, options = {}) {
     <div class="card">
       <a class="poster" href="#/drama/${escapeHtml(item.dramaId)}" title="${escapeHtml(item.title)}">
         ${badge}${rank}
-        <img loading="lazy" src="${escapeHtml(item.coverUrl)}" alt="${escapeHtml(item.title)}" onerror="this.style.display='none';this.parentNode.classList.add('noimg')" />
+        <img loading="lazy" src="${escapeHtml(mediaUrl(item.coverUrl))}" alt="${escapeHtml(item.title)}" onerror="this.style.display='none';this.parentNode.classList.add('noimg')" />
         <span class="play-hint">▶</span>
       </a>
       <div class="card-title">${escapeHtml(item.title)}</div>
@@ -189,7 +190,7 @@ async function renderHome() {
   const banner = data.banners[0]
   view.innerHTML = `
     <section class="hero">
-      <img class="hero-img" src="${escapeHtml(banner?.image ?? '')}" alt="" />
+      <img class="hero-img" src="${escapeHtml(mediaUrl(banner?.image ?? ''))}" alt="" />
       <div class="hero-mask"></div>
       <div class="hero-body">
         <span class="hero-tag">独家 · 正在热播</span>
@@ -286,7 +287,7 @@ async function renderDrama(id) {
   const detail = await api(`/api/drama/${encodeURIComponent(id)}`)
   view.innerHTML = `
     <div class="detail-head">
-      <div class="detail-cover"><img src="${escapeHtml(detail.coverUrl)}" alt="" onerror="this.style.display='none'" /></div>
+      <div class="detail-cover"><img src="${escapeHtml(mediaUrl(detail.coverUrl))}" alt="" onerror="this.style.display='none'" /></div>
       <div class="detail-meta">
         <div class="detail-title">${escapeHtml(detail.title)}</div>
         <div class="detail-facts">
@@ -356,7 +357,7 @@ async function renderPlay(id, episodeNo) {
       </div>
     </div>
     <div class="detail-head" style="margin-top:0">
-      <div class="detail-cover" style="width:120px;flex:0 0 120px"><img src="${escapeHtml(detail.coverUrl)}" alt="" /></div>
+      <div class="detail-cover" style="width:120px;flex:0 0 120px"><img src="${escapeHtml(mediaUrl(detail.coverUrl))}" alt="" /></div>
       <div class="detail-meta">
         <div class="detail-title" style="font-size:20px">${escapeHtml(detail.title)}</div>
         <div class="detail-facts"><span>${escapeHtml(detail.subTitle)}</span></div>
