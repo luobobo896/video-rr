@@ -492,6 +492,8 @@ export const MENU_TREE = [
 
   { code: 'dir:system', name: '系统管理', type: 'dir', parent: null, sort: 60, path: '/system', icon: '⚙️' },
   { code: 'system.admin', name: '管理员账号', type: 'menu', parent: 'dir:system', sort: 5, path: '/admins', icon: '🧑‍💼' },
+  { code: 'system.menu', name: '菜单管理', type: 'menu', parent: 'dir:system', sort: 8, path: '/menus', icon: '🗂️' },
+  { code: 'system.menu.write', name: '维护后台菜单', type: 'button', parent: 'system.menu', sort: 10 },
   { code: 'system.role', name: '角色权限', type: 'menu', parent: 'dir:system', sort: 10, path: '/roles', icon: '🔐' },
   { code: 'admin.read', name: '查看角色/管理员', type: 'button', parent: 'system.role', sort: 10 },
   { code: 'admin.write', name: '管理角色/管理员', type: 'button', parent: 'system.role', sort: 20 },
@@ -538,6 +540,43 @@ export const ROLES = [
 
 const BY_CODE = new Map(MENU_TREE.map((node) => [node.code, node]))
 export const menuNode = (code) => BY_CODE.get(code)
+
+/**
+ * 后台侧边栏菜单的出厂值：`[分组键, 分组名, 分组排序, [[菜单名, 路由, 所需权限, 图标], ...]]`。
+ * 写进 admin_menus 表后即为运营可编辑的数据；这里的常量只用于首次建库与「恢复出厂菜单」。
+ */
+export const DEFAULT_ADMIN_MENUS = [
+  ['overview', '数据概览', 10, [
+    ['概览', '/dashboard', 'dashboard.read', '📊'],
+    ['经营数据', '/analytics', 'analytics.read', '📈'],
+    ['埋点数据', '/events', 'ops.events.read', '📡'],
+  ]],
+  ['content', '内容运营', 20, [
+    ['剧集管理', '/dramas', 'content.drama.read', '📺'],
+    ['付费策略', '/policies', 'content.drama.read', '💳'],
+    ['标签管理', '/tags', 'tag.read', '🏷️'],
+    ['首页运营', '/ops', 'ops.banner.write', '🖼️'],
+    ['榜单', '/ranks', 'ops.rank.write', '🏆'],
+    ['内容审核', '/review', 'content.review', '🛡️'],
+  ]],
+  ['commerce', '交易与财务', 30, [
+    ['套餐定价', '/plans', 'commerce.plan.write', '🏷️'],
+    ['优惠券', '/coupons', 'commerce.coupon.write', '🎟️'],
+    ['订单', '/orders', 'finance.order.read', '🧾'],
+    ['退款审核', '/refunds', 'finance.refund.create', '↩️'],
+  ]],
+  ['users', '用户', 40, [
+    ['C 端用户', '/users', 'user.read', '👥'],
+  ]],
+  ['system', '系统设置', 50, [
+    ['菜单管理', '/menus', 'system.menu', '🗂️'],
+    ['角色权限', '/roles', 'admin.read', '🔐'],
+    ['管理员账号', '/admins', 'system.admin', '🧑‍💼'],
+    ['审计日志', '/audit', 'audit.read', '📜'],
+    ['支付渠道', '/pay', 'payment.channel.read', '💳'],
+    ['邮件设置', '/email', 'email.read', '✉️'],
+  ]],
+]
 
 /** 补齐父级：角色保存时不允许出现"孤儿按钮"。 */
 export function expandWithAncestors(codes) {
@@ -658,6 +697,34 @@ CREATE TABLE IF NOT EXISTS scrape_cache (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`)
 
+  // 后台侧边栏菜单：与权限（permissions 树）分开建模。
+  // 权限回答「谁能做什么」，菜单回答「后台长什么样」——同一权限可以没有菜单入口，
+  // 同一菜单也能换名字/换顺序/临时隐藏而不动角色授权。
+  db.exec(`
+CREATE TABLE IF NOT EXISTS admin_menus (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_key TEXT NOT NULL,
+  group_label TEXT NOT NULL,
+  group_sort INTEGER NOT NULL DEFAULT 0,
+  label TEXT NOT NULL,
+  route TEXT NOT NULL,
+  icon TEXT,
+  perm_code TEXT,
+  sort INTEGER NOT NULL DEFAULT 0,
+  visible INTEGER NOT NULL DEFAULT 1,
+  is_system INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT
+)`)
+  const menuCount = db.prepare('SELECT COUNT(*) AS n FROM admin_menus').get().n
+  if (!menuCount) {
+    const insert = db.prepare(`INSERT INTO admin_menus (group_key, group_label, group_sort, label, route, icon, perm_code, sort, visible, is_system)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`)
+    for (const [groupKey, groupLabel, groupSort, items] of DEFAULT_ADMIN_MENUS) {
+      items.forEach(([label, route, permCode, icon], index) => {
+        insert.run(groupKey, groupLabel, groupSort, label, route, icon ?? null, permCode, (index + 1) * 10)
+      })
+    }
+  }
 }
 
 /** 雪花风格不可重复编码（时间戳 + 进程号 + 自增），给套餐/优惠券用。 */
@@ -1060,8 +1127,10 @@ export function ensureSettings() {
   }
 }
 
-// 模块加载即补齐运营侧增量表（幂等）：标签层级 / 按集定价 / 榜单自动分 / 搜刮缓存。
+// 模块加载即补齐运营侧增量表（幂等）：标签层级 / 按集定价 / 榜单自动分 / 搜刮缓存 / 后台菜单。
 // 放在这里而不是只在 index.mjs 调，是为了测试与脚本（导入、探针）导入 db 时也有一致的表结构。
 ensureOpsSchema()
+// 新增的权限节点（如 system.menu）也要在脚本/测试场景下补齐，否则角色授权页看不到
+syncMenuCatalog()
 
 export { DB_PATH }

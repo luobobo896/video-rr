@@ -45,6 +45,7 @@ const NAV_GROUPS = [
     id: 'system', title: '系统设置',
     items: [
       ['roles', '角色权限', 'admin.read'],
+      ['menus', '菜单管理', 'system.menu'],
       ['admins', '管理员账号', 'system.admin'],
       ['audit', '审计日志', 'audit.read'],
       ['pay', '支付渠道', 'payment.channel.read'],
@@ -54,7 +55,23 @@ const NAV_GROUPS = [
 ]
 
 /** 扁平索引：路由与标题查表用，保持与原 NAV 数组同构 [key, label, perm]。 */
-const NAV = NAV_GROUPS.flatMap((group) => group.items)
+const navFlat = () => navGroups().flatMap((group) => group.items)
+
+/**
+ * 侧边栏数据源：优先用 /admin/api/me 下发的 admin_menus（运营可在「菜单管理」里改），
+ * 接口没返回时退回内置默认值，保证后台在接口异常时仍可用。
+ */
+function navGroups() {
+  const remote = state.me?.menus
+  if (Array.isArray(remote) && remote.length) {
+    return remote.map((group) => ({
+      id: group.key,
+      title: group.label,
+      items: (group.items ?? []).map((item) => [String(item.route ?? '').replace(/^\//, ''), item.label, item.permCode, item.icon]),
+    }))
+  }
+  return NAV_GROUPS
+}
 
 const state = { token: localStorage.getItem('mh-admin-token') ?? '', page: 'dashboard', params: {}, timers: [] }
 
@@ -210,12 +227,14 @@ const readOpenGroups = () => {
 
 function renderNav() {
   const perms = new Set(state.me?.permissions ?? [])
+  const groups = navGroups()
   const open = readOpenGroups()
-  const activeGroup = NAV_GROUPS.find((group) => group.items.some(([key]) => key === state.page))
+  const activeGroup = groups.find((group) => group.items.some(([key]) => key === state.page))
   if (activeGroup) open.add(activeGroup.id)
-  nav.innerHTML = NAV_GROUPS
+  const keepScroll = nav.scrollTop
+  nav.innerHTML = groups
     .map((group) => {
-      const items = group.items.filter(([, , perm]) => perms.has(perm))
+      const items = group.items.filter(([, , perm]) => !perm || perms.has(perm))
       if (!items.length) return ''
       const expanded = open.has(group.id)
       return `<div class="nav-group ${expanded ? 'open' : 'collapsed'}" data-group="${group.id}">
@@ -223,10 +242,12 @@ function renderNav() {
           <span>${esc(group.title)}</span><span class="chev">${expanded ? '▾' : '▸'}</span>
         </button>
         <div class="nav-group-body">
-          ${items.map(([key, label]) => `<a class="nav-item ${state.page === key ? 'active' : ''}" href="#/${key}">${esc(label)}</a>`).join('')}
+          ${items.map(([key, label, , icon]) => `<a class="nav-item ${state.page === key ? 'active' : ''}" data-item="${esc(key)}" href="#/${key}">${icon ? `<span class="nav-icon">${esc(icon)}</span>` : ''}${esc(label)}</a>`).join('')}
         </div>
       </div>`
     }).join('')
+  // 重绘侧栏不能带着用户滚回顶部：恢复原滚动位置（超出范围时浏览器会自动夹取）
+  nav.scrollTop = keepScroll
   nav.querySelectorAll('[data-toggle]').forEach((button) => {
     button.addEventListener('click', () => {
       const id = button.dataset.toggle
@@ -235,10 +256,24 @@ function renderNav() {
       else next.add(id)
       localStorage.setItem(NAV_OPEN_KEY, JSON.stringify([...next]))
       renderNav()
+      highlightNav()
     })
   })
   const who = $('#whoami')
   if (who) who.textContent = state.me ? `${state.me.admin.displayName ?? state.me.admin.username} · ${(state.me.roles ?? []).map((role) => role.name).join(' / ')}` : ''
+}
+
+/** 只切 active 类，不重建 DOM：切换页面时侧栏不抖动、不滚回顶部。 */
+function highlightNav() {
+  nav.querySelectorAll('.nav-item').forEach((item) => {
+    item.classList.toggle('active', item.dataset.item === state.page)
+  })
+  const active = nav.querySelector('.nav-item.active')
+  if (active) {
+    // 只在侧栏内部滚动，绝不触发整页滚动（这是「点上面的菜单却跳到下面」的根因）
+    const top = active.offsetTop - nav.clientHeight / 2 + active.offsetHeight / 2
+    nav.scrollTop = Math.max(0, top)
+  }
 }
 
 window.addEventListener('hashchange', () => route())
@@ -257,12 +292,21 @@ async function route() {
   clearTimers()
   const hash = location.hash.replace(/^#\/?/, '') || 'dashboard'
   state.page = hash.split('?')[0].split('/')[0]
-  const navItem = NAV.find(([id]) => id === state.page)
+  const flat = navFlat()
+  const navItem = flat.find(([id]) => id === state.page)
   const key = navItem ? state.page : 'dashboard'
-  const perm = (NAV.find(([id]) => id === key) ?? [])[2]
+  const perm = (flat.find(([id]) => id === key) ?? [])[2]
   const perms = new Set(state.me?.permissions ?? [])
-  $('#page-title').textContent = NAV.find(([id]) => id === key)[1]
-  renderNav()
+  $('#page-title').textContent = flat.find(([id]) => id === key)?.[1] ?? key
+  // 切页只更新高亮；目标页在折叠分组里时才重绘一次展开状态（避免每次导航都重建侧栏）
+  const activeGroup = navGroups().find((group) => group.items.some(([id]) => id === key))
+  const open = readOpenGroups()
+  if (activeGroup && !open.has(activeGroup.id)) {
+    open.add(activeGroup.id)
+    localStorage.setItem(NAV_OPEN_KEY, JSON.stringify([...open]))
+    renderNav()
+  }
+  highlightNav()
   // 页面级权限守卫：菜单已经按权限隐藏，手改 hash 时也不发请求、不渲染空表
   if (perm && !perms.has(perm)) {
     view.innerHTML = `<div class="card empty-card"><h3>无权限访问</h3>
@@ -290,6 +334,7 @@ async function route() {
     else if (key === 'tags') await pageTags()
     else if (key === 'events') await pageEvents()
     else if (key === 'admins') await pageAdmins()
+    else if (key === 'menus') await pageMenus()
   } catch (error) {
     // 单页渲染失败不影响其它页面：给出错误、页面名与重试入口
     console.error('[admin]', key, error)
@@ -373,6 +418,7 @@ async function pageDramas() {
       <h3>剧集库 <span class="muted">共 ${rows.length} 部 · 已上架 ${rows.filter((row) => row.status === 'published').length}</span>
         <span class="spacer"></span>
         <input id="drama-q" class="input" placeholder="搜标题" value="${esc(keyword)}" style="width:180px" />
+        <button class="btn" id="scrape-artwork" title="给缺封面/横幅的剧集抓取海报，并补齐首页大图">🖼 一键搜刮素材</button>
         <button class="btn primary" id="new-drama">＋ 新建剧集</button>
       </h3>
       <div class="subtabs" id="drama-cats">
@@ -414,6 +460,24 @@ async function pageDramas() {
     pageDramas()
   })
   $('#new-drama').addEventListener('click', () => dramaWizard(options))
+  $('#scrape-artwork').addEventListener('click', async () => {
+    const button = $('#scrape-artwork')
+    button.disabled = true
+    const label = button.textContent
+    button.textContent = '抓取中…'
+    try {
+      const result = await api('/admin/api/artwork/refresh', { method: 'POST', body: { limit: 100, bannerLimit: 6 } })
+      const failed = (result.details ?? []).filter((item) => !item.ok)
+      toast(`封面补齐 ${result.updated} 部，横幅新增 ${result.banners?.created ?? 0} 条${result.failed ? `，失败 ${result.failed} 部` : ''}`)
+      if (failed.length) console.warn('[artwork]', failed)
+      pageDramas()
+    } catch (error) {
+      toast(error.message)
+    } finally {
+      button.disabled = false
+      button.textContent = label
+    }
+  })
   view.querySelectorAll('[data-toggle-publish]').forEach((button) => {
     button.addEventListener('click', async () => {
       const id = Number(button.dataset.togglePublish)
@@ -2340,30 +2404,296 @@ async function pageEvents() {
   }))
 }
 
-/* ---------------- 管理员账号（B 端） ---------------- */
+/* ---------------- 管理员账号（B 端，可增删改 + 分配角色） ---------------- */
+const ADMIN_STATUS_LABEL = { active: '正常', disabled: '已停用' }
+
+/** 保存后刷新 /me：菜单可能被改，侧栏要跟着变。 */
+async function refreshSession() {
+  try {
+    state.me = await api('/admin/api/me')
+    renderNav()
+  } catch { /* 会话失效时由 api() 统一处理 */ }
+}
+
+function roleChecks(roles, checked, name = 'roles') {
+  return `<div class="check-list">${roles.map((role) => `
+    <label class="check-item">
+      <input type="checkbox" name="${name}" value="${esc(role.code)}" ${checked.includes(role.code) ? 'checked' : ''} />
+      <span>${esc(role.name)}</span><small class="muted">${esc(role.description ?? '')}</small>
+    </label>`).join('')}</div>`
+}
+
 async function pageAdmins() {
-  const [data, roles] = await Promise.all([api('/admin/api/admins'), api('/admin/api/roles').catch(() => ({ roles: [] }))])
-  const roleOptions = (roles.roles ?? []).map((role) => role.code)
+  const [data, rolesData] = await Promise.all([api('/admin/api/admins'), api('/admin/api/roles').catch(() => ({ roles: [] }))])
+  const roles = rolesData.roles ?? []
+  const list = data.list ?? []
   view.innerHTML = `
     <div class="panel">
-      <h3>管理员账号 <span class="muted">B 端 ${data.list?.length ?? 0} 个 · C 端用户 ${fmt(data.users ?? 0)} 人</span></h3>
-      <p class="muted">这里只列后台账号（B 端）；C 端注册用户在「用户 → C 端用户」里，两边不混表也不共用登录入口。</p>
+      <div class="panel-head">
+        <h3>管理员账号 <span class="muted">B 端 ${list.length} 个 · C 端用户 ${fmt(data.users ?? 0)} 人</span></h3>
+        <button class="btn primary" id="admin-new">＋ 新建后台账号</button>
+      </div>
+      <p class="muted">这里只列能登录 /video-admin/ 的后台账号（B 端）；C 端注册用户在「用户 → C 端用户」。角色决定账号能看到哪些菜单、能执行哪些操作，改角色立即生效。</p>
       <table>
-        <thead><tr><th>账号</th><th>类型</th><th>显示名</th><th>角色</th><th>状态</th><th>最近操作</th><th>创建时间</th></tr></thead>
+        <thead><tr><th>账号</th><th>显示名</th><th>角色</th><th>状态</th><th>口令</th><th>最近操作</th><th style="width:230px">操作</th></tr></thead>
         <tbody>
-          ${(data.list ?? []).map((admin) => `<tr>
-            <td><strong>${esc(admin.username)}</strong></td>
-            <td><span class="pill">${esc(admin.kindLabel ?? 'B 端账号')}</span></td>
+          ${list.map((admin) => `<tr data-admin="${admin.id}">
+            <td><strong>${esc(admin.username)}</strong><div class="muted small">#${admin.id}</div></td>
             <td>${esc(admin.display_name ?? '—')}</td>
-            <td>${(admin.roles ?? []).map((role) => `<span class="pill">${esc(role.name)}</span>`).join(' ') || '<span class="muted">未分配</span>'}</td>
-            <td>${admin.status === 'active' ? '<span class="pill ok">正常</span>' : `<span class="pill warn">${esc(admin.status)}</span>`}</td>
-            <td class="muted">${esc(admin.lastAuditAt ?? '—')}</td>
-            <td class="muted">${esc(admin.created_at ?? '—')}</td>
-          </tr>`).join('') || '<tr><td colspan="7" class="muted">没有后台账号</td></tr>'}
+            <td>${(admin.roles ?? []).map((role) => `<span class="pill">${esc(role.name)}</span>`).join(' ') || '<span class="pill warn">未分配</span>'}</td>
+            <td>${admin.status === 'active' ? '<span class="pill ok">正常</span>' : `<span class="pill warn">${esc(ADMIN_STATUS_LABEL[admin.status] ?? admin.status)}</span>`}</td>
+            <td>${admin.mustChangePassword ? '<span class="pill warn">待首次修改</span>' : '<span class="muted">已修改</span>'}</td>
+            <td class="muted small">${esc(admin.lastAuditAt ?? '—')}</td>
+            <td class="row-actions">
+              <button class="btn sm" data-edit="${admin.id}">编辑</button>
+              <button class="btn sm" data-roles="${admin.id}">分配角色</button>
+              <button class="btn sm" data-pass="${admin.id}">重置口令</button>
+              <button class="btn sm" data-toggle-status="${admin.id}" data-status="${admin.status}">${admin.status === 'active' ? '停用' : '启用'}</button>
+              <button class="btn sm danger" data-del-admin="${admin.id}">删除</button>
+            </td>
+          </tr>`).join('') || '<tr><td colspan="7" class="muted">还没有后台账号，点右上角新建</td></tr>'}
         </tbody>
       </table>
-      <p class="muted" style="margin-top:10px">角色分配在「系统设置 → 角色权限」里操作；后台口令策略为 8 位以上且同时含字母与数字。</p>
+      <p class="muted small" style="margin-top:10px">口令策略：8 位以上，同时含字母与数字，不能包含账号名、不能是常见弱口令、至少 4 种不同字符；新建与重置账号默认要求首次登录改密。</p>
     </div>`
+
+  const byId = (id) => list.find((item) => item.id === Number(id))
+
+  $('#admin-new').addEventListener('click', () => openAdminForm(roles))
+  view.querySelectorAll('[data-edit]').forEach((button) => button.addEventListener('click', () => openAdminForm(roles, byId(button.dataset.edit))))
+  view.querySelectorAll('[data-roles]').forEach((button) => button.addEventListener('click', () => openRoleAssign(roles, byId(button.dataset.roles))))
+  view.querySelectorAll('[data-pass]').forEach((button) => button.addEventListener('click', () => openPasswordReset(byId(button.dataset.pass))))
+  view.querySelectorAll('[data-toggle-status]').forEach((button) => button.addEventListener('click', async () => {
+    const admin = byId(button.dataset.toggleStatus)
+    const next = admin.status === 'active' ? 'disabled' : 'active'
+    if (next === 'disabled' && !window.confirm(`停用 ${admin.username}？停用后该账号立刻无法登录后台（已登录会话会被吊销）。`)) return
+    try {
+      await api(`/admin/api/admins/${admin.id}`, { method: 'PUT', body: { status: next } })
+      toast(next === 'active' ? '已启用' : '已停用，会话已吊销')
+      await pageAdmins()
+    } catch (error) { toast(error.message) }
+  }))
+  view.querySelectorAll('[data-del-admin]').forEach((button) => button.addEventListener('click', async () => {
+    const admin = byId(button.dataset.delAdmin)
+    if (!window.confirm(`删除后台账号 ${admin.username}？\n\n该账号的角色绑定会一并删除，操作不可撤销；如需保留请改用「停用」。`)) return
+    try {
+      await api(`/admin/api/admins/${admin.id}`, { method: 'DELETE' })
+      toast('已删除')
+      await pageAdmins()
+    } catch (error) { toast(error.message) }
+  }))
+}
+
+function openAdminForm(roles, existing) {
+  const isEdit = Boolean(existing)
+  const checked = (existing?.roles ?? []).map((role) => role.code)
+  openOverlay(isEdit ? `编辑账号 ${existing.username}` : '新建后台账号', `
+    <div class="grid-2">
+      <label>登录账号<input id="af-username" value="${esc(existing?.username ?? '')}" ${isEdit ? 'disabled' : ''} placeholder="如 ops02" /></label>
+      <label>显示名<input id="af-name" value="${esc(existing?.display_name ?? '')}" placeholder="如 内容运营-小李" /></label>
+    </div>
+    ${isEdit ? '' : `<label style="display:block;margin-top:10px">初始口令<input id="af-pass" type="text" placeholder="至少 8 位，含字母与数字" /></label>
+      <p class="muted small">创建后口令只在此处显示一次；账号首次登录会被要求改密。</p>`}
+    <div style="margin-top:12px"><div class="muted small" style="margin-bottom:6px">角色（至少一个）</div>${roleChecks(roles, checked)}</div>
+  `, (body) => {
+    body.querySelector('#af-save')?.remove()
+    const foot = document.createElement('div')
+    foot.className = 'modal-foot'
+    foot.innerHTML = `<button class="btn" data-cancel>取消</button><button class="btn primary" id="af-save">${isEdit ? '保存' : '创建账号'}</button>`
+    body.appendChild(foot)
+    foot.querySelector('[data-cancel]').addEventListener('click', () => body.closest('.modal-mask').remove())
+    foot.querySelector('#af-save').addEventListener('click', async () => {
+      const payload = {
+        displayName: body.querySelector('#af-name').value.trim(),
+        roles: [...body.querySelectorAll('input[name="roles"]:checked')].map((input) => input.value),
+      }
+      if (!payload.roles.length) return toast('请至少选择一个角色')
+      if (!isEdit) {
+        payload.username = body.querySelector('#af-username').value.trim()
+        payload.password = body.querySelector('#af-pass').value
+      }
+      try {
+        if (isEdit) await api(`/admin/api/admins/${existing.id}`, { method: 'PUT', body: payload })
+        else await api('/admin/api/admins', { method: 'POST', body: payload })
+        body.closest('.modal-mask').remove()
+        toast(isEdit ? '已保存' : '账号已创建')
+        await pageAdmins()
+      } catch (error) { toast(error.message) }
+    })
+  })
+}
+
+function openRoleAssign(roles, admin) {
+  const checked = (admin.roles ?? []).map((role) => role.code)
+  openOverlay(`分配角色 · ${admin.username}`, `
+    <p class="muted small">勾选后立即生效；该账号刷新页面即可看到新菜单。</p>
+    ${roleChecks(roles, checked)}
+  `, (body) => {
+    const foot = document.createElement('div')
+    foot.className = 'modal-foot'
+    foot.innerHTML = '<button class="btn" data-cancel>取消</button><button class="btn primary" id="role-save">保存角色</button>'
+    body.appendChild(foot)
+    foot.querySelector('[data-cancel]').addEventListener('click', () => body.closest('.modal-mask').remove())
+    foot.querySelector('#role-save').addEventListener('click', async () => {
+      const codes = [...body.querySelectorAll('input[name="roles"]:checked')].map((input) => input.value)
+      if (!codes.length) return toast('至少保留一个角色')
+      try {
+        await api(`/admin/api/admins/${admin.id}`, { method: 'PUT', body: { roles: codes } })
+        body.closest('.modal-mask').remove()
+        toast('角色已更新')
+        await pageAdmins()
+      } catch (error) { toast(error.message) }
+    })
+  })
+}
+
+function openPasswordReset(admin) {
+  openOverlay(`重置口令 · ${admin.username}`, `
+    <label style="display:block">新口令<input id="pr-pass" type="text" placeholder="至少 8 位，含字母与数字" /></label>
+    <label class="check-item" style="margin-top:10px"><input type="checkbox" id="pr-must" checked /><span>要求下次登录修改</span></label>
+    <p class="muted small">保存后该账号已登录的会话全部失效。</p>
+  `, (body) => {
+    const foot = document.createElement('div')
+    foot.className = 'modal-foot'
+    foot.innerHTML = '<button class="btn" data-cancel>取消</button><button class="btn primary" id="pr-save">重置</button>'
+    body.appendChild(foot)
+    foot.querySelector('[data-cancel]').addEventListener('click', () => body.closest('.modal-mask').remove())
+    foot.querySelector('#pr-save').addEventListener('click', async () => {
+      try {
+        const result = await api(`/admin/api/admins/${admin.id}/password`, {
+          method: 'POST',
+          body: { password: body.querySelector('#pr-pass').value, mustChange: body.querySelector('#pr-must').checked },
+        })
+        body.closest('.modal-mask').remove()
+        toast(`口令已重置${result.revokedSessions ? `，吊销 ${result.revokedSessions} 个会话` : ''}`)
+        await pageAdmins()
+      } catch (error) { toast(error.message) }
+    })
+  })
+}
+
+/* ---------------- 后台菜单（与角色权限独立） ---------------- */
+async function pageMenus() {
+  const data = await api('/admin/api/admin-menus')
+  const groups = data.groups ?? []
+  const permOptions = (data.permissions ?? []).filter((item) => item.type === 'menu' || item.type === 'button')
+  view.innerHTML = `
+    <div class="panel">
+      <div class="panel-head">
+        <h3>后台菜单 <span class="muted">${groups.length} 个分组 · ${groups.reduce((n, g) => n + g.items.length, 0)} 个菜单</span></h3>
+        <div class="row-actions">
+          <button class="btn" id="menu-reset">恢复出厂菜单</button>
+          <button class="btn primary" id="menu-new">＋ 新增菜单</button>
+        </div>
+      </div>
+      <p class="muted">菜单决定「后台侧栏长什么样」，权限决定「谁能进」。这里改名称、顺序、图标、隐藏都不影响角色授权；把「所需权限」留空表示只要登录后台就能看到。</p>
+      ${groups.map((group) => `
+        <div class="menu-block">
+          <div class="menu-block-head"><strong>${esc(group.label)}</strong><span class="muted small">${esc(group.key)} · 分组排序 ${group.sort}</span></div>
+          <table>
+            <thead><tr><th>名称</th><th>路由</th><th>所需权限</th><th>排序</th><th>状态</th><th style="width:170px">操作</th></tr></thead>
+            <tbody>
+              ${group.items.map((item) => `<tr>
+                <td>${item.icon ? `<span class="nav-icon">${esc(item.icon)}</span>` : ''}${esc(item.label)}${item.isSystem ? ' <span class="pill">内置</span>' : ''}</td>
+                <td><code>${esc(item.route)}</code></td>
+                <td>${item.permCode ? `<code>${esc(item.permCode)}</code>` : '<span class="muted">登录即可见</span>'}</td>
+                <td>${item.sort}</td>
+                <td>${item.visible ? '<span class="pill ok">显示</span>' : '<span class="pill warn">已隐藏</span>'}</td>
+                <td class="row-actions">
+                  <button class="btn sm" data-menu-edit="${item.id}">编辑</button>
+                  <button class="btn sm" data-menu-visible="${item.id}" data-visible="${item.visible ? 1 : 0}">${item.visible ? '隐藏' : '显示'}</button>
+                  <button class="btn sm danger" data-menu-del="${item.id}" ${item.isSystem ? 'disabled title="内置菜单不能删除，可隐藏"' : ''}>删除</button>
+                </td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`).join('')}
+    </div>`
+
+  const flat = groups.flatMap((group) => group.items.map((item) => ({ ...item, groupKey: group.key, groupLabel: group.label, groupSort: group.sort })))
+  const findItem = (id) => flat.find((item) => item.id === Number(id))
+  const openForm = (item) => openMenuForm({ groups, permOptions, item })
+  $('#menu-new').addEventListener('click', () => openForm(null))
+  view.querySelectorAll('[data-menu-edit]').forEach((button) => button.addEventListener('click', () => openForm(findItem(button.dataset.menuEdit))))
+  view.querySelectorAll('[data-menu-visible]').forEach((button) => button.addEventListener('click', async () => {
+    const item = findItem(button.dataset.menuVisible)
+    try {
+      await api(`/admin/api/admin-menus/${item.id}`, {
+        method: 'PUT',
+        body: { groupKey: item.groupKey, groupLabel: item.groupLabel, groupSort: item.groupSort, label: item.label, route: item.route, icon: item.icon, permCode: item.permCode, sort: item.sort, visible: !item.visible },
+      })
+      toast(item.visible ? '已隐藏（刷新后侧栏不再显示）' : '已显示')
+      await refreshSession()
+      await pageMenus()
+    } catch (error) { toast(error.message) }
+  }))
+  view.querySelectorAll('[data-menu-del]').forEach((button) => button.addEventListener('click', async () => {
+    const item = findItem(button.dataset.menuDel)
+    if (!window.confirm(`删除菜单「${item.label}」？\n\n只删侧栏入口，不影响权限与页面本身。`)) return
+    try {
+      await api(`/admin/api/admin-menus/${item.id}`, { method: 'DELETE' })
+      toast('已删除')
+      await refreshSession()
+      await pageMenus()
+    } catch (error) { toast(error.message) }
+  }))
+  $('#menu-reset').addEventListener('click', async () => {
+    if (!window.confirm('恢复出厂菜单？自行新增/修改的菜单都会被清除。')) return
+    try {
+      await api('/admin/api/admin-menus/reset', { method: 'POST', body: {} })
+      toast('已恢复出厂菜单')
+      await refreshSession()
+      await pageMenus()
+    } catch (error) { toast(error.message) }
+  })
+}
+
+function openMenuForm({ groups, permOptions, item }) {
+  const groupKeys = [...new Set(groups.map((group) => group.key))]
+  openOverlay(item ? `编辑菜单 · ${item.label}` : '新增菜单', `
+    <div class="grid-2">
+      <label>菜单名称<input id="mf-label" value="${esc(item?.label ?? '')}" placeholder="如 内容审核" /></label>
+      <label>路由<input id="mf-route" value="${esc(item?.route ?? '/')}" placeholder="/review" /></label>
+      <label>所属分组（键）<input id="mf-group-key" value="${esc(item?.groupKey ?? '')}" list="mf-groups" placeholder="system" /></label>
+      <label>分组名称<input id="mf-group-label" value="${esc(item?.groupLabel ?? '')}" placeholder="系统设置" /></label>
+      <label>分组排序<input id="mf-group-sort" type="number" value="${item?.groupSort ?? 90}" /></label>
+      <label>菜单内排序<input id="mf-sort" type="number" value="${item?.sort ?? 10}" /></label>
+      <label>图标（emoji，可空）<input id="mf-icon" value="${esc(item?.icon ?? '')}" placeholder="🗂️" /></label>
+      <label>所需权限<select id="mf-perm">
+        <option value="">登录即可见</option>
+        ${permOptions.map((perm) => `<option value="${esc(perm.code)}" ${item?.permCode === perm.code ? 'selected' : ''}>${esc(perm.code)} · ${esc(perm.name)}</option>`).join('')}
+      </select></label>
+    </div>
+    <datalist id="mf-groups">${groupKeys.map((key) => `<option value="${esc(key)}"></option>`).join('')}</datalist>
+    <label class="check-item" style="margin-top:10px"><input type="checkbox" id="mf-visible" ${item?.visible === false ? '' : 'checked'} /><span>在侧栏显示</span></label>
+  `, (body) => {
+    const foot = document.createElement('div')
+    foot.className = 'modal-foot'
+    foot.innerHTML = '<button class="btn" data-cancel>取消</button><button class="btn primary" id="mf-save">保存</button>'
+    body.appendChild(foot)
+    foot.querySelector('[data-cancel]').addEventListener('click', () => body.closest('.modal-mask').remove())
+    foot.querySelector('#mf-save').addEventListener('click', async () => {
+      const payload = {
+        label: body.querySelector('#mf-label').value.trim(),
+        route: body.querySelector('#mf-route').value.trim(),
+        groupKey: body.querySelector('#mf-group-key').value.trim(),
+        groupLabel: body.querySelector('#mf-group-label').value.trim(),
+        groupSort: Number(body.querySelector('#mf-group-sort').value) || 0,
+        sort: Number(body.querySelector('#mf-sort').value) || 0,
+        icon: body.querySelector('#mf-icon').value.trim(),
+        permCode: body.querySelector('#mf-perm').value,
+        visible: body.querySelector('#mf-visible').checked,
+      }
+      try {
+        if (item) await api(`/admin/api/admin-menus/${item.id}`, { method: 'PUT', body: payload })
+        else await api('/admin/api/admin-menus', { method: 'POST', body: payload })
+        body.closest('.modal-mask').remove()
+        toast('已保存')
+        await refreshSession()
+        await pageMenus()
+      } catch (error) { toast(error.message) }
+    })
+  })
 }
 /* 启动 */
 if (state.token) await boot()

@@ -1,9 +1,13 @@
 /** 后台接口：RBAC 保护 + 审计 + 内容/付费策略/套餐/优惠券/订单/退款/对账/权限。 */
 import { randomBytes } from 'node:crypto'
-import { db, genCode, getSetting, setSetting } from './db.mjs'
+import { db, DEFAULT_ADMIN_MENUS, genCode, getSetting, setSetting } from './db.mjs'
 import { authOf, checkPasswordStrength, hashPassword, issueToken, loginAdmin, revokeSessions, verifyPassword } from './auth.mjs'
 import { send } from './api-public.mjs'
-import { hasPermission, listAdmins, listAudit, listPermissionCatalog, listRoles, loadPrincipal, menuTree, roleMenuBinding, setAdminRoles, updateRoleMenus } from './rbac.mjs'
+import {
+  createAdmin, deleteAdminById, deleteAdminMenu, hasPermission, listAdminMenus, listAdmins, listAudit,
+  listPermissionCatalog, listRoles, loadPrincipal, menuTree, resetAdminMenus, roleMenuBinding, saveAdminMenu,
+  setAdminPassword, setAdminRoles, updateAdminBasic, updateRoleMenus,
+} from './rbac.mjs'
 import { audit } from './rbac.mjs'
 import {
   commerceStats, createRefund, approveRefund, rejectRefund, reconcile, listOrders, closeExpiredOrders, markPaid,
@@ -19,6 +23,7 @@ import { analyticsReport } from './analytics.mjs'
 import { createTag, deleteTag, listTags, setDramaTags, setTagStatus, tagTree, tagsOfDrama, updateTag } from './tags.mjs'
 import { refreshAutoRanks, refreshRank, RANK_STRATEGIES } from './rank.mjs'
 import { completenessOf, scrapeTitle } from './scrape.mjs'
+import { autofillBanners, refreshArtwork } from './artwork.mjs'
 import { clearLoginFailures, clientIpOf, guardStats, loginLockSeconds, noteLoginFailure } from './ratelimit.mjs'
 import { issueAssistCode } from './otp.mjs'
 import { usdtWatchStatus } from './usdt-watch.mjs'
@@ -144,6 +149,8 @@ const PERM = {
   cs: 'cs.toolkit',
   roles: 'admin.read',
   rolesWrite: 'admin.write',
+  menus: 'system.menu',
+  menusWrite: 'system.menu.write',
   payChannelRead: 'payment.channel.read',
   payChannelWrite: 'payment.channel.write',
   emailRead: 'email.read',
@@ -214,7 +221,17 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     return send(res, { required: 'password_change' }, '0403', '请先修改初始密码', 403)
   }
 
-  const deny = (perm) => {
+  /**
+ * 把带 status 的业务异常转成响应信封（rbac.mjs 抛的 400/404/409 都走这里，
+ * 否则统一落到外层 catch 变成 0500，前端分不清「参数错」和「服务炸了」）。
+ */
+const fail = (res, error, fallback = '操作失败') => {
+  const status = Number(error?.status) || 500
+  const code = status === 400 ? '0400' : status === 401 ? '0401' : status === 403 ? '0403' : status === 404 ? '0404' : status === 409 ? '0409' : '0500'
+  return send(res, {}, code, error?.message ?? fallback, status)
+}
+
+const deny = (perm) => {
     audit({ actorId: principal.admin.id, actorName: principal.admin.username, action: 'rbac.denied', targetType: 'permission', targetId: perm, ip: ipOf(req), result: 'denied' })
     return send(res, { required: perm }, '0403', '无权限执行该操作', 403)
   }
@@ -226,11 +243,20 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
 
   /* ---------- 会话/概览 ---------- */
   if (pathname === '/admin/api/me') {
+    // 侧边栏由 admin_menus 表驱动：只下发当前账号可见（visible=1）且有权访问的菜单，
+    // 前端不再写死菜单结构，运营在「菜单管理」里改名/排序/隐藏后刷新即生效。
+    const menus = listAdminMenus({ includeHidden: false })
+      .map((group) => ({
+        ...group,
+        items: group.items.filter((item) => !item.permCode || hasPermission(principal, item.permCode)),
+      }))
+      .filter((group) => group.items.length)
     return send(res, {
       admin: { id: principal.admin.id, username: principal.admin.username, displayName: principal.admin.display_name },
       roles: principal.roles.map((role) => ({ code: role.code, name: role.name })),
       permissions: [...principal.permissions],
       mustChangePassword: Boolean(principal.admin.must_change_password),
+      menus,
     })
   }
 
@@ -462,6 +488,29 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     } catch (error) {
       return send(res, {}, '0400', error.message ?? '搜刮失败', error.status ?? 400)
     }
+  }
+
+  /* ---------- 素材搜刮：封面 / 横幅 / 首页大图 ---------- */
+  if (seg[0] === 'artwork' && seg[1] === 'refresh' && method === 'POST') {
+    if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
+    try {
+      const ids = Array.isArray(body?.ids) ? body.ids.map(Number).filter(Boolean) : []
+      const result = await refreshArtwork({ only: ids, limit: Math.min(200, Number(body?.limit) || 100) })
+      const banners = autofillBanners({ limit: Number(body?.bannerLimit) || 6 })
+      log('content.artwork.refresh', 'drama', ids.length === 1 ? ids[0] : null, null, {
+        updated: result.updated, failed: result.failed, banners: banners.created,
+      })
+      return send(res, { ...result, banners })
+    } catch (error) {
+      return send(res, {}, '0400', error.message ?? '搜刮素材失败', error.status ?? 400)
+    }
+  }
+
+  if (seg[0] === 'banners' && seg[1] === 'autofill' && method === 'POST') {
+    if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
+    const result = autofillBanners({ limit: Math.min(10, Number(body?.limit) || 6) })
+    log('content.banner.autofill', 'banner', null, null, result)
+    return send(res, result)
   }
 
   /* ---------- 下拉选项 ---------- */
@@ -876,6 +925,132 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
       })),
       users: one('SELECT COUNT(*) AS n FROM users').n,
     })
+  }
+
+  /* ---------- 后台账号：新增 / 编辑 / 停用 / 重置口令 / 删除 ---------- */
+  if (pathname === '/admin/api/admins' && method === 'POST') {
+    if (!guard(PERM.adminAccounts)) return deny(PERM.adminAccounts)
+    const username = String(body.username ?? '').trim()
+    const password = String(body.password ?? '')
+    const check = checkAdminPassword(password, username)
+    if (!check.ok) return send(res, {}, '0400', check.message, 400)
+    const roleCodes = (Array.isArray(body.roles) ? body.roles : []).map(String)
+    if (!roleCodes.length) return send(res, {}, '0400', '请至少分配一个角色', 400)
+    const salt = randomBytes(8).toString('hex')
+    let admin
+    try {
+      admin = createAdmin({
+        username,
+        displayName: body.displayName,
+        passwordHash: hashPassword(password, salt),
+        salt,
+        roleCodes: roleCodes.filter((code) => one('SELECT id FROM roles WHERE code = ?', code)),
+        mustChange: body.mustChange === false ? 0 : 1,
+      })
+    } catch (error) {
+      return fail(res, error, '新建后台账号失败')
+    }
+    log('admin.create', 'admin', admin.id, null, { username: admin.username, roles: roleCodes })
+    return send(res, admin)
+  }
+
+  if (seg[0] === 'admins' && seg[1] && seg.length === 2 && method === 'PUT') {
+    if (!guard(PERM.adminAccounts)) return deny(PERM.adminAccounts)
+    const before = listAdmins().find((item) => item.id === Number(seg[1]))
+    if (!before) return send(res, {}, '0404', '管理员不存在', 404)
+    let updated
+    try {
+      updated = updateAdminBasic(Number(seg[1]), {
+        displayName: body.displayName,
+        status: body.status,
+        roleCodes: Array.isArray(body.roles) ? body.roles.filter((code) => one('SELECT id FROM roles WHERE code = ?', code)) : undefined,
+      })
+    } catch (error) {
+      return fail(res, error, '保存失败')
+    }
+    if (body.status === 'disabled') await revokeSessions(Number(seg[1]), 'admin')
+    log('admin.update', 'admin', seg[1], before, { displayName: updated.display_name, status: updated.status, roles: (updated.roles ?? []).map((r) => r.code) })
+    return send(res, updated)
+  }
+
+  if (seg[0] === 'admins' && seg[1] && seg[2] === 'password' && method === 'POST') {
+    if (!guard(PERM.adminAccounts)) return deny(PERM.adminAccounts)
+    const target = one('SELECT * FROM admins WHERE id = ?', Number(seg[1]))
+    if (!target) return send(res, {}, '0404', '管理员不存在', 404)
+    const password = String(body.password ?? '')
+    const check = checkAdminPassword(password, target.username)
+    if (!check.ok) return send(res, {}, '0400', check.message, 400)
+    const salt = randomBytes(8).toString('hex')
+    setAdminPassword(Number(seg[1]), hashPassword(password, salt), salt, { mustChange: body.mustChange === false ? 0 : 1 })
+    const revoked = await revokeSessions(Number(seg[1]), 'admin')
+    log('admin.password.reset', 'admin', seg[1], null, { revokedSessions: revoked })
+    return send(res, { ok: true, revokedSessions: revoked })
+  }
+
+  if (seg[0] === 'admins' && seg[1] && seg.length === 2 && method === 'DELETE') {
+    if (!guard(PERM.adminAccounts)) return deny(PERM.adminAccounts)
+    if (Number(seg[1]) === principal.admin.id) return send(res, {}, '0400', '不能删除当前登录的账号', 400)
+    let result
+    try {
+      result = deleteAdminById(Number(seg[1]))
+    } catch (error) {
+      return fail(res, error, '删除失败')
+    }
+    log('admin.delete', 'admin', seg[1], { username: result.username }, null, body.reason)
+    return send(res, result)
+  }
+
+  /* ---------- 后台菜单（与角色权限独立） ---------- */
+  if (pathname === '/admin/api/admin-menus' && method === 'GET') {
+    if (!guard(PERM.menus)) return deny(PERM.menus)
+    const perms = listPermissionCatalog().filter((item) => item.type !== 'dir')
+    return send(res, {
+      groups: listAdminMenus(),
+      permissions: perms.map((item) => ({ code: item.code, name: item.name, type: item.type, path: item.path })),
+    })
+  }
+
+  if (pathname === '/admin/api/admin-menus' && method === 'POST') {
+    if (!guard(PERM.menusWrite)) return deny(PERM.menusWrite)
+    let result
+    try {
+      result = saveAdminMenu(body)
+    } catch (error) {
+      return fail(res, error, '保存菜单失败')
+    }
+    log('menu.create', 'admin_menu', result.id, null, body)
+    return send(res, result)
+  }
+
+  if (seg[0] === 'admin-menus' && seg[1] === 'reset' && method === 'POST') {
+    if (!guard(PERM.menusWrite)) return deny(PERM.menusWrite)
+    const groups = resetAdminMenus(DEFAULT_ADMIN_MENUS)
+    log('menu.reset', 'admin_menu', null, null, { groups: groups.length })
+    return send(res, { groups })
+  }
+
+  if (seg[0] === 'admin-menus' && seg[1] && method === 'PUT') {
+    if (!guard(PERM.menusWrite)) return deny(PERM.menusWrite)
+    let result
+    try {
+      result = saveAdminMenu(body, Number(seg[1]))
+    } catch (error) {
+      return fail(res, error, '保存菜单失败')
+    }
+    log('menu.update', 'admin_menu', seg[1], result.before ?? null, body)
+    return send(res, result)
+  }
+
+  if (seg[0] === 'admin-menus' && seg[1] && method === 'DELETE') {
+    if (!guard(PERM.menusWrite)) return deny(PERM.menusWrite)
+    let result
+    try {
+      result = deleteAdminMenu(Number(seg[1]))
+    } catch (error) {
+      return fail(res, error, '删除菜单失败')
+    }
+    log('menu.delete', 'admin_menu', seg[1], null, null, body.reason)
+    return send(res, result)
   }
   if (seg[0] === 'admins' && seg[1] && seg[2] === 'roles' && method === 'PUT') {
     if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)

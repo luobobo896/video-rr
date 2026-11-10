@@ -85,10 +85,16 @@ function localArtwork(entry) {
   if (!slug) return {}
   const cover = join(ROOT, 'storage/images', `cover-${slug}.jpg`)
   const banner = join(ROOT, 'storage/images', `banner-${slug}.jpg`)
-  return {
+  const result = {
     ...(existsSync(cover) ? { coverUrl: `/media/images/cover-${slug}.jpg` } : {}),
     ...(existsSync(banner) ? { bannerUrl: `/media/images/banner-${slug}.jpg` } : {}),
   }
+  // 本地还没抽图时，先用片源方的缩略图让向导能看到海报；后台「一键搜刮」会把它本地化
+  if (!result.coverUrl) {
+    const match = /archive\.org\/(?:download|details|embed)\/([^/?#]+)/i.exec(String(entry?.source?.url ?? ''))
+    if (match) result.coverUrl = `https://archive.org/services/img/${match[1]}`
+  }
+  return result
 }
 
 function fromCatalog(title) {
@@ -112,9 +118,74 @@ function fromCache(title) {
   }
 }
 
+/**
+ * 真实外部搜刮：archive.org 公开检索（无需密钥）。
+ * 用户填电影名 → 拿到海报（services/img）、年份、简介、题材标签，
+ * 片源地址也一并带出，后台「一键导入」可以直接建剧。
+ */
+async function fromArchive(title) {
+  if (process.env.MH_SCRAPE_ARCHIVE === '0') return null
+  const query = `title:(${String(title).replace(/[":()\[\]]/g, ' ')}) AND mediatype:(movies)`
+  const url = new URL('https://archive.org/advancedsearch.php')
+  url.searchParams.set('q', query)
+  for (const field of ['identifier', 'title', 'year', 'description', 'subject', 'licenseurl', 'downloads', 'collection']) url.searchParams.append('fl[]', field)
+  url.searchParams.set('rows', '5')
+  url.searchParams.set('page', '1')
+  url.searchParams.set('output', 'json')
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(9000), headers: { 'user-agent': 'MH-Clone/1.0 (+content import)' } })
+    if (!response.ok) return null
+    const data = await response.json()
+    const docs = (data?.response?.docs ?? []).filter((doc) => String(doc.identifier ?? '').trim())
+    if (!docs.length) return null
+    // 同一标题在 archive.org 常有用户搬运版（B 站切片、合集、低画质转录）。
+    // 按「标题贴合度 + 是否正片馆藏 + 授权声明 + 标题长度」打分，取最像正片的一条。
+    const key = normalize(title)
+    const scoreOf = (doc) => {
+      const docTitle = String(doc.title ?? '')
+      const docKey = normalize(docTitle)
+      const collections = String(doc.collection ?? '').toLowerCase()
+      let score = 0
+      if (docKey === key) score += 6
+      else if (docKey.startsWith(key)) score += 4
+      else if (docKey.includes(key)) score += 2
+      if (/feature_films|moviesandfilms|classic_tv|film_noir/.test(collections)) score += 3
+      if (doc.licenseurl) score += 2
+      if (docTitle.length > 60) score -= 3
+      if (/bilibili|BV[0-9A-Za-z]{8,}|合集|切片|搬运|reaction/i.test(docTitle)) score -= 8
+      if (/bilibili/.test(collections)) score -= 8
+      return score
+    }
+    const hit = docs.slice().sort((a, b) => scoreOf(b) - scoreOf(a))[0]
+    // 宁缺勿滥：标题不以检索词开头、也不在正片馆藏里的结果（多是被改名的搬运切片）
+    // 一律视为没搜到，让向导退回草稿，避免建出「【励志】阿甘正传… P1」这种条目。
+    const hitKey = normalize(String(hit.title ?? ''))
+    const hitCollections = String(hit.collection ?? '').toLowerCase()
+    const eligible = hitKey === key || hitKey.startsWith(key) || /feature_films|moviesandfilms/.test(hitCollections)
+    if (scoreOf(hit) < 2 || !eligible) return null
+    const identifier = String(hit.identifier)
+    const subject = Array.isArray(hit.subject) ? hit.subject : String(hit.subject ?? '').split(/[;,]/)
+    const payload = toPayload({
+      title: String(hit.title ?? title).replace(/\s*:\s*$/, '').slice(0, 80),
+      description: String(Array.isArray(hit.description) ? hit.description[0] : hit.description ?? '').replace(/<[^>]+>/g, ' ').slice(0, 400),
+      year: Number(String(hit.year ?? '').slice(0, 4)) || null,
+      area: '',
+      category: guessCategory(String(hit.title ?? title)),
+      score: null,
+      coverUrl: `https://archive.org/services/img/${identifier}`,
+      tags: subject.map((item) => String(item).trim()).filter(Boolean).slice(0, 8),
+    }, 'archive')
+    payload.remote = { identifier, sourceUrl: `https://archive.org/download/${identifier}/`, licenseUrl: hit.licenseurl ?? null }
+    cachePut(title, payload)
+    return payload
+  } catch {
+    return null
+  }
+}
+
 async function fromRemote(title) {
   const base = process.env.MH_SCRAPE_URL
-  if (!base) return null
+  if (!base) return fromArchive(title)
   try {
     const url = new URL(base)
     url.searchParams.set('title', title)

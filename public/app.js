@@ -609,10 +609,20 @@ function navIsActive(href, hash) {
   const [hrefPath, hrefQuery] = String(href ?? '').split('?')
   if (!hrefPath) return false
   if (normalizePath(hrefPath) !== normalizePath(hash)) return false
-  const wanted = new URLSearchParams(hrefQuery ?? '').get('type')
-  if (!wanted) return true
-  const current = new URLSearchParams(String(hash ?? '').split('?')[1] ?? '').get('type')
-  return (current ?? 'HOT') === wanted
+  // 同一路径下靠 query 区分入口（#/category/TV 与 #/category/TV?region=KR 是不同频道），
+  // 只比 type 会让「电视剧/美剧/韩剧/日剧/英剧」同时高亮。
+  const hrefParams = new URLSearchParams(hrefQuery ?? '')
+  const currentParams = new URLSearchParams(String(hash ?? '').split('?')[1] ?? '')
+  if ([...hrefParams.keys()].length === 0) return [...currentParams.keys()].length === 0
+  for (const [key, value] of hrefParams) {
+    const current = currentParams.get(key)
+    if (key === 'type') {
+      if ((current ?? 'HOT') !== value) return false
+      continue
+    }
+    if ((current ?? '') !== value) return false
+  }
+  return true
 }
 
 function renderChrome() {
@@ -686,29 +696,9 @@ function openModal(title, body) {
 }
 
 function vipFloat() {
-  if (state.vipDismissed || document.querySelector('.vip-float')) return
-  // 会员浮层只在「有片可看」的页面出现：首页与详情页。分类/榜单/搜索/播放页不挂，
-  // 否则在长列表和播放器上挡住内容（参考站也没有全站挂浮层）。
-  if (!/^#\/(home|drama\/)/.test(location.hash || '#/home')) return
-  const price = Number(state.constants.vipPrice)
-  if (!Number.isFinite(price) || price <= 0) return
-  const node = document.createElement('div')
-  node.className = 'vip-float'
-  node.innerHTML = `
-    <button class="vip-close" aria-label="关闭">×</button>
-    <h4>开通会员 全场畅看</h4>
-    <p>会员期内可看全站剧集</p>
-    <div><span class="vip-price">${price.toFixed(2)}</span><small> ${state.constants.vipUnit ?? '元/月'}</small></div>
-    <button class="vip-cta">查看套餐</button>`
-  node.querySelector('.vip-close').addEventListener('click', () => { state.vipDismissed = true; node.remove() })
-  node.querySelector('.vip-cta').addEventListener('click', async () => {
-    node.remove()
-    try {
-      const { plans } = await api('/api/plans')
-      openPaywall({ dramaId: 0, priceInfo: { plans } }, { title: '开通 / 续费会员' })
-    } catch (error) { toast(error.message) }
-  })
-  document.body.appendChild(node)
+  // 首页不挂会员浮层：运营要求「首页只展示内容，不出现价格与会员标识」，
+  // 顶栏已有「会员」入口、个人中心有权益卡，浮层在首屏右侧会挡住海报。
+  return
 }
 
 /* ---------------- 页面 ---------------- */

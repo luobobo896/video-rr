@@ -190,3 +190,16 @@ table input:focus, table select:focus { outline: none; border-color: #ff4d6d; }
 .tag-state-on { color: var(--ok, #3ecf8e); }
 .tag-state-off { color: var(--fg-muted, #8b93a7); }
 .switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+
+/* ---------- 后台账号 / 菜单管理 ---------- */
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.panel-head h3 { margin: 0; }
+.muted.small, .small { font-size: 12px; }
+.check-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.check-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; font-size: 13px; }
+.check-item input { width: auto; margin-top: 2px; }
+.check-item small { display: block; font-size: 11px; margin-top: 2px; }
+.menu-block { margin-top: 14px; }
+.menu-block-head { display: flex; align-items: baseline; gap: 10px; padding: 8px 2px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.nav-icon { margin-right: 6px; }
+.modal-body .modal-foot { margin-top: 4px; }

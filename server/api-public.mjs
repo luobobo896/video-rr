@@ -73,11 +73,16 @@ export const CATEGORY_YEARS = [
   { value: '1980s', label: '80年代', from: 1980, to: 1989 },
 ]
 
-export function send(res, data, code = '0000', msg = 'Success', status = 200) {
+export function send(res, data, code = '0000', msg = 'Success', status = 200, cacheControl = 'no-store') {
   const body = JSON.stringify({ requestId: `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`, code, msg, data })
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': cacheControl })
   res.end(body)
 }
+
+/** 公开聚合接口允许浏览器短缓存：返回箭头时不用再等一个来回，10 秒内的内容变化对观众无感。
+ *  private：这些响应里带登录态字段（owned/access），不能被共享缓存复用。 */
+const PUBLIC_CACHE = 'private, max-age=10, stale-while-revalidate=30'
+const sendPublic = (res, data) => send(res, data, '0000', 'Success', 200, PUBLIC_CACHE)
 
 const fail = (res, code, msg, status = 400, extra = {}) => send(res, extra, code, msg, status)
 
@@ -200,7 +205,7 @@ export async function handlePublic(pathname, url, req, res) {
       // 会员价优先取在售套餐里的最低月价，避免运营忘配 settings.site 时收银台显示「元/月」
       const plan = all("SELECT price_cny, duration_days FROM plans WHERE status = 'active' ORDER BY price_cny ASC LIMIT 1")[0]
       const planMonthly = plan ? (Number(plan.price_cny) / Math.max(1, Number(plan.duration_days) / 30)).toFixed(2) : ''
-      return send(res, {
+      return sendPublic(res, {
         site: { name: '影巢' },
         supportEmail: process.env.MH_SUPPORT_EMAIL || site.supportEmail || '',
         vipPrice: site.vipPrice ?? (plan ? Number(plan.price_cny).toFixed(2) : ''),
@@ -245,7 +250,7 @@ export async function handlePublic(pathname, url, req, res) {
           .map((drama) => cardOf(drama, userId, context)),
       }))
       const hot = all("SELECT title FROM dramas ORDER BY score DESC LIMIT 8").map((row) => row.title)
-      return send(res, { banners, sections, hotwords: hot })
+      return sendPublic(res, { banners, sections, hotwords: hot })
     }
 
     if (pathname === '/api/category') {
@@ -356,7 +361,7 @@ export async function handlePublic(pathname, url, req, res) {
         tags: all(`SELECT t.id, t.name, (SELECT COUNT(*) FROM drama_tags dt WHERE dt.tag_id = t.id) AS n FROM tags t WHERE t.status = 'active' ORDER BY n DESC, t.sort LIMIT 24`)
           .map((row) => ({ value: Number(row.id), label: row.name, count: Number(row.n) })),
       }
-      return send(res, {
+      return sendPublic(res, {
         page, pageSize, total,
         list: rows.map((drama) => cardOf(drama, userId, context)),
         facets,
@@ -368,11 +373,11 @@ export async function handlePublic(pathname, url, req, res) {
       const type = url.searchParams.get('type') ?? 'HOT'
       const lists = all('SELECT name, type FROM rank_lists ORDER BY sort').map((row) => ({ name: row.name, type: row.type }))
       const list = one('SELECT * FROM rank_lists WHERE type = ? ORDER BY sort LIMIT 1', type)
-      if (!list) return send(res, { type, listName: '', lists, items: [] })
+      if (!list) return sendPublic(res, { type, listName: '', lists, items: [] })
       const items = withPlayCounts(all(`SELECT d.*, ri.rank_no FROM rank_items ri JOIN dramas d ON d.id = ri.drama_id
         WHERE ri.list_id = ? ORDER BY ri.rank_no`, list.id))
         .map((drama) => ({ ...cardOf(drama, userId, context), rankNo: drama.rank_no }))
-      return send(res, { type, listName: list.name, lists, items })
+      return sendPublic(res, { type, listName: list.name, lists, items })
     }
 
     /* 「换一换」：按分区随机重排；无分区参数时全站随机 */
@@ -382,11 +387,11 @@ export async function handlePublic(pathname, url, req, res) {
         const items = withPlayCounts(all(`SELECT d.* FROM section_items si JOIN dramas d ON d.id = si.drama_id
           WHERE si.section_id = ? AND d.status = 'published' ORDER BY RANDOM() LIMIT 12`, sectionId))
           .map((drama) => cardOf(drama, userId, context))
-        if (items.length > 1) return send(res, { sectionId, items })
+        if (items.length > 1) return sendPublic(res, { sectionId, items })
       }
       const items = withPlayCounts(all("SELECT * FROM dramas WHERE status = 'published' ORDER BY RANDOM() LIMIT 12"))
         .map((drama) => cardOf(drama, userId, context))
-      return send(res, { sectionId, items })
+      return sendPublic(res, { sectionId, items })
     }
 
     if (pathname === '/api/search') {
@@ -407,11 +412,11 @@ export async function handlePublic(pathname, url, req, res) {
       const clause = where.join(' AND ')
       const total = one(`SELECT COUNT(*) AS n FROM dramas WHERE ${clause}`, ...params).n
       const rows = all(`SELECT * FROM dramas WHERE ${clause} ORDER BY score DESC LIMIT 60`, ...params)
-      return send(res, { keyword, tagId, total, list: rows.map((drama) => cardOf(drama, userId, context)) })
+      return sendPublic(res, { keyword, tagId, total, list: rows.map((drama) => cardOf(drama, userId, context)) })
     }
 
     if (pathname === '/api/tags') {
-      return send(res, { list: listTags({ withCount: true }) })
+      return sendPublic(res, { list: listTags({ withCount: true }) })
     }
 
     /* ---------- 详情 / 权益 ---------- */
@@ -428,7 +433,7 @@ export async function handlePublic(pathname, url, req, res) {
       // 否则前端只能再打一次 /api/me，多一轮请求且首屏会闪。
       const favorite = userId ? one('SELECT 1 AS x FROM favorites WHERE user_id = ? AND drama_id = ?', userId, drama.id) : undefined
       const resume = userId ? one('SELECT episode_no, position, updated_at FROM history WHERE user_id = ? AND drama_id = ?', userId, drama.id) : undefined
-      return send(res, {
+      return sendPublic(res, {
         ...cardOf(drama, userId, context),
         description: drama.description,
         episodes: decided.map((episode) => ({

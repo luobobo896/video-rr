@@ -115,8 +115,9 @@ export function updateRolePermissions(roleId, codes) {
 }
 
 export function listAdmins() {
-  return all('SELECT id, username, display_name, status, created_at FROM admins ORDER BY id').map((admin) => ({
+  return all('SELECT id, username, display_name, status, must_change_password, password_updated_at, created_at FROM admins ORDER BY id').map((admin) => ({
     ...admin,
+    mustChangePassword: Boolean(admin.must_change_password),
     roles: all('SELECT r.code, r.name FROM admin_roles ar JOIN roles r ON r.id = ar.role_id WHERE ar.admin_id = ?', admin.id),
   }))
 }
@@ -133,4 +134,143 @@ export function setAdminRoles(adminId, roleCodes) {
     throw error
   }
   return listAdmins().find((admin) => admin.id === Number(adminId))
+}
+
+/* ---------------- 后台账号：增删改 + 口令重置 ---------------- */
+
+/** 某个角色当前还有几个在用（用于「不能删掉最后一个超管」这类保护）。 */
+export function activeAdminsOfRole(roleCode) {
+  return one(`SELECT COUNT(*) AS n FROM admin_roles ar JOIN roles r ON r.id = ar.role_id
+    JOIN admins a ON a.id = ar.admin_id WHERE r.code = ? AND a.status = 'active'`, roleCode).n
+}
+
+export function createAdmin({ username, displayName, passwordHash, salt, roleCodes = [], mustChange = 1 }) {
+  const name = String(username ?? '').trim()
+  if (!/^[A-Za-z0-9_.-]{3,32}$/.test(name)) throw Object.assign(new Error('账号需为 3–32 位字母、数字、下划线'), { status: 400 })
+  if (one('SELECT id FROM admins WHERE username = ?', name)) throw Object.assign(new Error('该账号已存在'), { status: 409 })
+  const info = db.prepare(`INSERT INTO admins (username, password_hash, salt, display_name, status, must_change_password, password_updated_at)
+    VALUES (?, ?, ?, ?, 'active', ?, datetime('now'))`).run(name, passwordHash, salt, displayName?.trim() || name, mustChange ? 1 : 0)
+  const adminId = Number(info.lastInsertRowid)
+  if (roleCodes.length) setAdminRoles(adminId, roleCodes)
+  return listAdmins().find((admin) => admin.id === adminId)
+}
+
+export function updateAdminBasic(adminId, { displayName, status, roleCodes }) {
+  const before = one('SELECT * FROM admins WHERE id = ?', Number(adminId))
+  if (!before) throw Object.assign(new Error('管理员不存在'), { status: 404 })
+  if (status && !['active', 'disabled'].includes(status)) throw Object.assign(new Error('状态只能是 active 或 disabled'), { status: 400 })
+  const nextRoles = Array.isArray(roleCodes) ? roleCodes : null
+  // 保护：不允许把唯一启用中的超级管理员停用或摘掉超管角色
+  const losesSuper = before.status === 'active'
+    && ((status === 'disabled' && activeAdminsOfRole('super_admin') <= 1 && isSuper(before.id))
+      || (nextRoles && !nextRoles.includes('super_admin') && activeAdminsOfRole('super_admin') <= 1 && isSuper(before.id)))
+  if (losesSuper) throw Object.assign(new Error('这是最后一个启用中的超级管理员，不能停用或摘掉超管角色'), { status: 400 })
+  db.prepare('UPDATE admins SET display_name = COALESCE(?, display_name), status = COALESCE(?, status) WHERE id = ?')
+    .run(displayName?.trim() ?? null, status ?? null, Number(adminId))
+  if (nextRoles) setAdminRoles(Number(adminId), nextRoles)
+  return listAdmins().find((admin) => admin.id === Number(adminId))
+}
+
+function isSuper(adminId) {
+  return Boolean(one(`SELECT 1 AS ok FROM admin_roles ar JOIN roles r ON r.id = ar.role_id
+    WHERE ar.admin_id = ? AND r.code = 'super_admin'`, Number(adminId)))
+}
+
+export function deleteAdminById(adminId) {
+  const admin = one('SELECT * FROM admins WHERE id = ?', Number(adminId))
+  if (!admin) throw Object.assign(new Error('管理员不存在'), { status: 404 })
+  if (isSuper(adminId) && activeAdminsOfRole('super_admin') <= 1) {
+    throw Object.assign(new Error('这是最后一个超级管理员，不能删除'), { status: 400 })
+  }
+  db.prepare('DELETE FROM admin_roles WHERE admin_id = ?').run(Number(adminId))
+  db.prepare('DELETE FROM admins WHERE id = ?').run(Number(adminId))
+  return { ok: true, id: Number(adminId), username: admin.username }
+}
+
+export function setAdminPassword(adminId, passwordHash, salt, { mustChange = 1 } = {}) {
+  const info = db.prepare(`UPDATE admins SET password_hash = ?, salt = ?, must_change_password = ?, password_updated_at = datetime('now')
+    WHERE id = ?`).run(passwordHash, salt, mustChange ? 1 : 0, Number(adminId))
+  if (!info.changes) throw Object.assign(new Error('管理员不存在'), { status: 404 })
+  return { ok: true, id: Number(adminId) }
+}
+
+/* ---------------- 后台菜单（与权限独立） ---------------- */
+
+export function listAdminMenus({ includeHidden = true } = {}) {
+  const rows = all(`SELECT * FROM admin_menus ${includeHidden ? '' : 'WHERE visible = 1'}
+    ORDER BY group_sort, group_key, sort, id`)
+  const groups = []
+  const index = new Map()
+  for (const row of rows) {
+    if (!index.has(row.group_key)) {
+      const group = { key: row.group_key, label: row.group_label, sort: row.group_sort, items: [] }
+      index.set(row.group_key, group)
+      groups.push(group)
+    }
+    index.get(row.group_key).items.push({
+      id: row.id,
+      label: row.label,
+      route: row.route,
+      icon: row.icon,
+      permCode: row.perm_code,
+      sort: row.sort,
+      visible: Boolean(row.visible),
+      isSystem: Boolean(row.is_system),
+      updatedAt: row.updated_at,
+    })
+  }
+  return groups
+}
+
+/** 新增或修改一条菜单（id 存在即更新）。路由以 / 开头，权限码可空表示「只要登录就能看」。 */
+export function saveAdminMenu(input, id) {
+  const label = String(input.label ?? '').trim()
+  const route = String(input.route ?? '').trim()
+  if (!label) throw Object.assign(new Error('菜单名称必填'), { status: 400 })
+  if (!/^\/[A-Za-z0-9/_-]*$/.test(route)) throw Object.assign(new Error('路由需以 / 开头，例如 /dramas'), { status: 400 })
+  const groupKey = String(input.groupKey ?? '').trim() || 'custom'
+  const groupLabel = String(input.groupLabel ?? '').trim() || '自定义'
+  const permCode = String(input.permCode ?? '').trim() || null
+  if (permCode && !one('SELECT code FROM permissions WHERE code = ?', permCode)) {
+    throw Object.assign(new Error(`权限码 ${permCode} 不存在，请先在「角色权限」里看到它`), { status: 400 })
+  }
+  const sort = Number(input.sort ?? 0) || 0
+  const groupSort = Number(input.groupSort ?? 0) || 0
+  const visible = input.visible === false || input.visible === 0 ? 0 : 1
+  if (id) {
+    const before = one('SELECT * FROM admin_menus WHERE id = ?', Number(id))
+    if (!before) throw Object.assign(new Error('菜单不存在'), { status: 404 })
+    db.prepare(`UPDATE admin_menus SET group_key = ?, group_label = ?, group_sort = ?, label = ?, route = ?,
+      icon = ?, perm_code = ?, sort = ?, visible = ?, updated_at = datetime('now') WHERE id = ?`)
+      .run(groupKey, groupLabel, groupSort, label, route, String(input.icon ?? '').trim() || null, permCode, sort, visible, Number(id))
+    return { id: Number(id), before }
+  }
+  if (one('SELECT id FROM admin_menus WHERE route = ? AND group_key = ?', route, groupKey)) {
+    throw Object.assign(new Error('同一分组下已有相同路由的菜单'), { status: 409 })
+  }
+  const info = db.prepare(`INSERT INTO admin_menus (group_key, group_label, group_sort, label, route, icon, perm_code, sort, visible, is_system, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))`)
+    .run(groupKey, groupLabel, groupSort, label, route, String(input.icon ?? '').trim() || null, permCode, sort, visible)
+  return { id: Number(info.lastInsertRowid) }
+}
+
+export function deleteAdminMenu(id) {
+  const row = one('SELECT * FROM admin_menus WHERE id = ?', Number(id))
+  if (!row) throw Object.assign(new Error('菜单不存在'), { status: 404 })
+  if (row.is_system) throw Object.assign(new Error('系统菜单不能删除，可以改成「隐藏」'), { status: 400 })
+  db.prepare('DELETE FROM admin_menus WHERE id = ?').run(Number(id))
+  return { ok: true, id: Number(id) }
+}
+
+/** 恢复出厂菜单（清空后按 DEFAULT_ADMIN_MENUS 重建）。 */
+export function resetAdminMenus(defaults) {
+  db.exec('DELETE FROM admin_menus')
+  const insert = db.prepare(`INSERT INTO admin_menus (group_key, group_label, group_sort, label, route, icon, perm_code, sort, visible, is_system)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`)
+  for (const [groupKey, groupLabel, groupSort, items] of defaults) {
+    items.forEach(([label, route, permCode, icon], index) => {
+      insert.run(groupKey, groupLabel, groupSort, label, route, icon ?? null, permCode, (index + 1) * 10)
+    })
+  }
+  return listAdminMenus()
 }
