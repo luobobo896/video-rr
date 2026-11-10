@@ -41,9 +41,27 @@ for sec in d.get('sections',[]):
         if x and x not in ids: ids.append(x)
 print(' '.join(str(i) for i in ids[:12]))")
 
-scan() { # 扫首页前若干剧集的前 3 集，找到能签发出 hls 的那一集
+# 库里有片源的集（只读查询，不依赖 Node 进程）：drama_id:no
+CANDS=$(python3 - <<'PY' 2>/dev/null
+import sqlite3
+try:
+    con = sqlite3.connect('/opt/video-rr/storage/app.db')
+    rows = con.execute("SELECT drama_id, no FROM episodes WHERE hls_path IS NOT NULL AND hls_path <> '' ORDER BY id LIMIT 8").fetchall()
+    print(' '.join(f'{a}:{b}' for a, b in rows))
+except Exception:
+    print('')
+PY
+)
+
+scan() { # 先用库里真有 hls_path 的集，再回退扫首页剧集
+  for PAIR in $CANDS; do
+    DID=${PAIR%%:*}; EP=${PAIR##*:}
+    PLAY=$("${CURL[@]}" "$BASE/video/api/play/$DID/$EP" -H "authorization: Bearer $U")
+    HLS=$(printf '%s' "$PLAY" | jget data.hls)
+    [ -n "$HLS" ] && return 0
+  done
   for DID in $HOMEDRAMAS; do
-    for EP in 1 2 3; do
+    for EP in 1 2 3 4 5 6 7 8; do
       PLAY=$("${CURL[@]}" "$BASE/video/api/play/$DID/$EP" -H "authorization: Bearer $U")
       HLS=$(printf '%s' "$PLAY" | jget data.hls)
       [ -n "$HLS" ] && return 0
