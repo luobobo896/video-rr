@@ -45,13 +45,13 @@ async function api(path, options = {}) {
   return json.data
 }
 
-async function login(phone) {
-  const data = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ phone }) })
+async function login(email, code) {
+  const data = await api('/api/auth/email/login', { method: 'POST', body: JSON.stringify({ email, code }) })
   state.token = data.token
   state.user = data.user
   localStorage.setItem('mh-token', data.token)
   localStorage.setItem('mh-user', JSON.stringify(data.user))
-  toast(`已登录：${data.user?.nickname ?? phone}`)
+  toast(data.created ? '注册成功，已自动登录' : '登录成功')
   renderChrome()
   await route()
 }
@@ -66,26 +66,82 @@ function logout() {
   route()
 }
 
+/** 邮箱验证码登录 / 注册（一体化）：发码 → 校验 → 存在即登录，不存在自动建号 */
 function openLogin() {
   const modal = $('#modal')
   modal.classList.remove('hidden')
+  let countdown = 0
+  let timer
+  let devCode = ''
+
   modal.innerHTML = `
-    <div class="modal-card">
-      <h3>登录 / 注册</h3>
-      <p>演示站用手机号直接登录（真实站走短信验证码 + token）。</p>
-      <input id="login-phone" placeholder="11 位手机号" style="width:100%;padding:10px 12px;margin-top:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-elev);color:var(--text)" />
+    <div class="modal-card" style="width:min(420px,94vw)">
+      <h3>邮箱登录 / 注册</h3>
+      <p style="color:#9aa3b2;font-size:13px;margin:4px 0 12px">输入邮箱获取 6 位验证码，未注册的邮箱会自动创建账号。</p>
+      <label class="field"><span>邮箱</span>
+        <input id="login-email" type="email" placeholder="you@example.com" autocomplete="email" />
+      </label>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <input id="login-code" placeholder="6 位验证码" maxlength="6" inputmode="numeric"
+          style="flex:1;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg-elev);color:var(--text)" />
+        <button class="btn-ghost" id="send-code">获取验证码</button>
+      </div>
+      <div id="login-hint" style="font-size:12px;color:#9aa3b2;min-height:18px;margin-top:8px"></div>
       <div style="display:flex;gap:8px;margin-top:14px">
-        <button class="btn-primary" id="login-submit">登录</button>
+        <button class="btn-primary" id="login-submit" style="flex:1">登录 / 注册</button>
         <button class="btn-ghost" id="login-cancel">取消</button>
       </div>
     </div>`
-  const close = () => modal.classList.add('hidden')
-  $('#login-cancel').addEventListener('click', close)
-  $('#login-submit').addEventListener('click', async () => {
-    const phone = $('#login-phone').value.trim()
-    if (!/^1\d{10}$/.test(phone)) { toast('手机号格式不对'); return }
-    try { await login(phone); close() } catch (error) { toast(error.message) }
+
+  const close = () => { clearInterval(timer); modal.classList.add('hidden') }
+  const hint = (text, color = '#9aa3b2') => {
+    const node = $('#login-hint')
+    node.textContent = text
+    node.style.color = color
+  }
+
+  $('#send-code').addEventListener('click', async () => {
+    const email = $('#login-email').value.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return hint('请输入正确的邮箱地址', '#ff8a8a')
+    const button = $('#send-code')
+    button.disabled = true
+    try {
+      const result = await api('/api/auth/email/send', { method: 'POST', body: JSON.stringify({ email }) })
+      devCode = result.devCode ?? ''
+      hint(devCode ? `开发模式验证码：${devCode}（5 分钟内有效）` : `验证码已发送至 ${email}，5 分钟内有效`, '#4ade80')
+      countdown = result.resendAfter ?? 60
+      button.textContent = `${countdown}s 后重发`
+      timer = setInterval(() => {
+        countdown -= 1
+        if (countdown <= 0) {
+          clearInterval(timer)
+          button.disabled = false
+          button.textContent = '获取验证码'
+          return
+        }
+        button.textContent = `${countdown}s 后重发`
+      }, 1000)
+    } catch (error) {
+      button.disabled = false
+      hint(error.message, '#ff8a8a')
+    }
   })
+
+  $('#login-submit').addEventListener('click', async () => {
+    const email = $('#login-email').value.trim()
+    const code = $('#login-code').value.trim()
+    if (!email) return hint('请输入邮箱', '#ff8a8a')
+    if (!/^\d{6}$/.test(code)) return hint('请输入 6 位数字验证码', '#ff8a8a')
+    try {
+      await login(email, code)
+      close()
+    } catch (error) {
+      hint(error.message, '#ff8a8a')
+    }
+  })
+
+  $('#login-code').addEventListener('keydown', (event) => { if (event.key === 'Enter') $('#login-submit').click() })
+  $('#login-cancel').addEventListener('click', close)
   modal.addEventListener('click', (event) => { if (event.target === modal) close() }, { once: true })
 }
 
@@ -630,8 +686,32 @@ async function renderMe() {
   const sub = data.subscription
   view.innerHTML = `
     <div class="section-head" style="margin-top:26px"><div class="section-title">我的</div>
-      <div class="section-hint">${escapeHtml(data.user.nickname)} · ${escapeHtml(data.user.phone ?? '')}</div></div>
+      <div class="section-hint">${escapeHtml(data.user.nickname)} · ${escapeHtml(data.user.email ?? '未绑定邮箱')}</div></div>
     <div class="me-grid">
+      <div class="me-card me-profile-card">
+        <div class="me-card-title">个人资料 · 完整度 ${data.completion?.percent ?? 0}%</div>
+        <div class="me-profile">
+          <div class="avatar-wrap">
+            ${data.user.avatar
+              ? `<img id="me-avatar" class="avatar" src="${escapeHtml(mediaUrl(data.user.avatar))}" alt="头像" />`
+              : '<div id="me-avatar" class="avatar avatar-empty">' + escapeHtml((data.user.nickname ?? '影').slice(0, 1)) + '</div>'}
+            <label class="avatar-upload">更换头像<input type="file" id="avatar-file" accept="image/png,image/jpeg,image/webp" hidden /></label>
+          </div>
+          <div class="me-profile-fields">
+            <div class="me-row"><span>邮箱</span><span>${escapeHtml(data.user.email ?? '—')}<button class="btn sm" id="change-email" style="margin-left:8px">更换</button></span></div>
+            <div class="me-row"><span>昵称</span><span>${escapeHtml(data.user.nickname)}</span></div>
+            <div class="me-row"><span>生日</span><span>${escapeHtml(data.user.birthday ?? '未填写')}</span></div>
+            <div class="me-row"><span>性别</span><span>${escapeHtml({ male: '男', female: '女', other: '其他', secret: '保密' }[data.user.gender] ?? '未填写')}</span></div>
+            <div class="me-row"><span>简介</span><span>${escapeHtml(data.user.bio ?? '未填写')}</span></div>
+            <div class="me-row"><span>密码</span><span>${data.user.hasPassword ? '已设置' : '未设置'}</span></div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+          <button class="btn-primary" id="edit-profile">编辑资料</button>
+          <button class="btn-ghost" id="change-password">修改密码</button>
+          ${(data.completion?.missing ?? []).length ? `<span class="me-sub">待完善：${escapeHtml(data.completion.missing.join('、'))}</span>` : ''}
+        </div>
+      </div>
       <div class="me-card">
         <div class="me-card-title">会员权益</div>
         ${sub ? `<div class="me-big">会员中</div><div class="me-sub">有效期至 ${escapeHtml(sub.validTo)}</div>` : '<div class="me-big">未开通</div><div class="me-sub">开通后可看全站剧集</div>'}
@@ -663,7 +743,168 @@ async function renderMe() {
     const { plans } = await api('/api/plans')
     openPaywall({ dramaId: 0, priceInfo: { plans } }, { title: '开通 / 续费会员' })
   })
+  $('#edit-profile').addEventListener('click', () => openProfileEdit(data.user))
+  $('#change-password').addEventListener('click', () => openChangePassword(data.user))
+  $('#change-email').addEventListener('click', () => openChangeEmail(data.user))
+  $('#avatar-file').addEventListener('change', async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    if (file.size > 1024 * 1024) { toast('头像不能超过 1MB'); return }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+    try {
+      const result = await api('/api/me/avatar', { method: 'POST', body: JSON.stringify({ dataUrl }) })
+      state.user = result.user
+      localStorage.setItem('mh-user', JSON.stringify(result.user))
+      toast('头像已更新')
+      await renderMe()
+    } catch (error) { toast(error.message) }
+  })
   vipFloat()
+}
+
+/** 编辑资料：昵称 / 生日 / 性别 / 简介 */
+function openProfileEdit(user) {
+  const modal = $('#modal')
+  modal.classList.remove('hidden')
+  modal.innerHTML = `
+    <div class="modal-card" style="width:min(460px,94vw)">
+      <h3>编辑资料</h3>
+      <label class="field"><span>昵称</span><input id="pf-nickname" value="${escapeHtml(user.nickname ?? '')}" maxlength="20" /></label>
+      <label class="field"><span>生日</span><input id="pf-birthday" type="date" value="${escapeHtml(user.birthday ?? '')}" /></label>
+      <label class="field"><span>性别</span>
+        <select id="pf-gender">
+          ${[['', '未填写'], ['male', '男'], ['female', '女'], ['other', '其他'], ['secret', '保密']]
+            .map(([value, label]) => `<option value="${value}" ${user.gender === value ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+      </label>
+      <label class="field"><span>个人简介</span><textarea id="pf-bio" rows="3" maxlength="120">${escapeHtml(user.bio ?? '')}</textarea></label>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn-primary" id="pf-save" style="flex:1">保存</button>
+        <button class="btn-ghost" id="pf-cancel">取消</button>
+      </div>
+      <div id="pf-msg" style="font-size:12px;color:#ff8a8a;min-height:16px;margin-top:8px"></div>
+    </div>`
+  const close = () => modal.classList.add('hidden')
+  $('#pf-cancel').addEventListener('click', close)
+  $('#pf-save').addEventListener('click', async () => {
+    try {
+      const result = await api('/api/me/profile', {
+        method: 'PUT',
+        body: JSON.stringify({
+          nickname: $('#pf-nickname').value.trim(),
+          birthday: $('#pf-birthday').value,
+          gender: $('#pf-gender').value,
+          bio: $('#pf-bio').value.trim(),
+        }),
+      })
+      state.user = result.user
+      localStorage.setItem('mh-user', JSON.stringify(result.user))
+      close()
+      toast('资料已保存')
+      await renderMe()
+    } catch (error) { $('#pf-msg').textContent = error.message }
+  })
+  modal.addEventListener('click', (event) => { if (event.target === modal) close() }, { once: true })
+}
+
+/** 修改密码：向注册邮箱发码 → 校验 → 设置新密码（≥8 位且含字母+数字） */
+function openChangePassword(user) {
+  const modal = $('#modal')
+  modal.classList.remove('hidden')
+  let devCode = ''
+  modal.innerHTML = `
+    <div class="modal-card" style="width:min(440px,94vw)">
+      <h3>修改密码</h3>
+      <p style="color:#9aa3b2;font-size:13px;margin:4px 0 10px">验证码将发送到注册邮箱 ${escapeHtml(user.email ?? '')}</p>
+      <div style="display:flex;gap:8px">
+        <input id="pw-code" placeholder="6 位验证码" maxlength="6" style="flex:1;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg-elev);color:var(--text)" />
+        <button class="btn-ghost" id="pw-send">发送验证码</button>
+      </div>
+      <label class="field" style="margin-top:10px"><span>新密码（≥8 位，含字母和数字）</span><input id="pw-new" type="password" /></label>
+      <label class="field" style="margin-top:8px"><span>确认新密码</span><input id="pw-confirm" type="password" /></label>
+      <div id="pw-msg" style="font-size:12px;min-height:18px;margin-top:8px;color:#9aa3b2"></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn-primary" id="pw-save" style="flex:1">确认修改</button>
+        <button class="btn-ghost" id="pw-cancel">取消</button>
+      </div>
+    </div>`
+  const close = () => modal.classList.add('hidden')
+  $('#pw-cancel').addEventListener('click', close)
+  $('#pw-send').addEventListener('click', async () => {
+    try {
+      const result = await api('/api/auth/password/send', { method: 'POST', body: JSON.stringify({ email: user.email }) })
+      devCode = result.devCode ?? ''
+      $('#pw-msg').style.color = '#4ade80'
+      $('#pw-msg').textContent = devCode ? `开发模式验证码：${devCode}` : '验证码已发送，请查收邮箱'
+    } catch (error) { $('#pw-msg').textContent = error.message }
+  })
+  $('#pw-save').addEventListener('click', async () => {
+    const code = $('#pw-code').value.trim()
+    const password = $('#pw-new').value
+    if (password !== $('#pw-confirm').value) { $('#pw-msg').textContent = '两次输入的密码不一致'; return }
+    try {
+      await api('/api/auth/password/change', {
+        method: 'POST',
+        body: JSON.stringify({ email: user.email, code, newPassword: password }),
+      })
+      close()
+      toast('密码已更新')
+    } catch (error) { $('#pw-msg').textContent = error.message }
+  })
+  modal.addEventListener('click', (event) => { if (event.target === modal) close() }, { once: true })
+}
+
+/** 更换邮箱：向新邮箱发码 → 校验 → 更新绑定 */
+function openChangeEmail(user) {
+  const modal = $('#modal')
+  modal.classList.remove('hidden')
+  let devCode = ''
+  modal.innerHTML = `
+    <div class="modal-card" style="width:min(440px,94vw)">
+      <h3>更换邮箱</h3>
+      <p style="color:#9aa3b2;font-size:13px;margin:4px 0 10px">当前邮箱：${escapeHtml(user.email ?? '未绑定')}</p>
+      <label class="field"><span>新邮箱</span><input id="ce-email" type="email" placeholder="new@example.com" /></label>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <input id="ce-code" placeholder="6 位验证码" maxlength="6" style="flex:1;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg-elev);color:var(--text)" />
+        <button class="btn-ghost" id="ce-send">发送验证码</button>
+      </div>
+      <div id="ce-msg" style="font-size:12px;min-height:18px;margin-top:8px;color:#9aa3b2"></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn-primary" id="ce-save" style="flex:1">确认更换</button>
+        <button class="btn-ghost" id="ce-cancel">取消</button>
+      </div>
+    </div>`
+  const close = () => modal.classList.add('hidden')
+  $('#ce-cancel').addEventListener('click', close)
+  $('#ce-send').addEventListener('click', async () => {
+    const email = $('#ce-email').value.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { $('#ce-msg').textContent = '邮箱格式不正确'; return }
+    try {
+      const result = await api('/api/auth/email/send-change', { method: 'POST', body: JSON.stringify({ newEmail: email }) })
+      devCode = result.devCode ?? ''
+      $('#ce-msg').style.color = '#4ade80'
+      $('#ce-msg').textContent = devCode ? `开发模式验证码：${devCode}` : '验证码已发送至新邮箱'
+    } catch (error) { $('#ce-msg').textContent = error.message }
+  })
+  $('#ce-save').addEventListener('click', async () => {
+    try {
+      const result = await api('/api/auth/email/change', {
+        method: 'POST',
+        body: JSON.stringify({ newEmail: $('#ce-email').value.trim(), code: $('#ce-code').value.trim() }),
+      })
+      state.user = result.user
+      localStorage.setItem('mh-user', JSON.stringify(result.user))
+      close()
+      toast('邮箱已更换')
+      await renderMe()
+    } catch (error) { $('#ce-msg').textContent = error.message }
+  })
+  modal.addEventListener('click', (event) => { if (event.target === modal) close() }, { once: true })
 }
 
 function loginWall() {
@@ -704,7 +945,11 @@ async function route() {
   window.scrollTo(0, 0)
 }
 
-window.addEventListener('hashchange', route)
+window.addEventListener('hashchange', () => {
+  // 路由切换时关闭可能残留的弹窗/付费墙，避免遮挡新页面
+  $('#modal')?.classList.add('hidden')
+  route()
+})
 state.constants = await api('/api/constants').catch(() => ({}))
 if (state.constants?.pay) Object.assign(PAY, state.constants.pay)
 await route()

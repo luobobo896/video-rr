@@ -20,11 +20,48 @@ db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  phone TEXT UNIQUE,
+  phone TEXT,
+  email TEXT,
   nickname TEXT NOT NULL,
+  avatar TEXT,
+  birthday TEXT,
+  gender TEXT,
+  bio TEXT,
+  password_hash TEXT,
+  password_salt TEXT,
+  email_verified_at TEXT,
+  last_login_at TEXT,
   status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+
+-- 邮箱验证码（登录 / 改密 / 换邮箱三用；只存哈希，不存明文）
+CREATE TABLE IF NOT EXISTS email_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  purpose TEXT NOT NULL,                    -- login | change_password | change_email
+  code_hash TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  ip TEXT,
+  user_agent TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_codes(email, purpose, created_at DESC);
+
+-- 发送频次统计（60 秒冷却 / 每日 20 条 / 每 IP 每小时上限）
+CREATE TABLE IF NOT EXISTS email_send_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  ip TEXT,
+  sent_date TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_email_send_lookup ON email_send_log(email, sent_date);
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY,
   subject_id INTEGER NOT NULL,
@@ -568,6 +605,29 @@ export function seedIfEmpty() {
     throw error
   }
   return { seeded: true, dramas: count('dramas'), episodes: count('episodes') }
+}
+
+/**
+ * 老库升级：users 增加邮箱/口令/资料字段。
+ */
+export function ensureUserSchema() {
+  const columns = db.prepare('PRAGMA table_info(users)').all().map((row) => row.name)
+  const additions = [
+    ['email', 'TEXT'],
+    ['avatar', 'TEXT'],
+    ['birthday', 'TEXT'],
+    ['gender', 'TEXT'],
+    ['bio', 'TEXT'],
+    ['password_hash', 'TEXT'],
+    ['password_salt', 'TEXT'],
+    ['email_verified_at', 'TEXT'],
+    ['last_login_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+  ]
+  for (const [name, ddl] of additions) {
+    if (!columns.includes(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${ddl}`)
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS uk_users_email ON users(email) WHERE email IS NOT NULL')
 }
 
 /**

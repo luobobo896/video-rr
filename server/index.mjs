@@ -9,7 +9,8 @@
 import { createServer } from 'node:http'
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join, normalize, resolve } from 'node:path'
-import { db, seedIfEmpty, ROOT, migratePayChannels, syncMenuCatalog } from './db.mjs'
+import { db, seedIfEmpty, ROOT, ensureUserSchema, migratePayChannels, syncMenuCatalog } from './db.mjs'
+import { cleanupCodes } from './otp.mjs'
 import { handlePublic } from './api-public.mjs'
 import { handleAdmin } from './api-admin.mjs'
 import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
@@ -20,6 +21,7 @@ mkdirSync(UPLOAD_DIR, { recursive: true })
 mkdirSync(HLS_DIR, { recursive: true })
 
 const seed = seedIfEmpty()
+ensureUserSchema()
 syncMenuCatalog()
 const channelMigration = migratePayChannels()
 const PORT = Number(process.env.PORT ?? 8787)
@@ -283,6 +285,14 @@ const server = createServer(async (req, res) => {
 setInterval(() => {
   try { closeExpiredOrders() } catch (error) { console.error('[closeExpiredOrders]', error) }
 }, 60_000).unref()
+
+// 每 10 分钟清理过期验证码与 30 天前的发送日志
+setInterval(() => {
+  try {
+    const result = cleanupCodes()
+    if (result.codes || result.logs) console.log('[otp-cleanup]', result)
+  } catch (error) { console.error('[otp-cleanup]', error) }
+}, 10 * 60_000).unref()
 
 server.listen(PORT, '127.0.0.1', () => {
   const stats = {

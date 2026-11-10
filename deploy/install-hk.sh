@@ -40,6 +40,25 @@ if ! grep -q '^MH_CONFIG_KEYS=' "$APP/.env"; then
   printf 'MH_CONFIG_KEYS=1:%s\nMH_CONFIG_KEY_VERSION=1\n' "$CONFIG_KEY" >> "$APP/.env"
   chmod 600 "$APP/.env"
 fi
+if ! grep -q '^MH_OTP_SECRET=' "$APP/.env"; then
+  OTP=$(head -c 24 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-32)
+  printf 'MH_OTP_SECRET=%s\n' "$OTP" >> "$APP/.env"
+fi
+# 邮箱验证码：配置 SMTP 后删掉 MH_EMAIL_DEV=1，验证码就只发邮件、不再回显
+if ! grep -q '^MH_EMAIL_DEV=' "$APP/.env"; then
+  cat >> "$APP/.env" <<'EOF'
+# ---- 邮件（填入后删除下面一行 MH_EMAIL_DEV，验证码将只发邮件）----
+MH_EMAIL_DEV=1
+#MH_SMTP_HOST=smtp.example.com
+#MH_SMTP_PORT=465
+#MH_SMTP_SECURE=1
+#MH_SMTP_USER=no-reply@example.com
+#MH_SMTP_PASS=
+#MH_SMTP_FROM=no-reply@example.com
+#MH_SMTP_FROM_NAME=影巢
+EOF
+  chmod 600 "$APP/.env"
+fi
 set -a; . "$APP/.env"; set +a
 [ -n "${MH_LINK_SECRET:-}" ] || { echo "MH_LINK_SECRET 缺失"; exit 1; }
 

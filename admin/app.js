@@ -492,8 +492,9 @@ async function pageUsers() {
   const data = await api('/admin/api/users')
   const rows = data.list.map((row) => `<tr>
     <td>${row.id}</td>
-    <td class="mono">${esc(row.phone ?? '')}</td>
+    <td class="mono">${esc(row.email ?? row.phone ?? '')}</td>
     <td>${esc(row.nickname)}</td>
+    <td>${row.avatar ? '<span class="pill ok">有</span>' : '<span class="pill">无</span>'}</td>
     <td>${row.status === 'banned' ? '<span class="pill bad">已禁用</span>' : '<span class="pill ok">正常</span>'}</td>
     <td>${esc(row.vip_until ?? '—')}</td>
     <td>${row.order_count}</td>
@@ -502,9 +503,9 @@ async function pageUsers() {
   </tr>`)
   view.innerHTML = `<div class="panel">
     <h3>用户<span class="spacer"></span></h3>
-    <table><thead><tr><th>ID</th><th>手机号</th><th>昵称</th><th>状态</th><th>会员到期</th><th>订单数</th><th>累计付费</th><th>操作</th></tr></thead>
+    <table><thead><tr><th>ID</th><th>邮箱</th><th>昵称</th><th>头像</th><th>状态</th><th>会员到期</th><th>订单数</th><th>累计付费</th><th>操作</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table>
-    <p class="muted">客服补发权益：POST /admin/api/cs/grant（需 cs.toolkit 权限）。</p>
+    <p class="muted">C 端已改为邮箱验证码登录；客服补发权益：POST /admin/api/cs/grant（需 cs.toolkit 权限）。</p>
   </div>`
   view.querySelectorAll('[data-toggle]').forEach((button) => {
     button.addEventListener('click', async () => {

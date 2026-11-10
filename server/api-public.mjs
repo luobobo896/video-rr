@@ -1,6 +1,12 @@
 /** C 端接口：内容、权益判定、播放令牌、套餐下单、支付回调、我的。 */
-import { db, getSetting } from './db.mjs'
-import { authOf, loginUserByPhone } from './auth.mjs'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { db, getSetting, ROOT } from './db.mjs'
+import {
+  authOf, changeUserEmail, checkPasswordStrength, loginByEmail, publicUser, setUserPassword, updateProfile,
+} from './auth.mjs'
+import { OtpError, normalizeEmail, sendCode, verifyCode } from './otp.mjs'
+import { isDevMail } from './mailer.mjs'
 import {
   decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, secureLink,
 } from './entitlements.mjs'
@@ -50,6 +56,21 @@ function cardOf(drama, userId, context = {}) {
   }
 }
 
+/** 资料完整度（个人中心引导用）。 */
+function profileCompletion(user) {
+  const fields = [
+    ['avatar', '头像'], ['nickname', '昵称'], ['birthday', '生日'],
+    ['gender', '性别'], ['bio', '个人简介'], ['password_hash', '登录密码'],
+  ]
+  const filled = fields.filter(([key]) => Boolean(user?.[key])).length
+  return {
+    filled,
+    total: fields.length,
+    percent: Math.round((filled / fields.length) * 100),
+    missing: fields.filter(([key]) => !user?.[key]).map(([, label]) => label),
+  }
+}
+
 /** 一次性取出用户的订阅与单片所有权，供列表批量判定。 */
 function userContext(userId) {
   if (!userId) return { subscription: undefined, purchase: new Set() }
@@ -62,12 +83,14 @@ function userContext(userId) {
 
 const readBody = (req) => new Promise((resolve) => {
   let raw = ''
-  req.on('data', (chunk) => { raw += chunk; if (raw.length > 1e6) req.destroy() })
+  req.on('data', (chunk) => { raw += chunk; if (raw.length > 4e6) req.destroy() })
   req.on('end', () => {
     if (!raw) return resolve({})
     try { resolve(JSON.parse(raw)) } catch { resolve({}) }
   })
 })
+
+const clientIp = (req) => String(req.headers['x-forwarded-for'] ?? req.socket?.remoteAddress ?? '').split(',')[0].trim().replace('::ffff:', '')
 
 export async function handlePublic(pathname, url, req, res) {
   const auth = authOf(req)
@@ -79,7 +102,7 @@ export async function handlePublic(pathname, url, req, res) {
    * 登录门禁（新需求）：未登录只能看首页。
    * 例外：常量、首页、登录、支付回调（渠道服务器直接调，没有用户 token）。
    */
-  const OPEN_PATHS = new Set(['/api/constants', '/api/home', '/api/auth/login'])
+  const OPEN_PATHS = new Set(['/api/constants', '/api/home', '/api/auth/login', '/api/auth/email/send', '/api/auth/email/login'])
   const isOpen = OPEN_PATHS.has(pathname)
     || pathname.startsWith('/api/notify/')
     || pathname === '/api/pay/mock'
@@ -105,6 +128,14 @@ export async function handlePublic(pathname, url, req, res) {
           mock: channels.some((channel) => channel.code === 'mock'),
           usdtNetwork: channels.find((channel) => channel.code === 'usdt')?.currency === 'USDT' ? 'TRC20' : 'TRC20',
           defaultChannel: channels.find((channel) => channel.isDefault)?.code ?? channels[0]?.code ?? null,
+        },
+        auth: {
+          method: 'email',
+          codeLength: 6,
+          ttlSeconds: 300,
+          resendSeconds: 60,
+          maxAttempts: 3,
+          devCode: process.env.MH_EMAIL_DEV === '1',
         },
       })
     }
@@ -345,13 +376,103 @@ export async function handlePublic(pathname, url, req, res) {
       return send(res, { messages })
     }
 
-    /* ---------- 登录 / 我的 ---------- */
-    if (pathname === '/api/auth/login' && method === 'POST') {
+    /* ---------- 邮箱验证码认证（登录/注册一体） ---------- */
+    if (pathname === '/api/auth/email/send' && method === 'POST') {
       const body = await readBody(req)
-      const phone = String(body.phone ?? '').trim()
-      if (!/^1\d{10}$/.test(phone)) return fail(res, '0400', '手机号格式不正确')
-      const result = loginUserByPhone(phone, body.nickname)
-      return send(res, { token: result.token, expiresAt: result.expiresAt, user: { id: result.user.id, nickname: result.user.nickname, phone: result.user.phone } })
+      const result = await sendCode({
+        email: body.email,
+        purpose: 'login',
+        ip: clientIp(req),
+        userAgent: req.headers['user-agent'],
+      })
+      return send(res, {
+        email: result.email, expiresIn: result.expiresIn, resendAfter: result.resendAfter,
+        delivered: result.delivered, devCode: result.devCode,
+      })
+    }
+
+    if (pathname === '/api/auth/email/login' && method === 'POST') {
+      const body = await readBody(req)
+      verifyCode({ email: body.email, purpose: 'login', code: body.code })
+      const result = loginByEmail(body.email, { nickname: body.nickname })
+      return send(res, {
+        token: result.token,
+        expiresAt: result.expiresAt,
+        created: result.created,
+        user: publicUser(result.user),
+      })
+    }
+
+    // 手机号登录已下线（系统统一走邮箱验证码）
+    if (pathname === '/api/auth/login' && method === 'POST') {
+      return fail(res, '0410', '系统已改为邮箱验证码登录，请使用 /api/auth/email/send', 410)
+    }
+
+    /* ---------- 修改密码 ---------- */
+    if (pathname === '/api/auth/password/send' && method === 'POST') {
+      const user = one('SELECT * FROM users WHERE id = ?', userId)
+      if (!user?.email) return fail(res, '0400', '当前账号未绑定邮箱', 400)
+      const body = await readBody(req)
+      const email = String(body.email ?? user.email).trim().toLowerCase()
+      if (email !== user.email) return fail(res, '0403', '只能向注册邮箱发送验证码', 403)
+      const result = await sendCode({ email, purpose: 'change_password', ip: clientIp(req), userAgent: req.headers['user-agent'] })
+      return send(res, { email: result.email, expiresIn: result.expiresIn, resendAfter: result.resendAfter, devCode: result.devCode })
+    }
+
+    if (pathname === '/api/auth/password/change' && method === 'POST') {
+      const user = one('SELECT * FROM users WHERE id = ?', userId)
+      const body = await readBody(req)
+      if (String(body.email ?? '').trim().toLowerCase() !== user?.email) {
+        return fail(res, '0403', '邮箱与当前账号不一致', 403)
+      }
+      // 先校验口令强度，再消费验证码：避免"密码不合规"把验证码浪费掉
+      const strength = checkPasswordStrength(body.newPassword)
+      if (!strength.ok) return fail(res, 'password_weak', strength.message, 400)
+      verifyCode({ email: user.email, purpose: 'change_password', code: body.code })
+      setUserPassword(userId, body.newPassword)
+      return send(res, { ok: true, message: '密码已更新，请牢记新密码' })
+    }
+
+    /* ---------- 更换邮箱 ---------- */
+    if (pathname === '/api/auth/email/send-change' && method === 'POST') {
+      const body = await readBody(req)
+      const newEmail = normalizeEmail(body.newEmail ?? body.email)
+      const taken = one('SELECT id FROM users WHERE email = ? AND id != ?', newEmail, userId)
+      if (taken) return fail(res, '0409', '该邮箱已被其他账号使用', 409)
+      const result = await sendCode({ email: newEmail, purpose: 'change_email', ip: clientIp(req), userAgent: req.headers['user-agent'] })
+      return send(res, { email: result.email, expiresIn: result.expiresIn, resendAfter: result.resendAfter, devCode: result.devCode })
+    }
+
+    if (pathname === '/api/auth/email/change' && method === 'POST') {
+      const body = await readBody(req)
+      const newEmail = normalizeEmail(body.newEmail ?? body.email)
+      verifyCode({ email: newEmail, purpose: 'change_email', code: body.code })
+      const updated = changeUserEmail(userId, newEmail)
+      return send(res, { ok: true, user: publicUser(updated) })
+    }
+
+    /* ---------- 个人中心 ---------- */
+    if (pathname === '/api/me/profile' && method === 'PUT') {
+      const body = await readBody(req)
+      const updated = updateProfile(userId, body)
+      return send(res, { ok: true, user: publicUser(updated) })
+    }
+
+    if (pathname === '/api/me/avatar' && method === 'POST') {
+      const body = await readBody(req)
+      const dataUrl = String(body.dataUrl ?? '')
+      const match = /^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl)
+      if (!match) return fail(res, '0400', '头像格式需为 PNG / JPEG / WebP', 400)
+      const buffer = Buffer.from(match[3], 'base64')
+      if (buffer.length > 1024 * 1024) return fail(res, '0413', '头像不能超过 1MB', 413)
+      const ext = match[2] === 'jpeg' ? 'jpg' : match[2]
+      const dir = join(ROOT, 'storage', 'images', 'avatars')
+      mkdirSync(dir, { recursive: true })
+      const name = `avatar-${userId}-${Date.now()}.${ext}`
+      writeFileSync(join(dir, name), buffer)
+      const avatar = `/media/images/avatars/${name}`
+      const updated = updateProfile(userId, { avatar })
+      return send(res, { ok: true, avatar, user: publicUser(updated) })
     }
 
     /* 弹幕：发送后进入待审，审核通过才展示 */
@@ -375,11 +496,12 @@ export async function handlePublic(pathname, url, req, res) {
         WHERE h.user_id = ? ORDER BY h.updated_at DESC LIMIT 12`, userId)
       const favorites = all(`SELECT d.* FROM favorites f JOIN dramas d ON d.id = f.drama_id WHERE f.user_id = ? ORDER BY f.created_at DESC`, userId)
       return send(res, {
-        user: { id: user.id, nickname: user.nickname, phone: user.phone },
+        user: publicUser(user),
         subscription: subscription ? { planId: subscription.plan_id, scope: subscription.scope, validTo: subscription.valid_to } : null,
         purchases: purchases.map((row) => ({ dramaId: row.drama_id, title: row.title, kind: row.kind, expiresAt: row.expires_at })),
         history: history.map((row) => ({ dramaId: row.drama_id, episode: row.episode_no, position: row.position, title: row.title, coverUrl: row.cover_url })),
         favorites: favorites.map((drama) => cardOf(drama, userId, context)),
+        completion: profileCompletion(user),
       })
     }
 
@@ -405,7 +527,11 @@ export async function handlePublic(pathname, url, req, res) {
 
     return fail(res, '0404', '接口不存在', 404)
   } catch (error) {
+    if (error instanceof OtpError) return send(res, { ...error.extra }, error.code, error.message, error.status)
     if (error instanceof CommerceError) return fail(res, error.code, error.message, error.status)
+    if (error?.code === 'password_weak' || error?.code === 'email_taken' || error?.code === 'user_banned' || error?.code === 'avatar_invalid') {
+      return fail(res, error.code, error.message, 400)
+    }
     console.error('[public]', error)
     return fail(res, '0500', '服务器错误', 500)
   }
