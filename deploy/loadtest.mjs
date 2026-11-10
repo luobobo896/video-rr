@@ -34,7 +34,7 @@ const agent = isHttps
 const doRequest = isHttps ? httpsRequest : httpRequest
 const tlsOptions = INSECURE ? { rejectUnauthorized: false } : {}
 
-const metrics = { requests: 0, bytes: 0, errors: 0, latency: [], statuses: {}, active: 0, peak: 0 }
+const metrics = { requests: 0, bytes: 0, errors: 0, latency: [], statuses: {}, active: 0, peak: 0, samples: [] }
 const deadline = Date.now() + SECONDS * 1000
 
 function fetchText(url) {
@@ -56,7 +56,7 @@ function fetchText(url) {
         resolve(body)
       })
     })
-    req.on('error', () => { metrics.active -= 1; metrics.errors += 1; resolve('') })
+    req.on('error', (error) => { metrics.active -= 1; metrics.errors += 1; if (metrics.samples.length < 5) metrics.samples.push(String(error.code) + ': ' + String(error.message).slice(0, 90)); resolve('') })
     req.setTimeout(20000, () => { req.destroy(); metrics.errors += 1; resolve('') })
     req.end()
   })
@@ -80,7 +80,7 @@ function fetchBinary(url) {
         resolve(size)
       })
     })
-    req.on('error', () => { metrics.active -= 1; metrics.errors += 1; resolve(0) })
+    req.on('error', (error) => { metrics.active -= 1; metrics.errors += 1; if (metrics.samples.length < 5) metrics.samples.push(String(error.code) + ': ' + String(error.message).slice(0, 90)); resolve(0) })
     req.setTimeout(20000, () => { req.destroy(); metrics.errors += 1; resolve(0) })
     req.end()
   })
@@ -128,6 +128,7 @@ console.log(`峰值并发      ${metrics.peak}`)
 console.log(`错误          ${metrics.errors}`)
 console.log(`状态分布      ${JSON.stringify(metrics.statuses)}`)
 console.log(`延迟 p50/p95  ${pick(0.5).toFixed(1)} / ${pick(0.95).toFixed(1)} ms`)
+if (metrics.samples.length) console.log('错误样本      ' + JSON.stringify(metrics.samples))
 console.log('\n说明：本测试在服务器本机（loopback）跑，测 nginx+TLS+磁盘 的并发与吞吐；')
 console.log('公网 1000 人还要看出口带宽：480p ≈ 0.85 Mbps/人 → 850 Mbps；720p ≈ 2.4 Mbps/人 → 2.4 Gbps。')
 process.exit(0)
