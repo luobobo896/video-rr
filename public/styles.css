@@ -276,3 +276,10 @@ button { font-family: inherit; cursor: pointer; }
 .me-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 6px 0; border-bottom: 1px dashed #232833; }
 .me-row:last-child { border-bottom: 0; }
 .me-row a { color: #cfd6e4; text-decoration: none; }
+
+/* 播放器工具条：清晰度 / 弹幕 / 分享 */
+.player-tools { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center;
+  background: rgba(10,12,16,.72); border: 1px solid rgba(255,255,255,.08); border-radius: 12px; padding: 8px 10px; backdrop-filter: blur(6px); }
+.player-tools select, .player-tools input { background: #14171d; color: #e8e8ee; border: 1px solid #2a2f3a; border-radius: 8px; padding: 7px 10px; font-size: 13px; }
+.player-tools input { flex: 1; }
+.player-tools select { width: 130px; }

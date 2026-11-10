@@ -116,6 +116,60 @@ document.getElementById('pay').addEventListener('click', async () => {
   res.end(html)
 }
 
+/** 支付宝模拟收银台：未配置真实商户参数时使用；付款会走真实 RSA2 签名 + 验签。 */
+function alipaySimPage(outTradeNo, res) {
+  const order = db.prepare('SELECT * FROM orders WHERE out_trade_no = ?').get(outTradeNo)
+  const amount = order ? Number(order.amount_cny).toFixed(2) : '0.00'
+  const missing = order ? '' : '<p style="color:#ff8a8a">订单不存在或已过期</p>'
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8" />
+<title>支付宝收银台（模拟） · 影巢</title>
+<style>
+body{background:#f5f7fb;color:#1f2430;font-family:system-ui;display:grid;place-items:center;min-height:100vh;margin:0}
+.card{background:#fff;border-radius:16px;box-shadow:0 10px 40px rgba(20,40,80,.12);padding:28px 32px;width:min(420px,92vw)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;color:#1677ff;margin-bottom:18px}
+.logo{width:32px;height:32px;border-radius:8px;background:#1677ff;color:#fff;display:grid;place-items:center;font-size:16px}
+.amount{font-size:34px;font-weight:700;margin:10px 0 4px}
+.muted{color:#7b8496;font-size:13px}
+.row{display:flex;justify-content:space-between;font-size:13px;padding:8px 0;border-bottom:1px dashed #e6eaf2}
+button{width:100%;margin-top:20px;padding:13px;border:0;border-radius:10px;background:#1677ff;color:#fff;font-size:16px;cursor:pointer}
+button.ghost{background:#eef2f8;color:#4a5468;margin-top:10px}
+#msg{margin-top:14px;font-size:13px;color:#12a05c;min-height:18px}
+</style></head><body><div class="card">
+<div class="brand"><span class="logo">支</span>支付宝 · 沙箱收银台</div>
+${missing}
+<div class="muted">订单号 ${outTradeNo}</div>
+<div class="amount">¥ ${amount}</div>
+<div class="row"><span>收款方</span><span>影巢（沙箱）</span></div>
+<div class="row"><span>商品</span><span>会员 / 单片</span></div>
+<div class="row"><span>支付方式</span><span>余额宝（模拟）</span></div>
+<button id="pay">确认付款</button>
+<button class="ghost" id="cancel">取消并返回</button>
+<div id="msg"></div>
+<p class="muted" style="margin-top:16px">本页用于未接入真实商户前的联调：点击付款后，服务端用模拟私钥签名异步通知，再用对应公钥验签入账。</p>
+</div>
+<script>
+document.getElementById('cancel').addEventListener('click', () => history.length > 1 ? history.back() : location.href = '/')
+document.getElementById('pay').addEventListener('click', async () => {
+  const button = document.getElementById('pay')
+  button.disabled = true
+  button.textContent = '支付中…'
+  const res = await fetch('/api/pay/alipay-sim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}' }) })
+  const json = await res.json()
+  if (json.code === '0000') {
+    document.getElementById('msg').textContent = '支付成功，权益已到账，正在返回…'
+    setTimeout(() => { location.href = '/#/me' }, 1200)
+  } else {
+    document.getElementById('msg').style.color = '#d93025'
+    document.getElementById('msg').textContent = '支付失败：' + json.msg
+    button.disabled = false
+    button.textContent = '确认付款'
+  }
+})
+</script></body></html>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(html)
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
   const pathname = url.pathname
@@ -184,6 +238,10 @@ const server = createServer(async (req, res) => {
 
     if (pathname.startsWith('/pay/mock/')) {
       return mockPayPage(pathname.split('/')[3], res)
+    }
+
+    if (pathname.startsWith('/pay/alipay-sim/')) {
+      return alipaySimPage(pathname.split('/')[3], res)
     }
 
     if (pathname.startsWith('/admin/api/')) {

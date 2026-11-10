@@ -6,6 +6,7 @@ import {
 } from './entitlements.mjs'
 import {
   CommerceError, createOrder, handleAlipayNotify, handleUsdtNotify, listOrders, markPaid, mockPay, paymentOptions, validateCoupon,
+  buildSimulatedAlipayNotify, syncAlipayOrder,
 } from './commerce.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
@@ -73,6 +74,19 @@ export async function handlePublic(pathname, url, req, res) {
   const userId = auth?.role === 'user' ? auth.sub : undefined
   const context = userContext(userId)
   const method = req.method
+
+  /**
+   * 登录门禁（新需求）：未登录只能看首页。
+   * 例外：常量、首页、登录、支付回调（渠道服务器直接调，没有用户 token）。
+   */
+  const OPEN_PATHS = new Set(['/api/constants', '/api/home', '/api/auth/login'])
+  const isOpen = OPEN_PATHS.has(pathname)
+    || pathname.startsWith('/api/notify/')
+    || pathname === '/api/pay/mock'
+    || pathname.startsWith('/api/pay/alipay-sim')
+  if (!isOpen && !userId) {
+    return fail(res, '0401', '请先登录后再浏览和播放', 401)
+  }
 
   try {
     /* ---------- 基础 ---------- */
@@ -230,7 +244,8 @@ export async function handlePublic(pathname, url, req, res) {
     if (pathname === '/api/orders' && method === 'POST') {
       if (!userId) return fail(res, '0401', '请先登录', 401)
       const body = await readBody(req)
-      const channel = body.channel ?? (getSetting('pay', {}).mock?.enabled ? 'mock' : 'alipay')
+      // 不传 channel 时由后端按"场景默认渠道"解析（后台可切换默认渠道）
+      const channel = body.channel ?? undefined
       const result = createOrder({
         userId,
         productType: body.productType === 'single' ? 'single' : 'subscription',
@@ -246,6 +261,7 @@ export async function handlePublic(pathname, url, req, res) {
         status: result.order.status,
         expiresAt: result.order.expires_at,
         payUrl: result.payUrl,
+        simulated: result.simulated ?? false,
         usdt: result.usdt ?? null,
       })
     }
@@ -258,8 +274,13 @@ export async function handlePublic(pathname, url, req, res) {
     if (pathname.startsWith('/api/orders/')) {
       if (!userId) return fail(res, '0401', '请先登录', 401)
       const outTradeNo = pathname.split('/')[3]
-      const order = one('SELECT * FROM orders WHERE out_trade_no = ? AND user_id = ?', outTradeNo, userId)
+      let order = one('SELECT * FROM orders WHERE out_trade_no = ? AND user_id = ?', outTradeNo, userId)
       if (!order) return fail(res, '0404', '订单不存在', 404)
+      // 支付宝查单兜底：回调可能丢失，轮询时主动向渠道确认一次
+      if (order.channel === 'alipay' && ['created', 'pending'].includes(order.status)) {
+        const sync = await syncAlipayOrder(outTradeNo).catch(() => ({ synced: false }))
+        if (sync.synced) order = one('SELECT * FROM orders WHERE id = ?', order.id)
+      }
       return send(res, {
         outTradeNo: order.out_trade_no, status: order.status, amount: order.amount_cny,
         channel: order.channel, paidAt: order.paid_at, usdt: order.usdt_amount ? {
@@ -292,6 +313,38 @@ export async function handlePublic(pathname, url, req, res) {
       return send(res, mockPay(body.outTradeNo))
     }
 
+    /* 支付宝模拟收银台：用真实 RSA2 签名通知 → 走同一套验签入账 */
+    if (pathname.startsWith('/api/pay/alipay-sim') && method === 'POST') {
+      const body = await readBody(req)
+      const { params } = buildSimulatedAlipayNotify(body.outTradeNo)
+      const result = handleAlipayNotify(params, { simulator: true })
+      return send(res, { ...result, simulated: true })
+    }
+
+    /* 消息中心：订单/权益/到期提醒 */
+    if (pathname === '/api/me/messages') {
+      if (!userId) return fail(res, '0401', '需要登录', 401)
+      const messages = []
+      const subscription = one(`SELECT s.*, p.name AS plan_name FROM subscriptions s LEFT JOIN plans p ON p.id = s.plan_id
+        WHERE s.user_id = ? AND s.status = 'active' ORDER BY datetime(s.valid_to) DESC LIMIT 1`, userId)
+      if (subscription) {
+        const daysLeft = Math.ceil((new Date(`${subscription.valid_to}Z`).getTime() - Date.now()) / 86400000)
+        messages.push({
+          type: 'subscription', title: `会员${daysLeft >= 0 ? '生效中' : '已到期'}`,
+          body: `${subscription.plan_name ?? '会员'}，有效期至 ${subscription.valid_to}${daysLeft <= 7 ? `（剩 ${daysLeft} 天，建议续费）` : ''}`,
+          createdAt: subscription.created_at,
+        })
+      }
+      for (const order of listOrders({ userId, limit: 5 })) {
+        messages.push({
+          type: 'order', title: `订单 ${order.out_trade_no}`,
+          body: `${order.product_type === 'subscription' ? '会员订阅' : '单片购买'} ¥${Number(order.amount_cny).toFixed(2)} · ${order.status}`,
+          createdAt: order.created_at,
+        })
+      }
+      return send(res, { messages })
+    }
+
     /* ---------- 登录 / 我的 ---------- */
     if (pathname === '/api/auth/login' && method === 'POST') {
       const body = await readBody(req)
@@ -299,6 +352,19 @@ export async function handlePublic(pathname, url, req, res) {
       if (!/^1\d{10}$/.test(phone)) return fail(res, '0400', '手机号格式不正确')
       const result = loginUserByPhone(phone, body.nickname)
       return send(res, { token: result.token, expiresAt: result.expiresAt, user: { id: result.user.id, nickname: result.user.nickname, phone: result.user.phone } })
+    }
+
+    /* 弹幕：发送后进入待审，审核通过才展示 */
+    if (pathname === '/api/danmu' && method === 'POST') {
+      if (!userId) return fail(res, '0401', '需要登录', 401)
+      const body = await readBody(req)
+      const episode = one('SELECT * FROM episodes WHERE id = ?', Number(body.episodeId))
+      if (!episode) return fail(res, '0404', '分集不存在', 404)
+      const content = String(body.content ?? '').trim().slice(0, 60)
+      if (!content) return fail(res, '0400', '弹幕内容不能为空', 400)
+      db.prepare("INSERT INTO danmus (episode_id, user_id, time_ms, content, status) VALUES (?, ?, ?, ?, 'pending')")
+        .run(episode.id, userId, Math.max(0, Math.round(Number(body.timeMs ?? 0))), content)
+      return send(res, { ok: true, status: 'pending', message: '已提交，审核通过后展示' })
     }
 
     if (pathname === '/api/me') {

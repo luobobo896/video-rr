@@ -176,7 +176,8 @@ function openPaywall(detail, options = {}) {
     try {
       const order = await createOrder({ ...payload, channel, couponCode })
       $('#paywall-msg').textContent = `订单 ${order.outTradeNo} 已创建，金额 ¥${order.amount.toFixed(2)}`
-      if (order.payUrl) window.open(BASE + order.payUrl, '_blank', 'width=520,height=620')
+      if (order.payUrl) window.open(order.payUrl.startsWith('http') ? order.payUrl : BASE + order.payUrl, '_blank', 'width=520,height=680')
+      if (order.simulated) $('#paywall-msg').textContent = '已打开支付宝（沙箱）收银台，付款后自动到账'
       if (order.usdt) {
         $('#paywall-msg').innerHTML = `请向 <b>${escapeHtml(order.usdt.address)}</b> 转入 <b>${order.usdt.amount} USDT</b>（${order.usdt.network}），15 分钟内有效`
       }
@@ -388,18 +389,18 @@ async function renderRank(params) {
 async function renderSearch(params) {
   const keyword = params.get('q') ?? ''
   const data = await api(`/api/search?keyword=${encodeURIComponent(keyword)}`)
-  const home = await api('/api/home').catch(() => ({ hotSearch: [] }))
+  const home = await api('/api/home').catch(() => ({ hotwords: [] }))
   view.innerHTML = `
     <div class="section-head" style="margin-top:26px">
       <div class="section-title">搜索</div>
       <div class="section-hint">${keyword ? `“${escapeHtml(keyword)}” 命中 ${data.total} 部` : '输入关键词开始搜索'}</div>
     </div>
     <div class="subtabs">
-      ${(home.hotSearch ?? []).map((word) => `<a class="pill" href="#/search?q=${encodeURIComponent(word)}">${escapeHtml(word)}</a>`).join('')}
+      ${(home.hotwords ?? []).map((word) => `<a class="pill" href="#/search?q=${encodeURIComponent(word)}">${escapeHtml(word)}</a>`).join('')}
     </div>
-    ${data.content.length === 0
+    ${(data.list ?? []).length === 0
       ? '<div class="empty">没有找到相关剧集</div>'
-      : `<div class="grid">${data.content.map((item) => posterCard(item)).join('')}</div>`}`
+      : `<div class="grid">${data.list.map((item) => posterCard(item)).join('')}</div>`}`
   vipFloat()
 }
 
@@ -506,6 +507,12 @@ async function renderPlay(id, episodeNo) {
         <video id="video" playsinline controls style="width:100%;height:100%;background:#000"></video>
         <div class="danmu-layer" id="danmu-layer"></div>
         <div class="notice" id="player-notice">${data.hls ? '播放链接 10 分钟有效（签名防盗链）' : '该集没有片源：后台生成示例视频后即可播放'}</div>
+        <div class="player-tools">
+          <select id="quality-select"><option value="-1">自动清晰度</option></select>
+          <input id="danmu-input" placeholder="发条弹幕…" maxlength="60" />
+          <button class="btn-ghost" id="danmu-send">发送</button>
+          <button class="btn-ghost" id="share-btn">分享</button>
+        </div>
       </div>
     </div>
     <div class="detail-head" style="margin-top:0">
@@ -526,6 +533,22 @@ async function renderPlay(id, episodeNo) {
 
   const video = $('#video')
   const danmuLayer = $('#danmu-layer')
+  $('#danmu-send')?.addEventListener('click', async () => {
+    const input = $('#danmu-input')
+    const content = input.value.trim()
+    if (!content) return
+    try {
+      const result = await api('/api/danmu', {
+        method: 'POST',
+        body: JSON.stringify({ episodeId: data.episode.id, timeMs: Math.round((video?.currentTime ?? 0) * 1000), content }),
+      })
+      toast(result.message ?? '已提交')
+      input.value = ''
+    } catch (error) { toast(error.message) }
+  })
+  $('#share-btn')?.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(location.href); toast('播放链接已复制') } catch { toast(location.href) }
+  })
   const danmu = Array.isArray(data.danmu) ? data.danmu : []
   let danmuTimer
 
@@ -565,6 +588,13 @@ async function renderPlay(id, episodeNo) {
           const hls = new Hls({ lowLatencyMode: false })
           hls.loadSource(BASE + data.hls)
           hls.attachMedia(video)
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            const select = $('#quality-select')
+            if (!select) return
+            select.innerHTML = '<option value="-1">自动清晰度</option>'
+              + hls.levels.map((level, index) => `<option value="${index}">${level.height}p</option>`).join('')
+            select.addEventListener('change', () => { hls.currentLevel = Number(select.value) })
+          })
         } else {
           video.src = BASE + data.hls
         }
@@ -596,6 +626,7 @@ async function renderMe() {
   }
   const data = await api('/api/me')
   const orders = (await api('/api/orders')).list ?? []
+  const messages = (await api('/api/me/messages').catch(() => ({ messages: [] }))).messages ?? []
   const sub = data.subscription
   view.innerHTML = `
     <div class="section-head" style="margin-top:26px"><div class="section-title">我的</div>
@@ -615,6 +646,15 @@ async function renderMe() {
         ${orders.length === 0 ? '<div class="me-sub">暂无订单</div>' : orders.slice(0, 6).map((order) => `<div class="me-row"><span>${escapeHtml(order.out_trade_no)}</span><span>¥${Number(order.amount_cny).toFixed(2)} · ${escapeHtml(order.status)}</span></div>`).join('')}
       </div>
     </div>
+    <div class="section-head"><div class="section-title">消息</div><div class="section-hint">权益与订单通知</div></div>
+    <div class="me-grid">
+      ${messages.length === 0 ? '<div class="me-card"><div class="me-sub">暂无消息</div></div>'
+        : messages.slice(0, 4).map((message) => `<div class="me-card">
+            <div class="me-card-title">${message.type === 'order' ? '订单' : '会员'}</div>
+            <div style="font-size:14px">${escapeHtml(message.title)}</div>
+            <div class="me-sub">${escapeHtml(message.body)}</div>
+          </div>`).join('')}
+    </div>
     <div class="section-head"><div class="section-title">观看历史</div></div>
     <div class="grid">${data.history.map((item) => `<a class="card" href="#/play/${item.dramaId}/${item.episode}"><div class="poster"><img src="${escapeHtml(mediaUrl(item.coverUrl))}" alt="" /></div><div class="card-title">${escapeHtml(item.title)}</div><div class="card-sub">看到第 ${item.episode} 集</div></a>`).join('') || '<div class="empty">还没有观看记录</div>'}</div>
     <div class="section-head"><div class="section-title">我的收藏</div></div>
@@ -626,12 +666,29 @@ async function renderMe() {
   vipFloat()
 }
 
+function loginWall() {
+  view.innerHTML = `
+    <div class="empty" style="margin-top:80px">
+      <div style="font-size:18px;margin-bottom:10px">登录后才能浏览和播放</div>
+      <div style="color:#9aa3b2;font-size:13px;margin-bottom:18px">未登录仅可浏览首页；免费集同样需要登录后播放。</div>
+      <button class="btn-primary" id="wall-login">登录 / 注册</button>
+      <a class="btn-ghost" href="#/home" style="margin-left:8px">返回首页</a>
+    </div>`
+  $('#wall-login').addEventListener('click', openLogin)
+}
+
 async function route() {
   renderChrome()
   const hash = location.hash || '#/home'
   const [pathPart, queryPart] = hash.slice(1).split('?')
   const params = new URLSearchParams(queryPart ?? '')
   const segments = pathPart.split('/').filter(Boolean)
+  const isHome = segments.length === 0 || segments[0] === 'home'
+  // 登录门禁：未登录只能看首页（其余路由一律显示登录墙）
+  if (!state.token && !isHome) {
+    loginWall()
+    return
+  }
   try {
     if (segments[0] === 'home' || segments.length === 0) await renderHome()
     else if (segments[0] === 'category') await renderCategory(segments[1] ?? 'ALL')

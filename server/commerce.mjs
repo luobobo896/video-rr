@@ -6,6 +6,7 @@ import { createHash, createSign, createVerify, randomBytes } from 'node:crypto'
 import { db, getSetting } from './db.mjs'
 import { grantPurchase, grantSubscription, revokeByOrder, policyOf } from './entitlements.mjs'
 import { currentKeyVersion, maskConfig, openSecret, sealSecret } from './secretbox.mjs'
+import * as alipay from './payments/alipay.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -161,7 +162,12 @@ export function createOrder({ userId, productType, planId, dramaId, channel, cou
   const created = one('SELECT * FROM orders WHERE id = ?', Number(info.lastInsertRowid))
 
   if (channelCode === 'alipay') {
-    return { order: created, payUrl: buildAlipayPayUrl(created, config) }
+    const configured = Boolean(config.appId && config.privateKey && config.publicKey)
+    return {
+      order: created,
+      payUrl: configured ? buildAlipayPayUrl(created, config) : `/pay/alipay-sim/${created.out_trade_no}`,
+      simulated: !configured,
+    }
   }
   if (channelCode === 'usdt') {
     return {
@@ -245,68 +251,6 @@ export function mockPay(outTradeNo) {
 }
 
 /* --- 支付宝（RSA2；未配置密钥时明确报错） --- */
-function sortedQuery(params) {
-  return Object.keys(params)
-    .filter((key) => params[key] !== undefined && params[key] !== '' && key !== 'sign')
-    .sort()
-    .map((key) => `${key}=${params[key]}`)
-    .join('&')
-}
-
-export function alipaySign(params, privateKeyPem) {
-  const sign = createSign('RSA-SHA256')
-  sign.update(sortedQuery(params), 'utf8')
-  return sign.sign(privateKeyPem, 'base64')
-}
-
-export function alipayVerify(params, publicKeyPem) {
-  const sign = params.sign
-  if (!sign) return false
-  const verify = createVerify('RSA-SHA256')
-  verify.update(sortedQuery(params), 'utf8')
-  return verify.verify(publicKeyPem, sign, 'base64')
-}
-
-export function buildAlipayPayUrl(order, config = channelConfig(resolveByCode('alipay') ?? {})) {
-  if (!config.appId || !config.privateKey) throw new CommerceError('alipay_not_configured', '支付宝渠道未配置 AppID / 商户私钥（后台「支付渠道」里填写）')
-  const params = {
-    app_id: config.appId,
-    method: 'alipay.trade.page.pay',
-    format: 'JSON',
-    charset: 'utf-8',
-    sign_type: 'RSA2',
-    timestamp: new Date().toISOString().slice(0, 19).replace('T', ' '),
-    version: '1.0',
-    notify_url: config.notifyUrl,
-    return_url: config.returnUrl,
-    biz_content: JSON.stringify({
-      out_trade_no: order.out_trade_no,
-      total_amount: order.amount_cny.toFixed(2),
-      subject: '影巢会员/单片',
-      product_code: 'FAST_INSTANT_TRADE_PAY',
-    }),
-  }
-  params.sign = alipaySign(params, config.privateKey)
-  return `${config.gateway ?? 'https://openapi.alipay.com/gateway.do'}?${new URLSearchParams(params).toString()}`
-}
-
-export function handleAlipayNotify(body) {
-  const config = channelConfig(resolveByCode('alipay') ?? {})
-  if (!config.publicKey) throw new CommerceError('alipay_not_configured', '支付宝公钥未配置', 500)
-  if (!alipayVerify(body, config.publicKey)) throw new CommerceError('sign_invalid', '支付宝验签失败', 400)
-  if (!['TRADE_SUCCESS', 'TRADE_FINISHED'].includes(body.trade_status)) {
-    return { ignored: true, tradeStatus: body.trade_status }
-  }
-  return markPaid({
-    outTradeNo: body.out_trade_no,
-    channel: 'alipay',
-    channelTxnId: body.trade_no,
-    amount: Number(body.total_amount),
-    raw: body,
-  })
-}
-
-/* --- USDT（TRC20，链上确认后入账） --- */
 export function handleUsdtNotify({ outTradeNo, txid, amount, confirmations }) {
   const config = channelConfig(resolveByCode('usdt') ?? {})
   const minConf = Number(config.minConfirmations ?? 19)
@@ -441,6 +385,92 @@ export function closeExpiredOrders() {
   return Number(result.changes ?? 0)
 }
 
+/* --- 支付宝（RSA2） --- */
+export function alipayChannel() {
+  const row = resolveByCode('alipay')
+  if (!row) return undefined
+  return { row, config: { ...channelConfig(row), env: row.env } }
+}
+
+function saveChannelConfig(row, config) {
+  run(`UPDATE pay_channels SET config_cipher = ?, config_preview = ?, key_version = ?, updated_at = datetime('now') WHERE id = ?`,
+    sealSecret(config), JSON.stringify(maskConfig(config)), currentKeyVersion(), row.id)
+}
+
+/** 首次使用模拟收银台时，为渠道生成 RSA 密钥对（加密入库），后续强制走真实签名/验签。 */
+export function ensureAlipaySimulator() {
+  const channel = alipayChannel()
+  if (!channel) throw new CommerceError('channel_not_found', '支付宝渠道不存在', 404)
+  const config = alipay.ensureSimulatorKeys(channel.config)
+  if (!channel.config.simPrivateKey) {
+    saveChannelConfig(channel.row, config)
+    return { ...channel, config }
+  }
+  return channel
+}
+
+export function buildAlipayPayUrl(order, config) {
+  try {
+    return alipay.buildPagePayUrl(order, config)
+  } catch (error) {
+    throw new CommerceError(error.code ?? 'alipay_error', error.message)
+  }
+}
+
+export function handleAlipayNotify(body, { simulator = false } = {}) {
+  const channel = alipayChannel()
+  if (!channel) throw new CommerceError('channel_not_found', '支付宝渠道不存在', 404)
+  const verifyKey = simulator ? channel.config.simPublicKey : channel.config.publicKey
+  if (!verifyKey) {
+    throw new CommerceError('alipay_not_configured', simulator ? '模拟收银台未初始化（先发起一笔支付宝订单）' : '支付宝公钥未配置', 500)
+  }
+  const parsed = alipay.parseNotify(body, verifyKey)
+  if (!parsed.ok) throw new CommerceError('sign_invalid', '支付宝验签失败', 400)
+  if (!['TRADE_SUCCESS', 'TRADE_FINISHED'].includes(parsed.tradeStatus)) {
+    return { ignored: true, tradeStatus: parsed.tradeStatus }
+  }
+  return markPaid({
+    outTradeNo: parsed.outTradeNo,
+    channel: 'alipay',
+    channelTxnId: parsed.tradeNo,
+    amount: parsed.totalAmount,
+    raw: parsed.raw,
+  })
+}
+
+/** 查单兜底：订单轮询时主动向支付宝查一次，避免回调丢失导致权益不到账。 */
+export async function syncAlipayOrder(outTradeNo) {
+  const order = one('SELECT * FROM orders WHERE out_trade_no = ?', String(outTradeNo))
+  if (!order || order.channel !== 'alipay') return { synced: false, reason: 'not_alipay' }
+  if (order.status === 'fulfilled' || order.status === 'paid') return { synced: false, reason: 'already_paid', order }
+  const channel = alipayChannel()
+  if (!channel?.config?.appId || !channel?.config?.privateKey) return { synced: false, reason: 'not_configured' }
+  try {
+    const result = await alipay.queryTrade(channel.config, order.out_trade_no)
+    if (['TRADE_SUCCESS', 'TRADE_FINISHED'].includes(result.trade_status)) {
+      const paid = markPaid({
+        outTradeNo: order.out_trade_no,
+        channel: 'alipay',
+        channelTxnId: result.trade_no,
+        amount: Number(result.total_amount),
+        raw: result,
+      })
+      return { synced: true, tradeStatus: result.trade_status, order: paid.order }
+    }
+    return { synced: false, tradeStatus: result.trade_status }
+  } catch (error) {
+    return { synced: false, reason: error.message }
+  }
+}
+
+export function buildSimulatedAlipayNotify(outTradeNo) {
+  const order = one('SELECT * FROM orders WHERE out_trade_no = ?', String(outTradeNo))
+  if (!order) throw new CommerceError('order_not_found', '订单不存在', 404)
+  if (order.channel !== 'alipay') throw new CommerceError('channel_mismatch', '该订单不是支付宝订单', 400)
+  const channel = ensureAlipaySimulator()
+  return { order, params: alipay.buildSimulatedNotify(order, channel.config) }
+}
+
 /* ---------------- 渠道管理（后台） ---------------- */
 
 const CHANNEL_FIELDS = new Set(['channel_code', 'name', 'scene', 'env', 'status', 'priority', 'currency', 'min_amount', 'max_amount', 'remark'])
@@ -535,7 +565,7 @@ export function deleteChannel({ channelId }) {
   return { deleted: true }
 }
 
-/** 测试渠道：校验必填配置是否齐全（不发真实请求，避免误扣款）。 */
+/** 测试渠道：校验必填配置并做一次真实签名/验签自检（不发真实请求，避免误扣款）。 */
 export function testChannel({ channelId }) {
   const channel = one('SELECT * FROM pay_channels WHERE id = ?', Number(channelId))
   if (!channel) throw new CommerceError('channel_not_found', '渠道不存在', 404)
@@ -546,9 +576,25 @@ export function testChannel({ channelId }) {
     usdt: ['walletAddress'],
   }[channel.channel_code] ?? []
   const missing = required.filter((key) => !config[key])
+
+  let signatureCheck
+  if (channel.channel_code === 'alipay') {
+    // 有模拟密钥就用模拟密钥自检，否则用真实密钥自检
+    const keyPair = config.simPrivateKey && config.simPublicKey
+      ? { privateKey: config.simPrivateKey, publicKey: config.simPublicKey, mode: 'simulator' }
+      : { privateKey: config.privateKey, publicKey: config.publicKey, mode: 'real' }
+    if (keyPair.privateKey && keyPair.publicKey) {
+      const sample = { app_id: config.appId ?? 'test', out_trade_no: 'SELFTEST', total_amount: '0.01', timestamp: String(Date.now()) }
+      const signature = alipay.signRSA2(sample, keyPair.privateKey)
+      signatureCheck = { mode: keyPair.mode, ok: alipay.verifyRSA2({ ...sample, sign: signature }, keyPair.publicKey) }
+    }
+  }
+
   return {
     channelId: channel.id, channelCode: channel.channel_code,
-    ok: missing.length === 0, missing,
+    ok: missing.length === 0 && (signatureCheck?.ok ?? true),
+    missing,
+    signatureCheck,
     keyVersion: channel.key_version, env: channel.env,
     checkedAt: nowSql(),
   }
