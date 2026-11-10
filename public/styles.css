@@ -292,6 +292,49 @@ button { font-family: inherit; cursor: pointer; }
 .player-tools input { flex: 1; }
 .player-tools select { width: 130px; }
 
+/* 播放失败浮层：签名过期/分片 404 时给"点击重试"，而不是让用户对着黑屏 */
+.player-fail { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(8,9,12,.86); z-index: 3; }
+.player-fail.hidden { display: none; }
+
+/* 封面加载失败：给带剧名首字的占位底图，否则 onerror 后只剩一块黑 */
+.card .noimg, .detail-cover .noimg { background: linear-gradient(135deg, #2a1a22, #1a1d26) !important; }
+
+/* 付费墙选中态：不标出来的话用户不知道自己点的是哪一档 */
+.plan-item.active { border-color: #ff4d6d; background: rgba(255, 77, 109, .14); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* ---------- 移动端（短剧主战场，此前全站只有 1400/1100 两条断点） ---------- */
+@media (max-width: 900px) {
+  #app { flex-direction: column; }
+  .sidebar {
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+    width: auto; flex: none; height: auto; z-index: 60;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    border-right: 0; border-top: 1px solid var(--line);
+    display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden;
+  }
+  .sidebar .nav-group { padding: 0; margin: 0; display: flex; gap: 6px; align-items: center; }
+  .sidebar .nav-group:nth-child(n+2) { display: none; }
+  .sidebar .nav-title { display: none; }
+  .sidebar .nav-item { white-space: nowrap; padding: 8px 12px; font-size: 13px; }
+  .sidebar .nav-item.active::before { display: none; }
+  .main, .topbar, .search, #view { min-width: 0; }
+  .top-actions .top-action { display: none; }
+  .grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+  .hero-img { height: auto; aspect-ratio: 16 / 9; }
+  .detail-head { flex-direction: column; }
+  .detail-cover { width: 132px; flex: 0 0 132px; }
+  .vip-float { display: none; }
+  /* 提示文案不能和工具条叠在一起：工具条在 bottom:12px，提示抬到它上面 */
+  .player .notice { bottom: 64px; }
+  .player-tools { flex-wrap: wrap; }
+  .player-tools select { width: 110px; }
+  body { padding-bottom: calc(56px + env(safe-area-inset-bottom)); }
+}
+
 /* 个人中心 */
 .me-profile { display: flex; gap: 16px; align-items: flex-start; }
 .avatar { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; border: 2px solid rgba(255,255,255,.12); }

@@ -2,17 +2,29 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>影巢 · 高清影视在线观看</title>
+  <meta name="description" content="影巢 · 短剧 / 电影 / 剧集在线观看，会员畅看全站。" />
+  <meta name="theme-color" content="#0a0a0d" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="影巢 · 高清影视在线观看" />
+  <meta property="og:description" content="短剧 / 电影 / 剧集在线观看，会员畅看全站。" />
+  <meta property="og:image" content="./media/placeholder.svg" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="./styles.css" />
   <link rel="stylesheet" href="./tokens.css" />
+  <style>
+    /* 首屏骨架：app.js 是 module，弱网下在常量请求回来前页面会是纯黑，先给个占位 */
+    #boot { display: grid; place-items: center; min-height: 100vh; color: #6b7280; font-size: 14px; letter-spacing: 1px; }
+  </style>
 </head>
 <body>
   <div id="app">
     <aside class="sidebar" id="sidebar"></aside>
     <div class="main">
       <header class="topbar" id="topbar"></header>
-      <main id="view" class="view"></main>
+      <main id="view" class="view"><div id="boot">影巢 · 正在加载</div></main>
     </div>
     <div id="modal" class="modal hidden"></div>
     <div id="toast" class="toast hidden"></div>

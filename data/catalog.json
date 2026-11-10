@@ -1,0 +1,166 @@
+{
+  "generatedAt": "2026-11-10",
+  "segmentSeconds": 90,
+  "note": "全部片源为公开授权的开放电影（Creative Commons），来源与署名见各条 credit 字段；导入脚本见 scripts/import-catalog.mjs。",
+  "sections": [
+    { "title": "开放电影精选", "slugs": ["sintel", "tos", "ed"] },
+    { "title": "动画短片", "slugs": ["bbb", "caminandes", "coffee"] },
+    { "title": "脑洞科幻", "slugs": ["cosmos", "tos", "ed"] },
+    { "title": "一次看完", "slugs": ["cosmos", "sintel", "bbb", "caminandes"] }
+  ],
+  "ranks": [
+    { "name": "热播榜", "type": "HOT", "slugs": ["sintel", "tos", "bbb", "cosmos", "caminandes", "ed", "coffee"] },
+    { "name": "热搜榜", "type": "SEARCH", "slugs": ["bbb", "tos", "sintel", "ed", "coffee", "cosmos", "caminandes"] },
+    { "name": "飙升榜", "type": "RISE", "slugs": ["coffee", "caminandes", "cosmos", "bbb", "tos", "sintel", "ed"] },
+    { "name": "经典榜", "type": "CLASSIC", "slugs": ["ed", "bbb", "tos", "sintel", "cosmos", "caminandes", "coffee"] }
+  ],
+  "dramas": [
+    {
+      "slug": "sintel",
+      "title": "辛特尔",
+      "subTitle": "Sintel · 2010",
+      "description": "少女辛特尔在荒原上救下一只受伤的幼龙，取名“斯卡尔斯”。三年后幼龙被掠走，她独自穿越雪原与荒漠去找它。全片无对白，靠画面与配乐推进，结局克制而锋利。",
+      "year": 2010,
+      "area": "荷兰",
+      "category": "TV",
+      "score": 9.1,
+      "tags": ["动画", "奇幻", "冒险", "友情", "无对白", "开源电影", "治愈", "虐心"],
+      "access": { "mode": "subscription", "freeEpisodes": 2, "trialSeconds": 0, "singlePrice": 0 },
+      "episodeCount": 10,
+      "banner": true,
+      "source": {
+        "url": "https://archive.org/download/Sintel/sintel-2048-stereo_512kb.mp4",
+        "bytes": 77410288,
+        "duration": 888,
+        "license": "CC BY 3.0",
+        "credit": "Blender Foundation · Durian Open Movie Project"
+      }
+    },
+    {
+      "slug": "tos",
+      "title": "钢铁之泪",
+      "subTitle": "Tears of Steel · 2012",
+      "description": "未来的阿姆斯特丹，人类用记忆做实验，把城市的废墟和一台旧机器人连在一起。真人演出叠加 CG 特效，是当年公开验证影视特效流程的作品，也是最早一批全流程开源的实拍科幻短片。",
+      "year": 2012,
+      "area": "荷兰",
+      "category": "MOVIE",
+      "score": 8.7,
+      "tags": ["科幻", "真人特效", "末世", "机器人", "开源电影", "视觉特效", "反转"],
+      "access": { "mode": "paid", "freeEpisodes": 0, "trialSeconds": 300, "singlePrice": 6 },
+      "episodeCount": 1,
+      "banner": true,
+      "source": {
+        "url": "https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov",
+        "bytes": 0,
+        "duration": 734,
+        "license": "CC BY 3.0",
+        "credit": "Blender Foundation · Mango Open Movie Project"
+      }
+    },
+    {
+      "slug": "ed",
+      "title": "大象之梦",
+      "subTitle": "Elephants Dream · 2006",
+      "description": "两个男人在一座不断自我重组的机械世界里穿行，一个相信奇迹，一个只相信规则。世界上第一部完全用开源软件制作的动画电影，如今看依然古怪、迷人。",
+      "year": 2006,
+      "area": "荷兰",
+      "category": "MOVIE",
+      "score": 8.3,
+      "tags": ["动画", "科幻", "抽象", "哲思", "开源电影", "二人转", "实验"],
+      "access": { "mode": "paid", "freeEpisodes": 0, "trialSeconds": 240, "singlePrice": 6 },
+      "episodeCount": 1,
+      "banner": false,
+      "source": {
+        "url": "https://archive.org/download/ElephantsDream/ed_hd.mp4",
+        "bytes": 67801890,
+        "duration": 654,
+        "license": "CC BY 2.5",
+        "credit": "Blender Foundation · Orange Open Movie Project"
+      }
+    },
+    {
+      "slug": "bbb",
+      "title": "大雄兔",
+      "subTitle": "Big Buck Bunny · 2008",
+      "description": "森林里的大块头兔子被三只小动物欺负，于是设计了一连串机关反杀。明亮、笨拙、非常好笑，是很多人第一次看到的开源动画。",
+      "year": 2008,
+      "area": "荷兰",
+      "category": "TV",
+      "score": 8.9,
+      "tags": ["动画", "喜剧", "搞怪", "动物主角", "合家欢", "开源电影", "轻松", "反杀"],
+      "access": { "mode": "subscription", "freeEpisodes": 3, "trialSeconds": 0, "singlePrice": 0 },
+      "episodeCount": 7,
+      "banner": false,
+      "source": {
+        "url": "https://archive.org/download/BigBuckBunny_124/Content/big_buck_bunny_720p_surround.mp4",
+        "bytes": 61878609,
+        "duration": 596,
+        "license": "CC BY 3.0",
+        "credit": "Blender Foundation · Peach Open Movie Project"
+      }
+    },
+    {
+      "slug": "cosmos",
+      "title": "宇宙洗衣房",
+      "subTitle": "Cosmos Laundromat · 2015",
+      "description": "一座只有一只羊的小岛上，推销员递给它一台能换掉整段人生的机器。第一次按下之后，它开始后悔。全片是一部长片的序章，荒诞、彩色、又有点丧。",
+      "year": 2015,
+      "area": "荷兰",
+      "category": "PLAYLET",
+      "score": 8.5,
+      "tags": ["动画", "荒诞", "哲思", "时空", "羊", "开源电影", "孤独", "短片"],
+      "access": { "mode": "subscription", "freeEpisodes": 2, "trialSeconds": 0, "singlePrice": 0 },
+      "episodeCount": 8,
+      "banner": true,
+      "source": {
+        "url": "https://archive.org/download/cosmos-laundromat/Cosmos%20Laundromat.mp4",
+        "bytes": 47770492,
+        "duration": 730,
+        "license": "CC BY 4.0",
+        "credit": "Blender Foundation · Gooseberry Open Movie Project"
+      }
+    },
+    {
+      "slug": "caminandes",
+      "title": "羊驼历险记",
+      "subTitle": "Caminandes: Llamigos · 2016",
+      "description": "巴塔哥尼亚的羊驼科罗想要一颗红果子，为此和一只啄木鸟打了三个回合。没有一句台词，两分半钟，看完想笑。",
+      "year": 2016,
+      "area": "荷兰",
+      "category": "PLAYLET",
+      "score": 8.6,
+      "tags": ["动画", "喜剧", "动物主角", "合家欢", "无对白", "开源电影", "轻松", "短片"],
+      "access": { "mode": "free", "freeEpisodes": 0, "trialSeconds": 0, "singlePrice": 0 },
+      "episodeCount": 2,
+      "banner": false,
+      "source": {
+        "url": "https://archive.org/download/CaminandesLlamigos/Caminandes_%20Llamigos-1080p.mp4",
+        "bytes": 138945811,
+        "duration": 150,
+        "license": "CC BY 4.0",
+        "credit": "Blender Animation Studio · Caminandes"
+      }
+    },
+    {
+      "slug": "coffee",
+      "title": "咖啡跑",
+      "subTitle": "Coffee Run · 2020",
+      "description": "一杯咖啡引发的城市追击。女孩喝完最后一口，整条街开始追她。四分钟，全部镜头都在跑。",
+      "year": 2020,
+      "area": "荷兰",
+      "category": "PLAYLET",
+      "score": 8.4,
+      "tags": ["动画", "动作", "追逃", "都市", "开源电影", "无对白", "紧张", "短片"],
+      "access": { "mode": "paid", "freeEpisodes": 1, "trialSeconds": 0, "singlePrice": 3 },
+      "episodeCount": 3,
+      "banner": false,
+      "source": {
+        "url": "https://archive.org/download/coffee-run/Coffee%20Run.ia.mp4",
+        "bytes": 17475695,
+        "duration": 240,
+        "license": "CC BY 4.0",
+        "credit": "Blender Animation Studio · Coffee Run"
+      }
+    }
+  ]
+}

@@ -16,7 +16,8 @@ const DB_PATH = process.env.MH_DB ?? join(ROOT, 'storage', 'app.db')
 
 mkdirSync(dirname(DB_PATH), { recursive: true })
 export const db = new DatabaseSync(DB_PATH)
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
+// busy_timeout：导入/转码批处理进程与线上服务并发写同一库时，让 SQLite 自己排队而不是直接抛 SQLITE_BUSY
+db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;')
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
@@ -380,6 +381,8 @@ CREATE TABLE IF NOT EXISTS drama_tags (
   tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
   PRIMARY KEY (drama_id, tag_id)
 );
+-- 按标签反查剧集：复合主键最左是 drama_id，按 tag_id 聚合用不上，单独建索引
+CREATE INDEX IF NOT EXISTS idx_drama_tags_tag ON drama_tags(tag_id);
 
 -- ===== 安全事件（限流/反爬拦截留痕）=====
 CREATE TABLE IF NOT EXISTS security_events (

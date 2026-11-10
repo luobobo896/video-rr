@@ -3,6 +3,37 @@
  * 支持密钥版本，便于轮换：MH_CONFIG_KEYS="1:<base64>,2:<base64>"，MH_CONFIG_KEY_VERSION 指定当前版本。
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const KEY_FILE = join(process.env.MH_CONFIG_KEY_FILE ?? join(ROOT, 'storage', 'config.key'))
+
+/**
+ * 兜底主密钥落盘：优先 MH_CONFIG_KEYS；否则读 storage/config.key；没有就生成一份 32 字节随机密钥并 0600 落盘。
+ * 这样即使 MH_SECRET 轮换，已加密的支付/邮件/收款配置也不会变成无法解密的一堆废数据。
+ */
+function fallbackKey() {
+  try {
+    if (existsSync(KEY_FILE)) {
+      const raw = readFileSync(KEY_FILE, 'utf8').trim()
+      const key = Buffer.from(raw, 'base64')
+      if (key.length === 32) return key
+    }
+  } catch { /* 读不到就重新生成 */ }
+  const key = randomBytes(32)
+  try {
+    mkdirSync(dirname(KEY_FILE), { recursive: true })
+    writeFileSync(KEY_FILE, key.toString('base64'), { mode: 0o600 })
+    chmodSync(KEY_FILE, 0o600)
+    console.warn(`[secretbox] 已生成配置加密密钥：${KEY_FILE}（请随备份一起保管，丢失将无法解密已保存的渠道密钥）`)
+  } catch (error) {
+    console.warn(`[secretbox] 无法写入密钥文件（${error.message}），回退到由 MH_SECRET 派生；轮换 MH_SECRET 会让已加密配置失效`)
+    return createHash('sha256').update(process.env.MH_SECRET ?? 'dev-secret').digest()
+  }
+  return key
+}
 
 const parseKeys = () => {
   const map = new Map()
@@ -11,11 +42,7 @@ const parseKeys = () => {
     const [version, key] = item.split(':')
     if (version && key) map.set(Number(version), Buffer.from(key, 'base64'))
   }
-  if (map.size === 0) {
-    // 兜底：由 MH_SECRET 派生（仅开发环境；生产必须显式配置 MH_CONFIG_KEYS）
-    const fallback = createHash('sha256').update(process.env.MH_SECRET ?? 'dev-secret').digest()
-    map.set(1, fallback)
-  }
+  if (map.size === 0) map.set(1, fallbackKey())
   return map
 }
 

@@ -42,6 +42,16 @@ const state = {
 }
 // 未登录点「免费看第 1 集」时记下目标，登录成功后直接跳过去，不让用户再点一次
 let pendingRoute = ''
+// 登录前发起、需要在登录成功后重放的动作（目前只有"打开付费墙购买"）
+let pendingAction
+// 当前页面注册的清理函数（定时器、hls 实例、进度与埋点上报），路由切换前统一执行
+let routeCleanups = []
+
+function cleanupRoute() {
+  const list = routeCleanups
+  routeCleanups = []
+  for (const fn of list) { try { fn() } catch { /* 单个清理失败不影响其它 */ } }
+}
 
 /** 行为埋点：beacon 优先（不阻塞导航），失败静默——埋点永远不能影响用户体验 */
 function track(type, data = {}) {
@@ -61,10 +71,26 @@ async function api(path, options = {}) {
   const headers = { ...(options.headers ?? {}) }
   if (state.token) headers.authorization = `Bearer ${state.token}`
   if (options.body !== undefined) headers['content-type'] = 'application/json'
-  const res = await fetch(BASE + path, { ...options, headers })
-  const json = await res.json()
+  let res
+  try {
+    res = await fetch(BASE + path, { ...options, headers })
+  } catch {
+    throw Object.assign(new Error('网络异常，请检查网络后重试'), { code: 'network' })
+  }
+  let json
+  try {
+    json = await res.json()
+  } catch {
+    // nginx 502/504 会返回 HTML，直接 res.json() 会抛英文 SyntaxError 给用户看
+    throw Object.assign(new Error(`服务暂时不可用（${res.status}），请稍后重试`), { code: 'bad_response', status: res.status })
+  }
   if (json.code === '0401') {
-    const error = new Error(json.msg || '需要登录')
+    // 会话过期：清掉本地凭证，避免每次请求都撞 0401 却仍显示"已登录"
+    state.token = ''
+    state.user = undefined
+    localStorage.removeItem('mh-token')
+    localStorage.removeItem('mh-user')
+    const error = new Error(json.msg || '登录已过期，请重新登录')
     error.code = '0401'
     throw error
   }
@@ -89,6 +115,15 @@ function applySession(data, message) {
     pendingRoute = ''
     location.hash = next
     return
+  }
+  if (pendingAction) {
+    // 登录前发起的动作（如"点购买"）在登录后无缝续上，不要求用户重选
+    const action = pendingAction
+    pendingAction = undefined
+    if (action.type === 'paywall') {
+      route().then(() => openPaywall(action.detail, action.options))
+      return
+    }
   }
   return route()
 }
@@ -267,11 +302,12 @@ async function createOrder(payload) {
   return api('/api/orders', { method: 'POST', body: JSON.stringify(payload) })
 }
 
-async function waitOrderPaid(outTradeNo, onTick) {
+async function waitOrderPaid(outTradeNo, onTick, shouldStop) {
   // 订单有效期 15 分钟；2s 起轮询、逐步退避到 15s，避免把限流打满
   const deadline = Date.now() + 15 * 60 * 1000
   let delay = 2000
   while (Date.now() < deadline) {
+    if (shouldStop?.()) return { status: 'aborted' }
     try {
       const data = await api(`/api/orders/${outTradeNo}`)
       onTick?.(data)
@@ -285,27 +321,44 @@ async function waitOrderPaid(outTradeNo, onTick) {
 }
 
 function openPaywall(detail, options = {}) {
-  track('paywall_view', { dramaId: detail?.id ?? options.dramaId ?? null, meta: { reason: options.reason ?? '' } })
+  const dramaId = detail?.dramaId ?? options.dramaId ?? null
+  track('paywall_view', { dramaId, meta: { reason: options.reason ?? '' } })
   const modal = $('#modal')
   const plans = options.plans ?? detail?.priceInfo?.plans ?? []
   const singlePrice = Number(options.price ?? detail?.singlePrice ?? 0)
   const canSingle = (options.reason === 'single_purchase_required') || detail?.accessMode === 'paid'
+  const token = `paywall-${Date.now()}`
+  const stillMine = () => modal.dataset.paywall === token && !modal.classList.contains('hidden')
+  const earn = (text) => { if (stillMine()) $('#paywall-msg').textContent = text }
+  const earnHtml = (html) => { if (stillMine()) $('#paywall-msg').innerHTML = html }
+
+  if (!plans.length && !canSingle) {
+    openModal('暂无可购套餐', `<p class="paywall-sub">当前没有在售的会员套餐，请联系客服开通。</p>
+      <p class="paywall-sub">客服邮箱：${escapeHtml(state.constants?.supportEmail || '—')}</p>`)
+    return
+  }
+
+  let selected = plans.length
+    ? { productType: 'subscription', planId: Number(plans[0].id) }
+    : { productType: 'single', dramaId }
+
+  modal.dataset.paywall = token
   modal.classList.remove('hidden')
   modal.innerHTML = `
     <div class="modal-card paywall">
       <h3>${escapeHtml(options.title ?? (canSingle ? '该片需单独购买' : '开通会员后可观看'))}</h3>
       <p class="paywall-sub">${canSingle ? '本片为单独付费内容，会员也可观看全部剧集' : '会员可看全站剧集（不含单独付费影片）'}</p>
       <div class="plan-list">
-        ${plans.map((plan) => `<button class="plan-item" data-plan="${plan.id}">
+        ${plans.map((plan) => `<button class="plan-item${selected.planId === Number(plan.id) ? ' active' : ''}" data-plan="${plan.id}">
           <span class="plan-name">${escapeHtml(plan.name)}</span>
-          <span class="plan-price">¥${Number(plan.price).toFixed(0)}</span>
+          <span class="plan-price">¥${Number(plan.price).toFixed(2)}</span>
           <span class="plan-days">${plan.days} 天</span>
         </button>`).join('')}
+        ${canSingle ? `<button class="plan-item single${plans.length ? '' : ' active'}" data-single="1">
+          <span class="plan-name">购买本片（${detail?.purchaseKind === 'rental' ? '限时租赁' : '永久解锁'}）</span>
+          <span class="plan-price">¥${singlePrice.toFixed(2)}</span>
+        </button>` : ''}
       </div>
-      ${canSingle ? `<button class="plan-item single" data-single="1">
-        <span class="plan-name">购买本片（${detail?.purchaseKind === 'rental' ? '限时租赁' : '永久解锁'}）</span>
-        <span class="plan-price">¥${singlePrice.toFixed(0)}</span>
-      </button>` : ''}
       <div class="paywall-coupon">
         <input id="coupon-input" placeholder="优惠券码（可选，如 WELCOME10）" />
         <button class="btn-ghost" id="coupon-apply">校验</button>
@@ -316,18 +369,26 @@ function openPaywall(detail, options = {}) {
         <button class="btn-ghost" id="paywall-close">稍后再说</button>
       </div>
     </div>`
-  const close = () => modal.classList.add('hidden')
+  // 只隐藏自己这一层：modal 是共享容器，用户可能已经把它切换成别的表单
+  const close = () => {
+    modal.classList.add('hidden')
+    if (modal.dataset.paywall === token) delete modal.dataset.paywall
+  }
   $('#paywall-close').addEventListener('click', close)
-  modal.addEventListener('click', (event) => { if (event.target === modal) close() }, { once: true })
+  modal.addEventListener('click', (event) => { if (event.target === modal) close() })
 
   let couponCode = ''
   $('#coupon-apply').addEventListener('click', async () => {
     const code = $('#coupon-input').value.trim()
     if (!code) return
-    const base = singlePrice || plans[0]?.price || 0
-    const result = await api('/api/coupons/validate', { method: 'POST', body: JSON.stringify({ code, amount: base }) })
-    $('#paywall-msg').textContent = result.ok ? `优惠券可用，立减 ¥${result.discount.toFixed(2)}` : (result.message ?? '不可用')
-    if (result.ok) couponCode = code
+    const base = selected.productType === 'single' ? singlePrice : (plans.find((p) => Number(p.id) === selected.planId)?.price ?? plans[0]?.price ?? 0)
+    try {
+      const result = await api('/api/coupons/validate', { method: 'POST', body: JSON.stringify({ code, amount: base }) })
+      earn(result.ok ? `优惠券可用，立减 ¥${Number(result.discount).toFixed(2)}` : (result.message ?? '不可用'))
+      if (result.ok) couponCode = code
+    } catch (error) {
+      earn(error.message)
+    }
   })
 
   const channels = channelList()
@@ -335,56 +396,67 @@ function openPaywall(detail, options = {}) {
     ? channels.map((channel) => `<button class="channel" data-channel="${escapeHtml(channel.code)}">${escapeHtml(channel.label)}</button>`).join('')
     : `<div class="paywall-sub" style="color:#ff8a8a">${escapeHtml(unavailableChannelReason() || '当前暂无可用支付渠道，请联系客服开通')}</div>`
 
-  const go = async (channel, payload) => {
-    track('paywall_click', { dramaId: detail?.id ?? null, meta: { channel, product: payload?.productType ?? '' } })
-    if (!state.token) { close(); openLogin(); return }
-    if (!channel) { $('#paywall-msg').textContent = '暂无可用支付渠道'; return }
-    $('#paywall-msg').textContent = '正在创建订单…'
+  const go = async (channel) => {
+    const payload = selected
+    track('paywall_click', { dramaId, meta: { channel, product: payload.productType, planId: payload.planId ?? null } })
+    if (!state.token) {
+      // 记住购买意图，登录后自动回到付费墙（否则用户要重选套餐，转化二次流失）
+      pendingAction = { type: 'paywall', detail, options, selected: { ...payload } }
+      close()
+      openLogin()
+      return
+    }
+    if (!channel) { earn('暂无可用支付渠道'); return }
+    earn('正在创建订单…')
     // 弹窗必须在 await 之前打开，否则 iOS Safari / 微信内会被拦截
     const popup = channel === 'usdt' ? null : window.open('', '_blank', 'width=520,height=680')
     try {
       const order = await createOrder({ ...payload, channel, couponCode })
-      $('#paywall-msg').textContent = `订单 ${order.outTradeNo} 已创建，金额 ¥${order.amount.toFixed(2)}`
+      earn(`订单 ${order.outTradeNo} 已创建，金额 ¥${Number(order.amount).toFixed(2)}`)
       if (order.payUrl) {
         const target = order.payUrl.startsWith('http') ? order.payUrl : BASE + order.payUrl
         if (popup) popup.location.href = target
         else window.open(target, '_blank', 'width=520,height=680')
       }
-      if (order.simulated) $('#paywall-msg').textContent = '已打开支付宝（沙箱）收银台，付款后自动到账'
+      if (order.simulated) earn('已打开模拟收银台，付款后自动到账')
       if (order.usdt) {
-        $('#paywall-msg').innerHTML = `请向 <b>${escapeHtml(order.usdt.address)}</b> 转入 <b>${order.usdt.amount} USDT</b>（${order.usdt.network}），15 分钟内有效`
+        earnHtml(`请向 <b>${escapeHtml(order.usdt.address)}</b> 转入 <b>${order.usdt.amount} USDT</b>（${order.usdt.network}），15 分钟内有效`)
       }
       const done = await waitOrderPaid(order.outTradeNo, (tick) => {
-        $('#paywall-msg').textContent = `等待支付… ${ORDER_STATUS[tick.status] ?? tick.status}（到账后自动更新，无需刷新）`
-      })
+        earn(`等待支付… ${ORDER_STATUS[tick.status] ?? tick.status}（到账后自动更新，无需刷新）`)
+      }, () => !stillMine())
       if (done && (done.status === 'fulfilled' || done.status === 'paid')) {
         toast('支付成功，权益已到账')
         close()
-        renderChrome()
         route()
+      } else if (done && done.status === 'aborted') {
+        if (popup && !popup.closed) popup.close()
       } else if (done && (done.status === 'closed' || done.status === 'refunded')) {
-        $('#paywall-msg').textContent = `订单${ORDER_STATUS[done.status]}，可在「我的」页继续支付或重新下单`
-      } else {
-        $('#paywall-msg').textContent = '仍在等待到账（USDT 需 19 个区块确认，通常 1–3 分钟）。可关闭此窗，到账后自动开通，也可在「我的」页继续支付'
+        earn(`订单${ORDER_STATUS[done.status]}，可在「我的」页继续支付或重新下单`)
+      } else if (done) {
+        earn('仍在等待到账（USDT 需 19 个区块确认，通常 1–3 分钟）。可关闭此窗，到账后自动开通，也可在「我的」页继续支付')
       }
     } catch (error) {
-      if (popup) popup.close()
-      $('#paywall-msg').textContent = error.message
+      if (popup && !popup.closed) popup.close()
+      earn(error.message)
     }
   }
 
+  const markSelected = (next) => {
+    selected = next
+    modal.querySelectorAll('.plan-item').forEach((node) => {
+      const isPlan = next.productType === 'subscription' && Number(node.dataset.plan) === next.planId
+      const isSingle = next.productType === 'single' && node.dataset.single === '1'
+      node.classList.toggle('active', isPlan || isSingle)
+    })
+  }
   modal.querySelectorAll('[data-plan]').forEach((button) => {
-    button.addEventListener('click', () => go(defaultChannel(), { productType: 'subscription', planId: Number(button.dataset.plan) }))
+    button.addEventListener('click', () => markSelected({ productType: 'subscription', planId: Number(button.dataset.plan) }))
   })
   const singleButton = modal.querySelector('[data-single]')
-  if (singleButton) singleButton.addEventListener('click', () => go(defaultChannel(), { productType: 'single', dramaId: detail?.dramaId }))
+  if (singleButton) singleButton.addEventListener('click', () => markSelected({ productType: 'single', dramaId }))
   modal.querySelectorAll('[data-channel]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const payload = canSingle
-        ? { productType: 'single', dramaId: detail?.dramaId }
-        : { productType: 'subscription', planId: plans[0]?.id }
-      go(button.dataset.channel, payload)
-    })
+    button.addEventListener('click', () => go(button.dataset.channel))
   })
 }
 
@@ -421,6 +493,23 @@ function posterCard(item, options = {}) {
 
 function renderChrome() {
   const hash = location.hash || '#/home'
+  const authKey = state.token ? String(state.user?.id ?? 'user') : 'anon'
+  const topbarNode = $('#search-form')
+  if (topbarNode && renderChrome.authKey === authKey) {
+    // 只更新高亮与按钮文案：整块重建 topbar 会清掉用户正在输入的搜索词
+    const loginBtn = $('#login-btn')
+    if (loginBtn) loginBtn.textContent = state.user ? (state.user.nickname ?? '我的账号') : '登录'
+    sidebar.querySelectorAll('.nav-item').forEach((node) => {
+      const target = (node.getAttribute('href') ?? '').split('?')[0]
+      node.classList.toggle('active', Boolean(target) && hash.startsWith(target))
+    })
+    sidebar.querySelectorAll('.nav-group').forEach((group) => {
+      if (group.querySelector('.nav-title')?.textContent !== '榜单') return
+      group.querySelectorAll('.nav-item').forEach((node) => node.classList.toggle('active', hash.includes('rank')))
+    })
+    return
+  }
+  renderChrome.authKey = authKey
   sidebar.innerHTML = `
     <div class="nav-group">
       <div class="nav-title">频道</div>
@@ -490,22 +579,36 @@ function vipFloat() {
 
 async function renderHome() {
   const data = await api('/api/home')
-  const banner = data.banners[0]
+  const banners = data.banners ?? []
+  const banner = banners[0]
+  const sections = data.sections ?? []
+  const hasHero = Boolean(banner?.name || banner?.image)
+
+  if (!hasHero && sections.length === 0) {
+    view.innerHTML = `
+      <div class="empty" style="padding-top:120px">
+        <div style="font-size:18px;color:var(--text);margin-bottom:10px">内容正在上架</div>
+        <div>新片正在转码入库，稍后刷新即可观看。</div>
+        <div style="margin-top:10px">急用请联系：${escapeHtml(state.constants.supportEmail || '客服邮箱待配置')}</div>
+      </div>`
+    return
+  }
+
   view.innerHTML = `
-    <section class="hero">
-      <img class="hero-img" src="${escapeHtml(mediaUrl(banner?.image ?? ''))}" alt="" />
+    ${hasHero ? `<section class="hero">
+      ${banner?.image ? `<img class="hero-img" src="${escapeHtml(mediaUrl(banner.image))}" alt="${escapeHtml(banner.name ?? '')}" />` : ''}
       <div class="hero-mask"></div>
       <div class="hero-body">
         <span class="hero-tag">独家 · 正在热播</span>
-        <h1 class="hero-title">${escapeHtml(banner?.name ?? '独一无二的浪漫')}</h1>
+        <h1 class="hero-title">${escapeHtml(banner?.name ?? '')}</h1>
         <div class="hero-sub">${escapeHtml(banner?.title ?? '')}</div>
         <div class="hero-actions">
-          <button class="btn-primary" id="hero-play">▶ 立即播放</button>
+          <button class="btn-primary" id="hero-play">▶ 查看详情</button>
           <button class="btn-ghost" id="hero-fav">＋ 收藏</button>
         </div>
       </div>
-    </section>
-    ${data.sections.map((section, index) => `
+    </section>` : ''}
+    ${sections.map((section, index) => `
       <section class="section" data-section="${section.id}">
         <div class="section-head">
           <div class="section-title">${escapeHtml(section.title)}${index === 0 ? '<span class="star">★</span>' : ''}</div>
@@ -513,18 +616,20 @@ async function renderHome() {
           <button class="section-refresh" data-refresh="${section.id}">换一换 ⟳</button>
         </div>
         <div class="grid" data-grid="${section.id}">
-          ${section.items.map((item) => posterCard(item)).join('')}
+          ${(section.items ?? []).map((item) => posterCard(item)).join('')}
         </div>
       </section>`).join('')}
-    <div class="footer"><span>© 2026 影巢</span><span>客服邮箱：${escapeHtml(state.constants.supportEmail ?? 'support@example.com')}</span></div>`
+    <div class="footer"><span>© 2026 影巢</span><span>客服邮箱：${escapeHtml(state.constants.supportEmail ?? '')}</span></div>`
 
-  const heroId = banner?.targetDramaId ?? data.sections?.[0]?.items?.[0]?.dramaId ?? null
-  $('#hero-play').addEventListener('click', () => {
+  document.title = '影巢 · 高清影视在线观看'
+  const heroId = banner?.targetDramaId ?? sections?.[0]?.items?.[0]?.dramaId ?? null
+  $('#hero-play')?.addEventListener('click', () => {
     if (!heroId) return toast('暂无可播放内容')
-    location.hash = `#/play/${heroId}/1`
+    // 详情页会自己挑"首个可播/免费集"，比写死第 1 集更不容易撞付费墙
+    location.hash = `#/drama/${heroId}`
   })
-  $('#hero-fav').addEventListener('click', async (event) => {
-    if (!state.token) return openLogin()
+  $('#hero-fav')?.addEventListener('click', async (event) => {
+    if (!state.token) { pendingRoute = `#/drama/${heroId}`; return openLogin() }
     if (!heroId) return toast('暂无可收藏内容')
     const button = event.currentTarget
     try {
@@ -549,23 +654,48 @@ async function renderHome() {
 }
 
 async function renderCategory(type) {
-  const data = await api(`/api/category?type=${encodeURIComponent(type)}`)
-  const label = { MOVIE: '电影', TV: '美剧', PLAYLET: '短剧', COMIC: '动漫', VARIETY: '综艺', DOCUMENTARY: '纪录片' }[type] ?? type
-  const list = data.list ?? []
+  const pageSize = 24
+  let page = 1
+  const first = await api(`/api/category?type=${encodeURIComponent(type)}&page=1&pageSize=${pageSize}`)
+  const label = { MOVIE: '电影', TV: '电视剧', PLAYLET: '短剧', VARIETY: '综艺' }[type] ?? type
+  document.title = `${label} · 影巢`
+  const list = first.list ?? []
+  const total = Number(first.total ?? list.length)
   view.innerHTML = `
     <div class="section-head" style="margin-top:26px">
       <div class="section-title">${escapeHtml(label)}</div>
-      <div class="section-hint">共 ${data.total ?? list.length} 部 · 按更新时间</div>
+      <div class="section-hint">共 ${total} 部 · 按更新时间</div>
     </div>
     ${list.length === 0
       ? '<div class="empty">该分类暂无内容</div>'
-      : `<div class="grid">${list.map((item) => posterCard(item)).join('')}</div>`}`
+      : `<div class="grid" id="cat-grid">${list.map((item) => posterCard(item)).join('')}</div>
+         ${total > list.length ? '<div style="text-align:center;margin:24px 0"><button class="btn-ghost" id="cat-more">加载更多</button></div>' : ''}`}`
+  const more = $('#cat-more')
+  if (more) {
+    more.addEventListener('click', async () => {
+      more.disabled = true
+      more.textContent = '加载中…'
+      try {
+        page += 1
+        const next = await api(`/api/category?type=${encodeURIComponent(type)}&page=${page}&pageSize=${pageSize}`)
+        const grid = $('#cat-grid')
+        grid.insertAdjacentHTML('beforeend', (next.list ?? []).map((item) => posterCard(item)).join(''))
+        const shown = grid.querySelectorAll('.card').length
+        if (shown >= total || (next.list ?? []).length === 0) { more.parentNode.remove() } else { more.disabled = false; more.textContent = '加载更多' }
+      } catch (error) {
+        more.disabled = false
+        more.textContent = '加载更多'
+        toast(error.message)
+      }
+    })
+  }
   vipFloat()
 }
 
 async function renderRank(params) {
   const activeType = params.get('type') ?? 'HOT'
   const data = await api(`/api/rank?type=${encodeURIComponent(activeType)}`)
+  document.title = `${data.listName ?? '榜单'} · 影巢`
   const lists = data.lists ?? []
   view.innerHTML = `
     <div class="tabs">
@@ -580,19 +710,42 @@ async function renderRank(params) {
 
 async function renderSearch(params) {
   const keyword = params.get('q') ?? ''
-  track('search', { path: keyword })
-  const data = await api(`/api/search?keyword=${encodeURIComponent(keyword)}`)
-  const home = await api('/api/home').catch(() => ({ hotwords: [] }))
+  const tagId = Number(params.get('tag') ?? 0)
+  track('search', { path: keyword, value: tagId || undefined })
+  const query = new URLSearchParams()
+  if (keyword) query.set('keyword', keyword)
+  if (tagId) query.set('tag', String(tagId))
+  const [data, home, tagData] = await Promise.all([
+    api(`/api/search?${query.toString()}`),
+    api('/api/home').catch(() => ({ hotwords: [] })),
+    api('/api/tags').catch(() => ({ list: [] })),
+  ])
+  const tags = (tagData.list ?? []).filter((tag) => Number(tag.count ?? tag.dramaCount ?? 0) > 0)
+  const activeTag = tags.find((tag) => Number(tag.id) === tagId)
+  const chips = [
+    `<a class="pill ${tagId ? '' : 'active'}" href="#/search${keyword ? `?q=${encodeURIComponent(keyword)}` : ''}">全部</a>`,
+    ...tags.slice(0, 24).map((tag) => {
+      const next = new URLSearchParams()
+      if (keyword) next.set('q', keyword)
+      next.set('tag', String(tag.id))
+      return `<a class="pill ${Number(tag.id) === tagId ? 'active' : ''}" href="#/search?${next.toString()}">${escapeHtml(tag.name)}${tag.count ? `<em>${tag.count}</em>` : ''}</a>`
+    }),
+  ].join('')
+  document.title = activeTag
+    ? `标签 · ${activeTag.name} · 影巢`
+    : (keyword ? `${keyword} · 搜索 · 影巢` : '搜索 · 影巢')
+  const heading = activeTag ? `标签 · ${escapeHtml(activeTag.name)}` : '搜索'
   view.innerHTML = `
     <div class="section-head" style="margin-top:26px">
-      <div class="section-title">搜索</div>
-      <div class="section-hint">${keyword ? `“${escapeHtml(keyword)}” 命中 ${data.total} 部` : '输入关键词开始搜索'}</div>
+      <div class="section-title">${heading}</div>
+      <div class="section-hint">${keyword
+        ? `“${escapeHtml(keyword)}” 命中 ${data.total ?? 0} 部`
+        : activeTag ? `共 ${data.total ?? 0} 部` : '输入关键词，或直接点下面的标签'}</div>
     </div>
-    <div class="subtabs">
-      ${(home.hotwords ?? []).map((word) => `<a class="pill" href="#/search?q=${encodeURIComponent(word)}">${escapeHtml(word)}</a>`).join('')}
-    </div>
+    <div class="subtabs">${chips}</div>
+    ${keyword || activeTag ? '' : `<div class="subtabs">${(home.hotwords ?? []).slice(0, 8).map((word) => `<a class="pill" href="#/search?q=${encodeURIComponent(word)}">${escapeHtml(word)}</a>`).join('')}</div>`}
     ${(data.list ?? []).length === 0
-      ? '<div class="empty">没有找到相关剧集</div>'
+      ? `<div class="empty">${keyword || activeTag ? '没有找到相关剧集' : '还没有内容，先去首页看看'}</div>`
       : `<div class="grid">${data.list.map((item) => posterCard(item)).join('')}</div>`}`
   vipFloat()
 }
@@ -603,15 +756,21 @@ async function renderDrama(id) {
   const access = detail.access ?? 'subscription'
   const priceInfo = detail.priceInfo ?? { plans: [], singlePrice: detail.singlePrice ?? 0 }
   const canSingle = detail.accessMode === 'paid'
-  const firstFree = detail.episodes.find((episode) => episode.allow)
+  document.title = `${detail.title} · 影巢`
+  const episodes = detail.episodes ?? []
+  const firstFree = episodes.find((episode) => episode.allow)
   const entitled = access === 'owned' || access === 'subscribed'
-  const payCta = `<button class="btn-ghost" id="open-paywall">${canSingle ? '解锁全部 ¥' + Number(detail.singlePrice ?? 0).toFixed(0) : '开通会员看全集'}</button>`
-  const cta = entitled
-    ? '<button class="btn-primary" id="play-first">▶ 继续观看</button>'
-    : firstFree
-      // 首集免费是拉新的唯一钩子：先让人看到内容，再谈付费
-      ? `<button class="btn-primary" id="play-free">▶ 免费看第 ${firstFree.no} 集</button>${payCta}`
-      : `<button class="btn-primary" id="open-paywall">${canSingle ? '购买本片 ¥' + Number(detail.singlePrice ?? 0).toFixed(0) : '开通会员'}</button>`
+  const resumeNo = detail.resumeEpisodeNo ?? null
+  const priceText = Number(detail.singlePrice ?? 0).toFixed(2)
+  const payCta = `<button class="btn-ghost" id="open-paywall">${canSingle ? '解锁全部 ¥' + priceText : '开通会员看全集'}</button>`
+  const cta = episodes.length === 0
+    ? '<button class="btn-primary" disabled>暂无剧集</button>'
+    : entitled
+      ? `<button class="btn-primary" id="play-first">▶ 继续观看${resumeNo ? `第 ${resumeNo} 集` : ''}</button>`
+      : firstFree
+        // 首集免费是拉新的唯一钩子：先让人看到内容，再谈付费
+        ? `<button class="btn-primary" id="play-free">▶ 免费看第 ${firstFree.no} 集</button>${payCta}`
+        : `<button class="btn-primary" id="open-paywall">${canSingle ? '购买本片 ¥' + priceText : '开通会员'}</button>`
 
   view.innerHTML = `
     <div class="detail-head">
@@ -627,24 +786,34 @@ async function renderDrama(id) {
           <span>${detail.freeEpisodes > 0 ? `首 ${detail.freeEpisodes} 集免费` : (canSingle ? '单片付费' : '会员专享')}</span>
         </div>
         <div class="detail-desc">${escapeHtml(detail.subTitle ?? '')}<br/>${escapeHtml(detail.description ?? '')}</div>
+        ${(detail.tags ?? []).length > 0
+          ? `<div class="subtabs">${detail.tags.map((tag) => `<a class="pill" href="#/search?tag=${tag.id}">${escapeHtml(tag.name)}</a>`).join('')}</div>`
+          : ''}
         <div class="detail-actions">
           ${cta}
-          <button class="btn-ghost" id="fav-btn">＋ 收藏</button>
+          <button class="btn-ghost" id="fav-btn">${detail.favorited ? '✓ 已收藏' : '＋ 收藏'}</button>
           <button class="btn-ghost" id="share-btn">分享</button>
         </div>
       </div>
     </div>
     <div class="section-head"><div class="section-title">选集</div><div class="section-hint">${detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费，其余需${canSingle ? '购买' : '会员'}` : '需开通权益后观看'}</div></div>
     <div class="episodes">
-      ${detail.episodes.map((episode) => `<a class="ep ${episode.allow ? '' : 'locked'}" data-no="${episode.no}" href="#/play/${detail.dramaId}/${episode.no}">
+      ${episodes.map((episode) => {
+        // 可试看的集必须带 ?trial=1，服务端只认这个参数（否则直接 402）
+        const trial = !episode.allow && episode.trialSeconds > 0 ? '?trial=1' : ''
+        return `<a class="ep ${episode.allow ? '' : 'locked'}" data-no="${episode.no}" href="#/play/${detail.dramaId}/${episode.no}${trial}">
         ${episode.no}${episode.allow ? '' : ' 🔒'}${episode.trialSeconds > 0 ? ' · 试看' : ''}
-      </a>`).join('')}
+      </a>`
+      }).join('')}
     </div>
     <div class="footer"><span>${escapeHtml(detail.title)} · 共 ${detail.episodes.length} 集</span><span>${detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费` : '需开通权益后观看'}</span></div>`
 
   $('#play-first')?.addEventListener('click', () => {
-    const first = detail.episodes.find((episode) => episode.allow) ?? detail.episodes[0]
-    location.hash = `#/play/${detail.dramaId}/${first.no}`
+    const target = episodes.find((episode) => episode.no === resumeNo)
+      ?? episodes.find((episode) => episode.allow)
+      ?? episodes[0]
+    if (!target) return toast('暂无剧集')
+    location.hash = `#/play/${detail.dramaId}/${target.no}`
   })
   $('#play-free')?.addEventListener('click', () => {
     if (!firstFree) return
@@ -659,73 +828,97 @@ async function renderDrama(id) {
       openPaywall(detail, { price: detail.singlePrice, reason: canSingle ? 'single_purchase_required' : 'subscription_required' })
     })
   })
-  $('#fav-btn').addEventListener('click', async () => {
+  $('#fav-btn').addEventListener('click', async (event) => {
+    const button = event.currentTarget
     try {
       const result = await api('/api/me/favorite', { method: 'POST', body: JSON.stringify({ dramaId: detail.dramaId }) })
+      button.textContent = result.favorited ? '✓ 已收藏' : '＋ 收藏'
       toast(result.favorited ? '已收藏' : '已取消收藏')
     } catch (error) {
-      if (error.code === '0401') openLogin(); else toast(error.message)
+      if (error.code === '0401') { pendingRoute = `#/drama/${detail.dramaId}`; openLogin() } else toast(error.message)
     }
   })
   $('#share-btn').addEventListener('click', async () => {
     const url = `${location.origin}${BASE}/#/drama/${detail.dramaId}`
     const text = `《${detail.title}》${detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费` : ''}`
+    let channel = 'clipboard'
     if (navigator.share) {
-      try { await navigator.share({ title: detail.title, text, url }); return } catch { /* 用户取消或不支持，退回复制 */ }
+      try { await navigator.share({ title: detail.title, text, url }); channel = 'native' } catch { /* 用户取消或不支持，退回复制 */ }
     }
-    try { await navigator.clipboard.writeText(`${text} ${url}`); toast('分享链接已复制') } catch { toast(url) }
+    if (channel === 'clipboard') {
+      try { await navigator.clipboard.writeText(`${text} ${url}`); toast('分享链接已复制') } catch { toast(url) }
+    }
+    track('share', { dramaId: detail.dramaId, meta: { channel, from: 'detail' } })
   })
   void priceInfo
   vipFloat()
 }
 
-async function renderPlay(id, episodeNo) {
+async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
+  const trialMode = params.get('trial') === '1'
+  const playPath = `/api/play/${encodeURIComponent(id)}/${encodeURIComponent(episodeNo)}${trialMode ? '?trial=1' : ''}`
   let data
   let detail
   try {
-    data = await api(`/api/play/${encodeURIComponent(id)}/${encodeURIComponent(episodeNo)}`)
+    data = await api(playPath)
     detail = await api(`/api/drama/${encodeURIComponent(id)}`)
   } catch (error) {
     if (error.code === '0401') {
       view.innerHTML = `<div class="empty">${escapeHtml(error.message)}<br/><br/><button class="btn-primary" id="play-login">登录后播放</button></div>`
-      $('#play-login').addEventListener('click', openLogin)
+      $('#play-login').addEventListener('click', () => {
+        pendingRoute = `#/play/${id}/${episodeNo}${trialMode ? '?trial=1' : ''}`
+        openLogin()
+      })
       return
     }
-    // 402：权益不足 → 详情 + 付费墙
+    // 409：片源未就绪；402：权益不足 → 详情 + 付费墙
     try { detail = await api(`/api/drama/${encodeURIComponent(id)}`) } catch { /* ignore */ }
+    const notReady = error.code === 'episode_not_ready' || error.code === '0409'
     view.innerHTML = `
       <div class="empty">
         <div style="font-size:16px;margin-bottom:8px">${escapeHtml(error.message)}</div>
         ${detail ? `<div style="color:#9aa3b2;font-size:13px">${escapeHtml(detail.title)} · 第 ${escapeHtml(episodeNo)} 集</div>` : ''}
         <div style="margin-top:18px;display:flex;gap:10px;justify-content:center">
-          <button class="btn-primary" id="go-paywall">查看购买选项</button>
+          ${notReady
+            ? '<button class="btn-primary" id="play-retry">重新加载</button>'
+            : '<button class="btn-primary" id="go-paywall">查看购买选项</button>'}
           <a class="btn-ghost" href="#/drama/${encodeURIComponent(id)}">返回详情</a>
         </div>
       </div>`
     const info = error.data ?? {}
-    $('#go-paywall').addEventListener('click', () => openPaywall(detail, {
+    $('#go-paywall')?.addEventListener('click', () => openPaywall(detail, {
       plans: info.plans, price: info.price, reason: info.reason, title: error.message,
     }))
+    $('#play-retry')?.addEventListener('click', () => route())
     return
   }
 
-  const sourceLabel = { free: '免费观看', subscription: '会员权益', purchase: '已购买' }[data.source] ?? ''
+  cleanupRoute()
+  const cleanups = []
+  const onCleanup = (fn) => { cleanups.push(fn) }
+  routeCleanups = cleanups
+
+  const episode = data.episode ?? detail.episodes.find((item) => String(item.no) === String(episodeNo)) ?? {}
+  const sourceLabel = { free: '免费观看', subscription: '会员权益', purchase: '已购买', trial: '试看' }[data.source] ?? ''
+  const expiredNotice = data.hls ? `播放链接 ${Math.round((data.expiresIn ?? 300) / 60)} 分钟内有效，过期自动续期` : ''
+
   view.innerHTML = `
     <div class="player-wrap">
       <div class="player-bar">
-        <span>${escapeHtml(data.title)} · 第 ${escapeHtml(episodeNo)} 集</span>
+        <span>${escapeHtml(data.title)} · 第 ${escapeHtml(String(episodeNo))} 集</span>
         <span style="margin-left:auto">${sourceLabel}${data.hls ? ' · HLS' : ' · 未上传片源'}</span>
       </div>
       <div class="player" id="player">
         <video id="video" playsinline controls style="width:100%;height:100%;background:#000"></video>
-        <div class="danmu-layer" id="danmu-layer"></div>
-        <div class="notice" id="player-notice">${data.hls ? `播放链接 ${Math.round((data.expiresIn ?? 300) / 60)} 分钟内有效（签名防盗链，过期自动续签）` : '该集片源正在处理中，请稍后再试'}</div>
+        <div class="danmu-layer" id="danmu-layer" aria-hidden="true"></div>
+        <div class="notice" id="player-notice">${data.hls ? expiredNotice : '该集片源正在处理中'}</div>
         <div class="player-tools">
           <select id="quality-select"><option value="-1">自动清晰度</option></select>
           <input id="danmu-input" placeholder="发条弹幕…" maxlength="60" />
           <button class="btn-ghost" id="danmu-send">发送</button>
           <button class="btn-ghost" id="share-btn">分享</button>
         </div>
+        <div class="player-fail hidden" id="player-fail"><button class="btn-primary" id="player-retry">播放异常，点击重试</button></div>
       </div>
     </div>
     <div class="detail-head" style="margin-top:0">
@@ -733,9 +926,16 @@ async function renderPlay(id, episodeNo) {
       <div class="detail-meta">
         <div class="detail-title" style="font-size:20px">${escapeHtml(detail.title)}</div>
         <div class="detail-facts"><span>${escapeHtml(detail.subTitle ?? '')}</span></div>
-        <div class="chips">${detail.episodes.slice(0, 60).map((item) => `<a class="ep ${String(item.no) === String(episodeNo) ? 'active' : ''} ${item.allow ? '' : 'locked'}" data-no="${item.no}" style="display:inline-block;margin:0 6px 6px 0" href="#/play/${detail.dramaId}/${item.no}">${item.no}${item.allow ? '' : ' 🔒'}</a>`).join('')}</div>
+        <div class="chips">${detail.episodes.slice(0, 60).map((item) => {
+          const trial = !item.allow && item.trialSeconds > 0 ? '?trial=1' : ''
+          return `<a class="ep ${String(item.no) === String(episodeNo) ? 'active' : ''} ${item.allow ? '' : 'locked'}" data-no="${item.no}" style="display:inline-block;margin:0 6px 6px 0" href="#/play/${detail.dramaId}/${item.no}${trial}">${item.no}${item.allow ? '' : ' 🔒'}${item.trialSeconds > 0 ? ' · 试看' : ''}</a>`
+        }).join('')}</div>
       </div>
     </div>`
+
+  const video = $('#video')
+  const danmuLayer = $('#danmu-layer')
+  const notice = (text) => { const node = $('#player-notice'); if (node) node.textContent = text }
 
   view.querySelectorAll('.ep.locked').forEach((node) => {
     node.addEventListener('click', (event) => {
@@ -744,8 +944,6 @@ async function renderPlay(id, episodeNo) {
     })
   })
 
-  const video = $('#video')
-  const danmuLayer = $('#danmu-layer')
   $('#danmu-send')?.addEventListener('click', async () => {
     const input = $('#danmu-input')
     const content = input.value.trim()
@@ -753,19 +951,32 @@ async function renderPlay(id, episodeNo) {
     try {
       const result = await api('/api/danmu', {
         method: 'POST',
-        body: JSON.stringify({ episodeId: data.episode.id, timeMs: Math.round((video?.currentTime ?? 0) * 1000), content }),
+        body: JSON.stringify({ episodeId: episode.id, timeMs: Math.round((video?.currentTime ?? 0) * 1000), content }),
       })
       toast(result.message ?? '已提交')
       input.value = ''
-    } catch (error) { toast(error.message) }
+    } catch (error) {
+      if (error.code === '0401') { pendingRoute = `#/play/${id}/${episodeNo}`; openLogin() } else toast(error.message)
+    }
   })
   $('#share-btn')?.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(location.href); toast('播放链接已复制') } catch { toast(location.href) }
+    // 分享详情页：播放页未登录会撞登录墙，分享出去等于发了个打不开的链接
+    const url = `${location.origin}${BASE}/#/drama/${detail.dramaId}`
+    const text = `《${detail.title}》`
+    let channel = 'clipboard'
+    if (navigator.share) {
+      try { await navigator.share({ title: detail.title, text, url }); channel = 'native' } catch { /* 取消 */ }
+    }
+    if (channel === 'clipboard') {
+      try { await navigator.clipboard.writeText(`${text} ${url}`); toast('分享链接已复制') } catch { toast(url) }
+    }
+    track('share', { dramaId: detail.dramaId, meta: { channel, from: 'play' } })
   })
+
+  /* ---- 弹幕 ---- */
   const danmu = Array.isArray(data.danmu) ? data.danmu : []
   let danmuTimer
   const shownDanmu = new Set()
-
   const startDanmu = () => {
     clearInterval(danmuTimer)
     // 没弹幕就让它空着：随机兜底会伪造"很多人在看"，比空屏更糟
@@ -785,76 +996,173 @@ async function renderPlay(id, episodeNo) {
         setTimeout(() => node.remove(), 11000)
       })
     }, 600)
+    onCleanup(() => clearInterval(danmuTimer))
   }
 
+  /* ---- 进度与埋点 ---- */
   const saveHistory = () => {
     if (!state.token) return
+    if (!(video.currentTime > 0)) return
     void api('/api/me/history', {
       method: 'POST',
       body: JSON.stringify({ dramaId: detail.dramaId, episode: Number(episodeNo), position: Math.round(video.currentTime || 0) }),
     }).catch(() => {})
   }
+  let endReported = false
+  const reportEnd = (reason) => {
+    if (endReported || !(video.currentTime > 0)) return
+    endReported = true
+    const duration = video.duration || Number(data.duration) || 0
+    track('play_end', {
+      dramaId: detail.dramaId,
+      episodeId: episode.id ?? null,
+      position: Math.round(video.currentTime),
+      duration: Math.round(duration),
+      value: duration ? Math.min(1, video.currentTime / duration) : 0,
+      meta: { reason },
+    })
+  }
+  onCleanup(() => { reportEnd('leave'); saveHistory() })
 
-  if (data.hls) {
-    if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = BASE + data.hls
-    } else {
-      try {
-        const Hls = await loadHls()
-        if (Hls && Hls.isSupported()) {
-          const hls = new Hls({ lowLatencyMode: false })
-          hls.loadSource(BASE + data.hls)
-          hls.attachMedia(video)
-          hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            const select = $('#quality-select')
-            if (!select) return
-            select.innerHTML = '<option value="-1">自动清晰度</option>'
-              + hls.levels.map((level, index) => `<option value="${index}">${level.height}p</option>`).join('')
-            select.addEventListener('change', () => { hls.currentLevel = Number(select.value) })
-          })
-        } else {
-          video.src = BASE + data.hls
-        }
-      } catch {
-        video.src = BASE + data.hls
-        $('#player-notice').textContent = 'hls.js 加载失败（离线？），已尝试浏览器原生 HLS'
-      }
-    }
-    video.addEventListener('play', startDanmu, { once: true })
-    video.addEventListener('pause', saveHistory)
-    // 续播：从上次看到的进度恢复（太靠近开头/结尾时不跳，避免误判）
-    video.addEventListener('loadedmetadata', () => {
-      const at = Number(data.resumePosition ?? 0)
-      if (at > 5 && (!video.duration || at < video.duration - 10)) {
-        video.currentTime = at
-        $('#player-notice').textContent = `已从上次观看到的 ${Math.floor(at / 60)}:${String(Math.floor(at % 60)).padStart(2, '0')} 继续播放`
-      }
-    }, { once: true })
-    // 连播：本集播完自动进下一集
-    video.addEventListener('ended', () => {
-      saveHistory()
-      track('play_end', {
-        dramaId: detail.dramaId, episodeId: data.episodeId, position: video.currentTime, duration: video.duration || 0,
-        value: video.duration ? Math.min(1, video.currentTime / video.duration) : 1,
-      })
-      if (!data.nextEpisodeNo) return toast('已是最后一集')
-      toast(`即将播放第 ${data.nextEpisodeNo} 集`)
-      setTimeout(() => { location.hash = `#/play/${detail.dramaId}/${data.nextEpisodeNo}` }, 800)
-    })
-    // 上报节流：timeupdate 约 4Hz，按「距上次上报满 15 秒」判定，避免同秒重复写库
-    let lastSavedAt = -15
-    video.addEventListener('timeupdate', () => {
-      if (video.currentTime - lastSavedAt < 15) return
-      lastSavedAt = video.currentTime
-      saveHistory()
-    })
-  } else {
+  const playable = Boolean(data.hls)
+  if (!playable) {
+    const status = data.episodeStatus ?? episode.status ?? ''
+    const hint = status === 'processing' || status === 'queued' || status === 'transcoding'
+      ? '本集正在转码，通常几分钟内完成，稍后刷新即可观看'
+      : '本集片源异常，客服正在处理'
+    notice(hint)
     const bigPlay = document.createElement('button')
     bigPlay.className = 'big-play'
     bigPlay.textContent = '▶'
-    bigPlay.addEventListener('click', () => toast('该集片源仍在处理中，稍后再试或联系客服'))
+    bigPlay.addEventListener('click', () => {
+      toast(hint)
+      if (status === 'processing' || status === 'queued' || status === 'transcoding') {
+        setTimeout(() => { if (!routeCleanups.includes(onCleanup)) return; route() }, 30000)
+      }
+    })
     $('#player').appendChild(bigPlay)
+    vipFloat()
+    return
   }
+
+  /* ---- 播放器（含错误恢复）---- */
+  let hls = null
+  let retries = 0
+  let lastPosition = Number(data.resumePosition ?? episode.position ?? 0)
+  let hlsUrl = data.hls
+
+  const showFail = (message) => {
+    const node = $('#player-fail')
+    if (!node) return
+    node.classList.remove('hidden')
+    node.querySelector('#player-retry').textContent = message ?? '播放异常，点击重试'
+  }
+  const hideFail = () => $('#player-fail')?.classList.add('hidden')
+
+  const attach = async (url) => {
+    hlsUrl = url
+    if (hls) { try { hls.destroy() } catch { /* ignore */ } hls = null }
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = BASE + url
+      return
+    }
+    const Hls = await loadHls()
+    if (!Hls || !Hls.isSupported()) {
+      video.src = BASE + url
+      return
+    }
+    const instance = new Hls({ lowLatencyMode: false })
+    hls = instance
+    instance.loadSource(BASE + url)
+    instance.attachMedia(video)
+    instance.on(Hls.Events.MANIFEST_PARSED, () => {
+      const select = $('#quality-select')
+      if (!select) return
+      select.innerHTML = '<option value="-1">自动清晰度</option>'
+        + instance.levels.map((level, index) => `<option value="${index}">${level.height}p</option>`).join('')
+      select.onchange = () => { instance.currentLevel = Number(select.value) }
+    })
+    instance.on(Hls.Events.ERROR, (_event, payload) => {
+      if (!payload?.fatal) return
+      void recover(`播放中断（${payload.type}）`)
+    })
+  }
+
+  // 签名过期/分片 404/网络抖动：重新取一次播放地址（这是拿新 Cookie 的唯一途径）再续播
+  const recover = async (reason) => {
+    if (retries >= 3) { showFail('播放异常，点击重试'); return }
+    retries += 1
+    notice(`${reason}，正在重新获取播放地址…`)
+    const at = video.currentTime || lastPosition || 0
+    try {
+      const fresh = await api(playPath)
+      if (!fresh.hls) throw new Error('该集片源暂不可用')
+      await attach(fresh.hls)
+      video.addEventListener('loadedmetadata', () => {
+        if (at > 0) video.currentTime = at
+        void video.play().catch(() => {})
+      }, { once: true })
+      notice(expiredNotice)
+      hideFail()
+    } catch (error) {
+      showFail(error.message || '播放异常，点击重试')
+    }
+  }
+
+  $('#player-retry')?.addEventListener('click', () => { retries = 0; hideFail(); void recover('手动重试') })
+  video.addEventListener('error', () => { void recover('播放中断') })
+  onCleanup(() => {
+    try { hls?.destroy() } catch { /* ignore */ }
+    try { video.pause(); video.removeAttribute('src'); video.load() } catch { /* ignore */ }
+  })
+
+  await attach(hlsUrl).catch(() => { video.src = BASE + hlsUrl })
+
+  video.addEventListener('play', startDanmu, { once: true })
+  video.addEventListener('pause', saveHistory)
+  video.addEventListener('loadedmetadata', () => {
+    // 续播：太靠近开头/结尾时不跳，避免误判
+    if (lastPosition > 5 && (!video.duration || lastPosition < video.duration - 10)) {
+      video.currentTime = lastPosition
+      notice(`已从上次观看到的 ${Math.floor(lastPosition / 60)}:${String(Math.floor(lastPosition % 60)).padStart(2, '0')} 继续播放`)
+    }
+  }, { once: true })
+
+  // 试看截断：服务端只发短签名，前端到点必须停并弹付费墙
+  const trialSeconds = Number(data.trialSeconds ?? 0)
+  let trialHit = false
+  if (data.source === 'trial' && trialSeconds > 0) {
+    notice(`试看 ${trialSeconds} 秒，开通会员或购买后可看全集`)
+    video.addEventListener('timeupdate', () => {
+      if (trialHit || video.currentTime < trialSeconds) return
+      trialHit = true
+      video.pause()
+      openPaywall(detail, {
+        price: detail.singlePrice,
+        reason: detail.accessMode === 'paid' ? 'single_purchase_required' : 'subscription_required',
+        title: '试看结束',
+      })
+    })
+  }
+
+  // 连播：本集播完自动进下一集
+  video.addEventListener('ended', () => {
+    saveHistory()
+    reportEnd('ended')
+    if (!data.nextEpisodeNo) return toast('已是最后一集')
+    toast(`即将播放第 ${data.nextEpisodeNo} 集`)
+    setTimeout(() => { location.hash = `#/play/${detail.dramaId}/${data.nextEpisodeNo}` }, 800)
+  })
+
+  // 上报节流：timeupdate 约 4Hz，按「距上次上报满 15 秒」判定，避免同秒重复写库
+  let lastSavedAt = -15
+  video.addEventListener('timeupdate', () => {
+    if (video.currentTime - lastSavedAt < 15) return
+    lastSavedAt = video.currentTime
+    saveHistory()
+  })
+
+  document.title = `${data.title} 第 ${episodeNo} 集 · 影巢`
   vipFloat()
 }
 
@@ -941,7 +1249,6 @@ async function renderMe() {
   view.querySelectorAll('[data-resume]').forEach((button) => {
     button.addEventListener('click', async () => {
       const no = button.dataset.resume
-      const channel = button.dataset.channel
       try {
         const order = await api(`/api/orders/${encodeURIComponent(no)}`)
         if (order.status === 'paid' || order.status === 'fulfilled') { toast('该订单已完成支付'); return route() }
@@ -950,9 +1257,10 @@ async function renderMe() {
           openModal('订单待支付', `订单 ${no} 待支付：请向 ${order.usdt.address} 转入 ${order.usdt.amount} USDT（${PAY.usdtNetwork}），到账后自动开通权益。`)
           return
         }
-        const page = channel === 'alipay' ? 'alipay-sim' : channel === 'mock' ? 'mock' : null
-        if (!page) { toast('该订单的支付渠道已停用，请重新下单'); return }
-        window.open(`${BASE}/pay/${page}/${encodeURIComponent(no)}`, '_blank', 'width=520,height=680')
+        // 收银台地址由服务端按渠道真实配置给出，前端不再猜页面
+        if (!order.payUrl) { toast(order.payReason || '该订单当前无法继续支付，请重新下单'); return }
+        const target = order.payUrl.startsWith('http') ? order.payUrl : BASE + order.payUrl
+        window.open(target, '_blank', 'width=520,height=680')
         toast('已打开收银台，支付完成后刷新本页')
       } catch (error) { toast(error.message) }
     })
@@ -1169,8 +1477,8 @@ function openChangeEmail(user) {
 function loginWall() {
   view.innerHTML = `
     <div class="empty" style="margin-top:80px">
-      <div style="font-size:18px;margin-bottom:10px">登录后才能浏览和播放</div>
-      <div style="color:#9aa3b2;font-size:13px;margin-bottom:18px">未登录仅可浏览首页；免费集同样需要登录后播放。</div>
+      <div style="font-size:18px;margin-bottom:10px">登录后即可播放与查看个人中心</div>
+      <div style="color:#9aa3b2;font-size:13px;margin-bottom:18px">首页、分类、榜单、搜索与剧集详情均可直接浏览；播放与购买需要账号。</div>
       <button class="btn-primary" id="wall-login">登录 / 注册</button>
       <a class="btn-ghost" href="#/home" style="margin-left:8px">返回首页</a>
     </div>`
@@ -1178,6 +1486,7 @@ function loginWall() {
 }
 
 async function route() {
+  cleanupRoute()
   renderChrome()
   const hash = location.hash || '#/home'
   const [pathPart, queryPart] = hash.slice(1).split('?')
@@ -1196,11 +1505,18 @@ async function route() {
     else if (segments[0] === 'rank') await renderRank(params)
     else if (segments[0] === 'search') await renderSearch(params)
     else if (segments[0] === 'drama') await renderDrama(segments[1])
-    else if (segments[0] === 'play') await renderPlay(segments[1], segments[2] ?? '1')
+    else if (segments[0] === 'play') await renderPlay(segments[1], segments[2] ?? '1', params)
     else if (segments[0] === 'me') await renderMe()
     else await renderHome()
   } catch (error) {
-    view.innerHTML = `<div class="empty">加载失败：${escapeHtml(error.message)}</div>`
+    if (error.code === '0401') {
+      loginWall()
+      return
+    }
+    view.innerHTML = `<div class="empty">加载失败：${escapeHtml(error.message)}<br/><br/>
+      <button class="btn-primary" id="route-retry">重试</button>
+      <a class="btn-ghost" href="#/home" style="margin-left:8px">返回首页</a></div>`
+    $('#route-retry').addEventListener('click', () => route())
   }
   window.scrollTo(0, 0)
 }

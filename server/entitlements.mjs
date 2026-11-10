@@ -73,9 +73,9 @@ export function resolveAccess(userId, dramaId, episodeNo) {
     return { allow: true, source: 'subscription', subscription }
   }
 
-  // 3) 免费集 / 免费库
+  // 3) 免费集 / 免费库（免费集是拉新钩子，与 access_mode 无关：单片剧也常放前 1–2 集）
   if (policy.access_mode === 'free') return { allow: true, source: 'free' }
-  if (policy.access_mode === 'subscription' && Number(episodeNo) <= Number(policy.free_episodes)) {
+  if (Number(policy.free_episodes) > 0 && Number(episodeNo) <= Number(policy.free_episodes)) {
     return { allow: true, source: 'free' }
   }
 
@@ -135,7 +135,7 @@ export function decideEpisodes({ drama, policy, subscription, purchase, episodes
     if (purchase) { allow = true; source = 'purchase' }
     else if (subscriptionCovers) { allow = true; source = 'subscription' }
     else if (policy.access_mode === 'free') { allow = true; source = 'free' }
-    else if (policy.access_mode === 'subscription' && Number(episode.no) <= Number(policy.free_episodes)) { allow = true; source = 'free' }
+    else if (Number(policy.free_episodes) > 0 && Number(episode.no) <= Number(policy.free_episodes)) { allow = true; source = 'free' }
     return {
       ...episode,
       allow,

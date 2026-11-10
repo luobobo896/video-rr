@@ -206,6 +206,25 @@ document.getElementById('pay').addEventListener('click', async () => {
   res.end(html)
 }
 
+function cookiesOf(req) {
+  return Object.fromEntries(String(req.headers.cookie ?? '').split(';').map((part) => {
+    const [key, ...rest] = part.trim().split('=')
+    return [key, rest.join('=')]
+  }))
+}
+
+/** 按媒体路径里的集号取签名：优先分集 Cookie，回退通用 Cookie（兼容老客户端/旧链接） */
+function linkCredentials(req, mediaPath, url) {
+  const cookies = cookiesOf(req)
+  const scope = /^\/media\/hls\/(\d+)\//.exec(mediaPath)?.[1]
+  const scopedSign = scope ? cookies[`mh_link_${scope}`] : undefined
+  const scopedExp = scope ? cookies[`mh_exp_${scope}`] : undefined
+  return {
+    sign: url.searchParams.get('sign') ?? scopedSign ?? cookies.mh_link,
+    expires: url.searchParams.get('expires') ?? scopedExp ?? cookies.mh_exp,
+  }
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
   const pathname = url.pathname
@@ -225,12 +244,7 @@ const server = createServer(async (req, res) => {
     if (pathname === '/media-auth') {
       const original = String(req.headers['x-original-uri'] ?? '')
       const mediaPath = original.replace(/^\/video/, '').split('?')[0]
-      const cookies = Object.fromEntries(String(req.headers.cookie ?? '').split(';').map((part) => {
-        const [key, ...rest] = part.trim().split('=')
-        return [key, rest.join('=')]
-      }))
-      const sign = url.searchParams.get('sign') ?? cookies.mh_link
-      const expires = url.searchParams.get('expires') ?? cookies.mh_exp
+      const { sign, expires } = linkCredentials(req, mediaPath, url)
       const ua = String(req.headers['user-agent'] ?? '')
       const ok = ALLOW_UNSIGNED || verifyLink(mediaPath, sign, expires, ua)
       res.writeHead(ok ? 204 : 403, { 'cache-control': 'no-store' })
@@ -239,12 +253,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/media/hls/')) {
-      const cookies = Object.fromEntries(String(req.headers.cookie ?? '').split(';').map((part) => {
-        const [key, ...rest] = part.trim().split('=')
-        return [key, rest.join('=')]
-      }))
-      const sign = url.searchParams.get('sign') ?? cookies.mh_link
-      const expires = url.searchParams.get('expires') ?? cookies.mh_exp
+      const { sign, expires } = linkCredentials(req, pathname, url)
       if (!ALLOW_UNSIGNED && !verifyLink(pathname, sign, expires, String(req.headers['user-agent'] ?? ''))) {
         res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
         res.end('403 播放链接无效或已过期')

@@ -445,6 +445,48 @@ export function alipayChannel() {
   return { row, config: { ...channelConfig(row), env: row.env } }
 }
 
+/**
+ * 未支付订单的收银台地址。前端「继续支付」必须拿到它，
+ * 否则只能按 channel 猜页面（猜错就是打开一个 404 的死链）。
+ */
+export function payUrlFor(order, { allowSim = process.env.MH_ALLOW_SIM_PAY === '1' } = {}) {
+  if (!order) return { payUrl: null, reason: '订单不存在' }
+  if (!['created', 'pending'].includes(order.status)) return { payUrl: null, reason: `订单${order.status}` }
+  if (order.channel === 'usdt') {
+    return {
+      payUrl: null,
+      reason: '链上转账',
+      usdt: {
+        network: 'TRC20',
+        address: order.usdt_address,
+        amount: order.usdt_amount,
+        rate: order.usdt_rate,
+        expiresAt: order.expires_at,
+      },
+    }
+  }
+  if (order.channel === 'alipay') {
+    const channel = alipayChannel()
+    const config = channel?.config ?? {}
+    if (config.appId && config.privateKey && config.publicKey) {
+      try {
+        return { payUrl: buildAlipayPayUrl(order, config), simulated: false }
+      } catch (error) {
+        return { payUrl: null, reason: error.message }
+      }
+    }
+    return allowSim
+      ? { payUrl: `/pay/alipay-sim/${order.out_trade_no}`, simulated: true }
+      : { payUrl: null, reason: '支付宝商户密钥未配置' }
+  }
+  if (order.channel === 'mock') {
+    return allowSim
+      ? { payUrl: `/pay/mock/${order.out_trade_no}`, simulated: true }
+      : { payUrl: null, reason: '模拟支付未开启' }
+  }
+  return { payUrl: null, reason: '支付渠道不可用' }
+}
+
 function saveChannelConfig(row, config) {
   run(`UPDATE pay_channels SET config_cipher = ?, config_preview = ?, key_version = ?, updated_at = datetime('now') WHERE id = ?`,
     sealSecret(config), JSON.stringify(maskConfig(config)), currentKeyVersion(), row.id)

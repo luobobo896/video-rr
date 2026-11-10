@@ -12,10 +12,10 @@ import {
 } from './entitlements.mjs'
 import { recordEvent, recordPlay } from './analytics.mjs'
 import { clientIpOf } from './ratelimit.mjs'
-import { listTags, tagsOfDrama, dramaIdsByTag } from './tags.mjs'
+import { listTags, tagsOfDrama } from './tags.mjs'
 import {
   CommerceError, createOrder, handleAlipayNotify, listOrders, markPaid, mockPay, paymentOptions, validateCoupon,
-  buildSimulatedAlipayNotify, syncAlipayOrder,
+  buildSimulatedAlipayNotify, syncAlipayOrder, payUrlFor,
 } from './commerce.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
@@ -33,11 +33,17 @@ export function send(res, data, code = '0000', msg = 'Success', status = 200) {
 const fail = (res, code, msg, status = 400, extra = {}) => send(res, extra, code, msg, status)
 
 /** 播放签名放 Cookie：HLS 播放器请求分片时不带 query，但会自动带 Cookie。 */
-function setLinkCookies(res, link, ttl, req) {
+function setLinkCookies(res, link, ttl, req, scopeId) {
   const proto = String(req?.headers['x-forwarded-proto'] ?? '').split(',')[0].trim().toLowerCase()
   const secure = proto === 'https'
   const flags = `; Path=/; Max-Age=${ttl}; SameSite=Lax; HttpOnly${secure ? '; Secure' : ''}`
-  res.setHeader('set-cookie', [`mh_link=${link.sign}${flags}`, `mh_exp=${link.expires}${flags}`])
+  const list = []
+  // 按集分名：同一浏览器开两个标签播不同剧时，通用名会互相覆盖签名 → 先开的那个黑屏
+  if (scopeId !== undefined && scopeId !== null) {
+    list.push(`mh_link_${scopeId}=${link.sign}${flags}`, `mh_exp_${scopeId}=${link.expires}${flags}`)
+  }
+  list.push(`mh_link=${link.sign}${flags}`, `mh_exp=${link.expires}${flags}`)
+  res.setHeader('set-cookie', list)
 }
 
 function cardOf(drama, userId, context = {}) {
@@ -162,7 +168,7 @@ export async function handlePublic(pathname, url, req, res) {
         id: section.id,
         title: section.title,
         items: all(`SELECT d.* FROM section_items si JOIN dramas d ON d.id = si.drama_id
-          WHERE si.section_id = ? AND d.status = 'published' ORDER BY si.sort`, section.id)
+          WHERE si.section_id = ? AND d.status = 'published' ORDER BY si.sort LIMIT 30`, section.id)
           .map((drama) => cardOf(drama, userId, context)),
       }))
       const hot = all("SELECT title FROM dramas ORDER BY score DESC LIMIT 8").map((row) => row.title)
@@ -207,21 +213,22 @@ export async function handlePublic(pathname, url, req, res) {
     if (pathname === '/api/search') {
       const keyword = (url.searchParams.get('keyword') ?? '').trim()
       const tagId = Number(url.searchParams.get('tag') ?? url.searchParams.get('tagId') ?? 0)
-
+      const where = ["status = 'published'"]
+      const params = []
+      // 标签与关键词可以叠加：标签缩小集合，关键词在集合内再筛（原来两者互斥，搜标签名搜不到片）
       if (tagId) {
-        const ids = dramaIdsByTag(tagId)
-        if (ids.length === 0) return send(res, { keyword, tagId, total: 0, list: [] })
-        const placeholders = ids.map(() => '?').join(',')
-        const rows = all(`SELECT * FROM dramas WHERE status = 'published' AND id IN (${placeholders})
-          ORDER BY score DESC LIMIT 60`, ...ids)
-        return send(res, { keyword, tagId, total: rows.length, list: rows.map((drama) => cardOf(drama, userId, context)) })
+        where.push('id IN (SELECT drama_id FROM drama_tags WHERE tag_id = ?)')
+        params.push(tagId)
       }
-
-      if (!keyword) return send(res, { keyword, total: 0, list: [] })
-      const rows = all(`SELECT * FROM dramas WHERE status = 'published'
-        AND (title LIKE ? OR sub_title LIKE ? OR description LIKE ?) ORDER BY score DESC LIMIT 30`,
-      `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
-      return send(res, { keyword, total: rows.length, list: rows.map((drama) => cardOf(drama, userId, context)) })
+      if (keyword) {
+        where.push('(title LIKE ? OR sub_title LIKE ? OR description LIKE ?)')
+        params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
+      }
+      if (where.length === 1) return send(res, { keyword, tagId, total: 0, list: [] })
+      const clause = where.join(' AND ')
+      const total = one(`SELECT COUNT(*) AS n FROM dramas WHERE ${clause}`, ...params).n
+      const rows = all(`SELECT * FROM dramas WHERE ${clause} ORDER BY score DESC LIMIT 60`, ...params)
+      return send(res, { keyword, tagId, total, list: rows.map((drama) => cardOf(drama, userId, context)) })
     }
 
     if (pathname === '/api/tags') {
@@ -238,6 +245,10 @@ export async function handlePublic(pathname, url, req, res) {
       const purchase = context.purchase.has(drama.id) ? one(`SELECT * FROM purchases WHERE user_id = ? AND drama_id = ? AND status = 'active'
         AND (expires_at IS NULL OR datetime(expires_at) > datetime('now')) ORDER BY id DESC LIMIT 1`, userId, drama.id) : undefined
       const decided = decideEpisodes({ drama, policy, subscription: context.subscription, purchase, episodes })
+      // 收藏态与观看进度：详情页要靠这两个字段渲染「✓ 已收藏」「继续观看第 N 集」，
+      // 否则前端只能再打一次 /api/me，多一轮请求且首屏会闪。
+      const favorite = userId ? one('SELECT 1 AS x FROM favorites WHERE user_id = ? AND drama_id = ?', userId, drama.id) : undefined
+      const resume = userId ? one('SELECT episode_no, position, updated_at FROM history WHERE user_id = ? AND drama_id = ?', userId, drama.id) : undefined
       return send(res, {
         ...cardOf(drama, userId, context),
         description: drama.description,
@@ -249,6 +260,10 @@ export async function handlePublic(pathname, url, req, res) {
         priceInfo: priceInfo(drama),
         tags: tagsOfDrama(drama.id).map((tag) => ({ id: tag.id, name: tag.name })),
         hasSubscription: Boolean(context.subscription),
+        favorited: Boolean(favorite),
+        resumeEpisodeNo: resume?.episode_no ?? null,
+        resumePosition: resume?.position ?? null,
+        resumeUpdatedAt: resume?.updated_at ?? null,
       })
     }
 
@@ -266,19 +281,28 @@ export async function handlePublic(pathname, url, req, res) {
       if (!drama) return fail(res, '0404', '内容不存在', 404)
       const episode = one('SELECT * FROM episodes WHERE drama_id = ? AND no = ?', dramaId, no)
       if (!episode) return fail(res, '0404', '该集不存在', 404)
+      if (!episode.hls_path || episode.status !== 'ready') {
+        // 转码中/失败的集不能签发空链接：前端要能区分「还没好」和「没权限」
+        return send(res, {
+          dramaId, episodeId: episode.id, episodeStatus: episode.status, reason: 'episode_not_ready',
+          message: episode.status === 'error' ? '该集片源处理失败，请稍后再试' : '该集片源正在处理中，请稍后再试',
+        }, '0409', '该集片源尚未就绪', 409)
+      }
 
       const access = resolveAccess(userId, dramaId, no)
       const trialWanted = url.searchParams.get('trial') === '1'
       if (!access.allow && access.trialSeconds > 0 && trialWanted) {
-        // 试看：仍签发短时链接，但前端按 trialSeconds 截断（服务端记录审计）
+        // 试看：签名有效期必须覆盖试看时长，否则前端按 trialSeconds 截断前就先被 403 断流
         const trialHls = episode.hls_path ?? `/media/hls/${episode.id}/index.m3u8`
         const ua = req.headers['user-agent'] ?? ''
-        const trialLink = episode.hls_path ? secureLink(trialHls, Math.min(120, LINK_TTL), ua) : { url: null, sign: null, expires: 0 }
-        if (episode.hls_path) setLinkCookies(res, trialLink, Math.min(120, LINK_TTL), req)
+        const trialTtl = Math.min(PLAY_TTL_MAX, Math.max(120, Number(access.trialSeconds) + 60))
+        const trialLink = episode.hls_path ? secureLink(trialHls, trialTtl, ua) : { url: null, sign: null, expires: 0 }
+        if (episode.hls_path) setLinkCookies(res, trialLink, trialTtl, req, episode.id)
         recordPlay({ userId, dramaId, episodeId: episode.id, episodeNo: no, source: 'trial', ip: clientIp(req), ua: req.headers['user-agent'] })
         return send(res, {
-          dramaId, title: drama.title, episode: { id: episode.id, no: episode.no, title: episode.title },
-          source: 'trial', hls: episode.hls_path, expiresIn: Math.min(120, LINK_TTL), trialSeconds: access.trialSeconds, danmu: [],
+          dramaId, title: drama.title, episodeId: episode.id, episodeStatus: episode.status,
+          episode: { id: episode.id, no: episode.no, title: episode.title },
+          source: 'trial', hls: episode.hls_path, expiresIn: trialTtl, trialSeconds: access.trialSeconds, danmu: [],
         })
       }
       if (!access.allow) {
@@ -297,14 +321,15 @@ export async function handlePublic(pathname, url, req, res) {
       const duration = Number(episode.duration ?? 0)
       const playTtl = Math.min(PLAY_TTL_MAX, Math.max(LINK_TTL, duration > 0 ? duration + 300 : LINK_TTL))
       const link = hlsPath ? secureLink(hlsPath, playTtl, ua) : { url: null, sign: null, expires: 0 }
-      if (hlsPath) setLinkCookies(res, link, playTtl, req)
+      if (hlsPath) setLinkCookies(res, link, playTtl, req, episode.id)
       recordPlay({ userId, dramaId, episodeId: episode.id, episodeNo: no, source: 'play', ip: clientIp(req), ua: req.headers['user-agent'] })
       const danmu = all("SELECT time_ms, content FROM danmus WHERE episode_id = ? AND status = 'approved' ORDER BY time_ms", episode.id)
       // 续播：该用户在该集的已看进度；连播：下一集集号（同剧存在即给）
       const resume = one('SELECT position FROM history WHERE user_id = ? AND drama_id = ? AND episode_no = ?', userId, dramaId, no)
       const nextEp = one('SELECT no FROM episodes WHERE drama_id = ? AND no > ? ORDER BY no LIMIT 1', dramaId, no)
       return send(res, {
-        dramaId, title: drama.title, episode: { id: episode.id, no: episode.no, title: episode.title },
+        dramaId, title: drama.title, episodeId: episode.id, episodeStatus: episode.status,
+        episode: { id: episode.id, no: episode.no, title: episode.title },
         source: access.source,
         hls: hlsPath,
         expiresIn: playTtl,
@@ -369,9 +394,12 @@ export async function handlePublic(pathname, url, req, res) {
         const sync = await syncAlipayOrder(outTradeNo).catch(() => ({ synced: false }))
         if (sync.synced) order = one('SELECT * FROM orders WHERE id = ?', order.id)
       }
+      const payable = payUrlFor(order)
       return send(res, {
         outTradeNo: order.out_trade_no, status: order.status, amount: order.amount_cny,
-        channel: order.channel, paidAt: order.paid_at, usdt: order.usdt_amount ? {
+        channel: order.channel, paidAt: order.paid_at, expiresAt: order.expires_at,
+        payUrl: payable.payUrl, simulated: Boolean(payable.simulated), payReason: payable.reason ?? null,
+        usdt: order.usdt_amount ? {
           amount: order.usdt_amount, rate: order.usdt_rate, address: order.usdt_address, confirmations: order.usdt_confirmations,
         } : null,
       })
