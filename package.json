@@ -8,7 +8,7 @@
     "start": "node server/index.mjs",
     "dev": "node --watch server/index.mjs",
     "reset-db": "node scripts/reset-db.mjs",
-    "test": "node --test test/",
+    "test": "node --test",
     "seed": "node server/index.mjs"
   },
   "engines": {
