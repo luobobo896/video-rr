@@ -1050,7 +1050,7 @@ async function pageEmail() {
     <div class="form-row" style="margin-top:16px">
       <label>发送渠道
         <select id="em-provider">
-          ${[['dev', '开发模式（不真实发信）'], ['smtp', 'SMTP'], ['resend', 'Resend API'], ['sendgrid', 'SendGrid API']]
+          ${[['dev', '开发模式（不真实发信）'], ['smtp', 'SMTP（账号密码）'], ['microsoft', '微软 OAuth2（Outlook / Hotmail）'], ['resend', 'Resend API'], ['sendgrid', 'SendGrid API']]
             .map(([value, label]) => `<option value="${value}" ${s.provider === value ? 'selected' : ''}>${label}</option>`).join('')}
         </select>
       </label>
@@ -1068,6 +1068,27 @@ async function pageEmail() {
       <div class="form-row">
         <label>账号 <input id="em-user" value="${esc(smtp.user ?? '')}" placeholder="完整邮箱地址" style="width:280px" /></label>
         <label>口令 / 授权码 <input id="em-pass" type="password" placeholder="${smtp.passSet ? '已保存，留空不修改' : 'SMTP 密码或应用专用密码'}" style="width:240px" /></label>
+      </div>
+    </div>
+
+    <div class="panel" style="background:var(--panel-2);margin-top:12px" data-block="microsoft">
+      <h3>微软 OAuth2（outlook.com / hotmail.com / live.com）</h3>
+      <p class="muted" style="margin:4px 0 10px">
+        微软已关闭 SMTP 密码认证，必须用 OAuth2（XOAUTH2）。填 Azure 应用的 clientId（公共客户端，允许设备码流），
+        点「生成授权码」，在浏览器里输入 8 位码并同意，回来点「检查授权」即可，refresh_token 会加密保存。
+      </p>
+      <div class="form-row">
+        <label>clientId <input id="em-ms-client" value="${esc(s.microsoft?.clientId ?? '')}" placeholder="Azure 应用的应用程序(客户端) ID" style="width:340px" /></label>
+        <button class="btn" id="em-ms-start">① 生成授权码</button>
+        <button class="btn primary" id="em-ms-check" disabled>② 检查授权</button>
+      </div>
+      <div class="form-row" style="margin-top:10px">
+        <label>授权状态 <span id="em-ms-state" class="muted">${s.microsoft?.refreshTokenSet ? '已授权：' + esc(s.microsoft.account || '账号已绑定') : '未授权'}</span></label>
+      </div>
+      <div id="em-ms-code" style="display:none;margin-top:10px;padding:12px;border:1px dashed var(--line);border-radius:10px">
+        <div class="muted" style="font-size:12px">在浏览器打开下面链接，输入这 8 位码：</div>
+        <div style="font-size:22px;letter-spacing:.18em;font-weight:700;margin:6px 0" id="em-ms-usercode">—</div>
+        <div class="muted" style="font-size:12px" id="em-ms-uri"></div>
       </div>
     </div>
 
@@ -1128,6 +1149,52 @@ async function pageEmail() {
       const result = await api('/admin/api/email-settings/test', { method: 'POST', body: { to } })
       $('#em-msg').textContent = `成功：${result.provider ?? 'smtp'}${result.host ? ' ' + result.host + ':' + result.port : ''}，测试邮件已发往 ${result.to}`
       toast('测试邮件已发送')
+    } catch (error) {
+      $('#em-msg').textContent = error.message
+    }
+  })
+
+  /* 微软设备码授权：生成 → 用户输入 → 轮询 */
+  let deviceCode = null
+  let msTimer = null
+  const stopPolling = () => { if (msTimer) { clearInterval(msTimer); msTimer = null } }
+
+  $('#em-ms-start').addEventListener('click', async () => {
+    const clientId = $('#em-ms-client').value.trim()
+    if (!clientId) { $('#em-msg').textContent = '请先填写 clientId'; return }
+    try {
+      const result = await api('/admin/api/email-settings/oauth/start', { method: 'POST', body: { clientId } })
+      deviceCode = result.deviceCode
+      $('#em-ms-code').style.display = 'block'
+      $('#em-ms-usercode').textContent = result.userCode
+      $('#em-ms-uri').textContent = result.verificationUri
+      $('#em-ms-state').textContent = `等待授权（${Math.round(result.expiresIn / 60)} 分钟内有效）`
+      $('#em-ms-check').disabled = false
+      $('#em-msg').textContent = ''
+      const poll = async () => {
+        try {
+          const checked = await api('/admin/api/email-settings/oauth/poll', { method: 'POST', body: { clientId, deviceCode } })
+          if (checked.pending || checked.ok) return
+        } catch { /* 授权失败时停轮询，等用户手动点检查 */ }
+      }
+      msTimer = setInterval(poll, Math.max(5, result.interval ?? 5) * 1000)
+    } catch (error) {
+      $('#em-msg').textContent = error.message
+    }
+  })
+
+  $('#em-ms-check').addEventListener('click', async () => {
+    const clientId = $('#em-ms-client').value.trim()
+    if (!clientId || !deviceCode) { $('#em-msg').textContent = '请先生成授权码'; return }
+    $('#em-msg').textContent = '正在检查授权…'
+    try {
+      const result = await api('/admin/api/email-settings/oauth/poll', { method: 'POST', body: { clientId, deviceCode } })
+      if (result.pending) { $('#em-msg').textContent = '还没完成授权，请在浏览器里输入验证码并同意'; return }
+      stopPolling()
+      $('#em-ms-state').textContent = `已授权：${result.account || '账号已绑定'}`
+      $('#em-msg').textContent = '授权成功，已切换为微软 OAuth2 发信'
+      toast('微软邮箱授权成功')
+      await pageEmail()
     } catch (error) {
       $('#em-msg').textContent = error.message
     }

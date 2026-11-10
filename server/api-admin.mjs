@@ -11,6 +11,7 @@ import {
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
 import { policyOf } from './entitlements.mjs'
 import { emailConfig, saveEmailConfig, sendMail, verifySmtp } from './mailer.mjs'
+import { pollDeviceCode, startDeviceCode } from './mailer-oauth.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -604,9 +605,47 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
         smtp: { host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure, user: config.smtp.user, passSet: config.smtp.passSet },
         resend: { keySet: config.resend.keySet },
         sendgrid: { keySet: config.sendgrid.keySet },
+        microsoft: { clientId: config.microsoft.clientId, account: config.microsoft.account, refreshTokenSet: config.microsoft.refreshTokenSet },
       },
       devMode: config.provider === 'dev',
     })
+  }
+
+  if (pathname === '/admin/api/email-settings/oauth/start' && method === 'POST') {
+    if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
+    const clientId = String(body?.clientId ?? emailConfig().microsoft.clientId ?? '').trim()
+    if (!clientId) return send(res, {}, '0400', '请先填写 Azure 应用的 clientId', 400)
+    try {
+      const started = await startDeviceCode(clientId)
+      return send(res, started)
+    } catch (error) {
+      return send(res, { error: error.message }, '0502', error.message, 502)
+    }
+  }
+
+  if (pathname === '/admin/api/email-settings/oauth/poll' && method === 'POST') {
+    if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
+    const clientId = String(body?.clientId ?? emailConfig().microsoft.clientId ?? '').trim()
+    const deviceCode = String(body?.deviceCode ?? '')
+    if (!clientId || !deviceCode) return send(res, {}, '0400', '缺少 clientId 或 deviceCode', 400)
+    try {
+      const result = await pollDeviceCode(clientId, deviceCode)
+      if (!result.done) {
+        if (result.pending) return send(res, { pending: true, error: result.error })
+        return send(res, { pending: false, error: result.error, description: result.description }, '0400', result.description || result.error || '授权失败', 400)
+      }
+      const account = result.account || ''
+      const next = saveEmailConfig({
+        provider: 'microsoft',
+        from: account,
+        microsoft: { clientId, refreshToken: result.refreshToken, account },
+      })
+      setSetting('email', next)
+      log('admin.email.oauth', 'settings', 'email', null, { provider: 'microsoft', account })
+      return send(res, { ok: true, account, provider: 'microsoft' })
+    } catch (error) {
+      return send(res, { error: error.message }, '0502', error.message, 502)
+    }
   }
 
   if (pathname === '/admin/api/email-settings' && method === 'PUT') {

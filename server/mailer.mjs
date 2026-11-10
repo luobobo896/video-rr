@@ -6,6 +6,7 @@ import { connect as netConnect } from 'node:net'
 import { connect as tlsConnect } from 'node:tls'
 import { getSetting } from './db.mjs'
 import { openSecret, sealSecret } from './secretbox.mjs'
+import { MS_SMTP, accessTokenFor, xoauth2String } from './mailer-oauth.mjs'
 
 const env = process.env
 
@@ -47,6 +48,12 @@ export function emailConfig() {
     },
     resend: { apiKey: decrypt(source.resend?.apiKey), keySet: Boolean(source.resend?.apiKey) },
     sendgrid: { apiKey: decrypt(source.sendgrid?.apiKey), keySet: Boolean(source.sendgrid?.apiKey) },
+    microsoft: {
+      clientId: source.microsoft?.clientId ?? '',
+      refreshToken: decrypt(source.microsoft?.refreshToken),
+      refreshTokenSet: Boolean(source.microsoft?.refreshToken),
+      account: source.microsoft?.account ?? '',
+    },
     env: provider === 'smtp' && env.MH_SMTP_HOST && !smtp.host
       ? { host: env.MH_SMTP_HOST, port: Number(env.MH_SMTP_PORT ?? 465), secure: (env.MH_SMTP_SECURE ?? '1') === '1', user: env.MH_SMTP_USER, pass: env.MH_SMTP_PASS }
       : null,
@@ -90,6 +97,13 @@ export function saveEmailConfig(payload) {
     },
     resend: { apiKey: payload.resend?.apiKey ? encryptSecret(payload.resend.apiKey) : (getSetting('email', {})?.resend?.apiKey ?? '') },
     sendgrid: { apiKey: payload.sendgrid?.apiKey ? encryptSecret(payload.sendgrid.apiKey) : (getSetting('email', {})?.sendgrid?.apiKey ?? '') },
+    microsoft: {
+      clientId: String(payload.microsoft?.clientId ?? current.microsoft?.clientId ?? '').trim(),
+      refreshToken: payload.microsoft?.refreshToken
+        ? encryptSecret(payload.microsoft.refreshToken)
+        : (getSetting('email', {})?.microsoft?.refreshToken ?? ''),
+      account: String(payload.microsoft?.account ?? current.microsoft?.account ?? '').trim(),
+    },
   }
   return next
 }
@@ -169,7 +183,7 @@ async function smtpLogin(socket, config) {
   }
 }
 
-async function smtpSend(config, { to, subject, text }) {
+async function smtpSend(config, { to, subject, text }, auth = { mode: 'login' }) {
   let socket = await openSocket(config)
   if (!config.secure) {
     await readResponse(socket)
@@ -184,9 +198,13 @@ async function smtpSend(config, { to, subject, text }) {
     await command(socket, `EHLO ${config.host}`)
   }
 
-  if (config.user && config.pass) {
-    const auth = await command(socket, 'AUTH LOGIN', [334, 250, 235, 503])
-    if (auth.code === 334) {
+  if (auth.mode === 'xoauth2') {
+    socket.write(`AUTH XOAUTH2 ${xoauth2String(config.user, auth.accessToken)}\r\n`)
+    const done = await readResponse(socket)
+    if (done.code !== 235) throw new Error(`XOAUTH2 认证失败（${done.code}）：${done.text.replace(/\s+/g, ' ').slice(0, 160)}`)
+  } else if (config.user && config.pass) {
+    const login = await command(socket, 'AUTH LOGIN', [334, 250, 235, 503])
+    if (login.code === 334) {
       await command(socket, b64(config.user), [334])
       await command(socket, b64(config.pass), [235])
     }
@@ -235,6 +253,17 @@ async function sendgridSend(config, { to, subject, text }) {
 
 export async function sendMail({ to, subject, text }) {
   const config = emailConfig()
+  if (config.provider === 'microsoft') {
+    const ms = config.microsoft
+    if (!ms.clientId || !ms.refreshToken) throw new Error('微软 OAuth2 未完成授权（缺少 clientId 或 refresh_token）')
+    const from = config.from || ms.account
+    const accessToken = await accessTokenFor({ clientId: ms.clientId, refreshToken: ms.refreshToken })
+    return smtpSend(
+      { ...MS_SMTP, user: from, from, fromName: config.fromName, source: 'microsoft-oauth2' },
+      { to, subject, text },
+      { mode: 'xoauth2', accessToken },
+    )
+  }
   if (config.provider === 'resend' && config.resend.apiKey) return resendSend(config, { to, subject, text })
   if (config.provider === 'sendgrid' && config.sendgrid.apiKey) return sendgridSend(config, { to, subject, text })
   if (config.provider === 'smtp') {
@@ -249,6 +278,36 @@ export async function sendMail({ to, subject, text }) {
 /** 连接/凭据自检（不发信）。 */
 export async function verifySmtp() {
   const config = emailConfig()
+  if (config.provider === 'microsoft') {
+    try {
+      const ms = config.microsoft
+      if (!ms.clientId) return { ok: false, provider: 'microsoft', error: '缺少 clientId（需先注册 Azure 应用）' }
+      if (!ms.refreshToken) return { ok: false, provider: 'microsoft', error: '尚未完成设备码授权（无 refresh_token）' }
+      const accessToken = await accessTokenFor({ clientId: ms.clientId, refreshToken: ms.refreshToken })
+      const user = config.from || ms.account
+      let socket
+      try {
+        socket = await openSocket(MS_SMTP)
+        await readResponse(socket)
+        await command(socket, `EHLO ${MS_SMTP.host}`)
+        await command(socket, 'STARTTLS', [220])
+        const secure = tlsConnect({ socket, servername: MS_SMTP.host, rejectUnauthorized: false })
+        await new Promise((resolve, reject) => { secure.once('secureConnect', resolve); secure.once('error', reject) })
+        socket = secure
+        await command(socket, `EHLO ${MS_SMTP.host}`)
+        socket.write(`AUTH XOAUTH2 ${xoauth2String(user, accessToken)}\r\n`)
+        const done = await readResponse(socket)
+        socket.write('QUIT\r\n'); socket.end()
+        if (done.code !== 235) return { ok: false, provider: 'microsoft', error: `XOAUTH2 ${done.code}：${done.text.replace(/\s+/g, ' ').slice(0, 140)}` }
+        return { ok: true, provider: 'microsoft', host: MS_SMTP.host, port: MS_SMTP.port, account: user }
+      } catch (error) {
+        try { socket?.destroy() } catch { /* ignore */ }
+        return { ok: false, provider: 'microsoft', error: error.message }
+      }
+    } catch (error) {
+      return { ok: false, provider: 'microsoft', error: error.message }
+    }
+  }
   if (config.provider !== 'smtp') return { ok: true, provider: config.provider, note: 'HTTP API 渠道，发送时校验 Key' }
   const smtp = smtpConfig()
   if (!smtp) return { ok: false, provider: 'smtp', error: 'SMTP 未配置完整' }
