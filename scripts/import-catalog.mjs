@@ -112,40 +112,58 @@ async function download(url, target, expectedBytes = 0) {
     if (size > 1_000_000 && matches) return { skipped: true, bytes: size, file: target }
     if (size > 1_000_000 && !matches) log(`  片源已变更（本地 ${(size / 1048576).toFixed(1)}MB ≠ 期望 ${(expectedBytes / 1048576).toFixed(1)}MB），重新下载`)
     rmSync(target, { force: true })
+    rmSync(`${target}.part`, { force: true })
   }
   const part = `${target}.part`
-  rmSync(part, { force: true })
-  const timeout = Number(process.env.MH_DOWNLOAD_TIMEOUT ?? 900_000)
-  const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeout) })
-  if (!response.ok || !response.body) throw new Error(`下载失败 HTTP ${response.status}：${url}`)
-  const total = Number(response.headers.get('content-length') ?? 0)
-  const totalMb = total ? (total / 1048576).toFixed(1) : '?'
-  let received = 0
-  let lastTick = Date.now()
-  const meter = new Transform({
-    transform(chunk, _encoding, callback) {
-      received += chunk.length
-      const now = Date.now()
-      if (now - lastTick >= 5000) {
-        lastTick = now
-        log(`  下载 ${(received / 1048576).toFixed(1)}/${totalMb} MB`)
+  const timeout = Number(process.env.MH_DOWNLOAD_TIMEOUT ?? 1_800_000)
+  const maxAttempts = Number(process.env.MH_DOWNLOAD_RETRY ?? 4)
+  let lastError = null
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    // 断点续传：archive.org 对慢链路经常中途超时，残片必须保留下来接着下
+    const resumeFrom = existsSync(part) ? statSync(part).size : 0
+    try {
+      const response = await fetch(url, {
+        redirect: 'follow',
+        headers: resumeFrom > 0 ? { range: `bytes=${resumeFrom}-` } : {},
+        signal: AbortSignal.timeout(timeout),
+      })
+      const resumed = response.status === 206
+      if (response.status !== 200 && response.status !== 206) throw new Error(`下载失败 HTTP ${response.status}：${url}`)
+      if (!response.body) throw new Error(`下载响应无内容：${url}`)
+      const startAt = resumed ? resumeFrom : 0
+      const remaining = Number(response.headers.get('content-length') ?? 0)
+      const totalMb = remaining ? ((startAt + remaining) / 1048576).toFixed(1) : '?'
+      if (resumed) log(`  续传 从 ${(startAt / 1048576).toFixed(1)}/${totalMb} MB 继续（第 ${attempt} 次）`)
+      let received = startAt
+      let lastTick = Date.now()
+      const meter = new Transform({
+        transform(chunk, _encoding, callback) {
+          received += chunk.length
+          const now = Date.now()
+          if (now - lastTick >= 5000) {
+            lastTick = now
+            log(`  下载 ${(received / 1048576).toFixed(1)}/${totalMb} MB`)
+          }
+          callback(null, chunk)
+        },
+      })
+      await pipeline(Readable.fromWeb(response.body), meter, createWriteStream(part, { flags: resumed ? 'a' : 'w' }))
+      const size = statSync(part).size
+      if (size < 100_000) throw new Error(`下载内容过小（${size} 字节）：${url}`)
+      if (expectedBytes > 0 && Math.abs(size - expectedBytes) > Math.max(1024, expectedBytes * 0.001)) {
+        throw new Error(`下载不完整（${(size / 1048576).toFixed(1)}MB ≠ 期望 ${(expectedBytes / 1048576).toFixed(1)}MB）：${url}`)
       }
-      callback(null, chunk)
-    },
-  })
-  await pipeline(Readable.fromWeb(response.body), meter, createWriteStream(part))
-  const size = statSync(part).size
-  if (size < 100_000) {
-    rmSync(part, { force: true })
-    throw new Error(`下载内容过小（${size} 字节）：${url}`)
+      renameSync(part, target)
+      log(`  下载完成 ${(size / 1048576).toFixed(1)} MB`)
+      return { skipped: false, bytes: size, file: target }
+    } catch (error) {
+      lastError = error
+      const kept = existsSync(part) ? statSync(part).size : 0
+      log(`  第 ${attempt} 次下载中断：${error.message}（已保留 ${(kept / 1048576).toFixed(1)}MB）`)
+      if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 5000 * attempt))
+    }
   }
-  if (total && size !== total) {
-    rmSync(part, { force: true })
-    throw new Error(`下载不完整（${size}/${total} 字节）：${url}`)
-  }
-  renameSync(part, target)
-  log(`  下载完成 ${(size / 1048576).toFixed(1)} MB`)
-  return { skipped: false, bytes: size, file: target }
+  throw new Error(`下载多次失败（已尝试 ${maxAttempts} 次）：${lastError?.message ?? 'unknown'}`)
 }
 
 function pickRenditions(sourceHeight) {
