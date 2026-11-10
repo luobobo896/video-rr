@@ -30,6 +30,11 @@ NODE_ENV=production
 EOF
   chmod 600 "$APP/.env"
 fi
+if ! grep -q '^MH_LINK_SECRET=' "$APP/.env"; then
+  LINK=$(head -c 24 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-32)
+  printf 'MH_LINK_SECRET=%s\n' "$LINK" >> "$APP/.env"
+  chmod 600 "$APP/.env"
+fi
 set -a; . "$APP/.env"; set +a
 [ -n "${MH_LINK_SECRET:-}" ] || { echo "MH_LINK_SECRET 缺失"; exit 1; }
 
