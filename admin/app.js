@@ -74,13 +74,26 @@ async function api(path, options = {}) {
   if (state.token) headers.authorization = `Bearer ${state.token}`
   if (options.body !== undefined && !(options.body instanceof Blob)) headers['content-type'] = 'application/json'
   const url = BASE ? path.replace('/admin/api', BASE + '/api') : path
-  const res = await fetch(url, {
-    ...options,
-    headers,
-    body: options.body === undefined ? undefined : (options.body instanceof Blob ? options.body : JSON.stringify(options.body)),
-  })
-  const json = await res.json().catch(() => ({ code: '0000', data: {} }))
+  let res
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers,
+      body: options.body === undefined ? undefined : (options.body instanceof Blob ? options.body : JSON.stringify(options.body)),
+    })
+  } catch {
+    throw new Error('网络异常，请检查网络后重试')
+  }
+  const text = await res.text()
+  let json
+  try {
+    json = text ? JSON.parse(text) : {}
+  } catch {
+    // 反代 502/504 会回 HTML，之前被 catch 成 {code:'0000'} 显示成空表，掩盖了故障
+    throw new Error(res.ok ? '服务返回了非预期内容，请稍后重试' : `服务暂时不可用（${res.status}），请稍后重试`)
+  }
   if (json.code === '0401') { logout(); throw new Error(json.msg ?? '未登录') }
+  if (!res.ok && json.code === undefined) throw new Error(`服务暂时不可用（${res.status}），请稍后重试`)
   if (json.code !== '0000') throw new Error(json.msg ?? `请求失败 ${path}`)
   return json.data
 }
@@ -244,9 +257,19 @@ async function route() {
   clearTimers()
   const hash = location.hash.replace(/^#\/?/, '') || 'dashboard'
   state.page = hash.split('?')[0].split('/')[0]
-  const key = NAV.find(([id]) => id === state.page) ? state.page : 'dashboard'
+  const navItem = NAV.find(([id]) => id === state.page)
+  const key = navItem ? state.page : 'dashboard'
+  const perm = (NAV.find(([id]) => id === key) ?? [])[2]
+  const perms = new Set(state.me?.permissions ?? [])
   $('#page-title').textContent = NAV.find(([id]) => id === key)[1]
   renderNav()
+  // 页面级权限守卫：菜单已经按权限隐藏，手改 hash 时也不发请求、不渲染空表
+  if (perm && !perms.has(perm)) {
+    view.innerHTML = `<div class="card empty-card"><h3>无权限访问</h3>
+      <p>当前账号缺少 <code>${esc(perm)}</code> 权限，请联系超级管理员分配角色。</p>
+      <a class="btn sm" href="#/dashboard">返回数据概览</a></div>`
+    return
+  }
   try {
     if (key === 'dashboard') await pageDashboard()
     else if (key === 'dramas') await pageDramas()
@@ -1295,7 +1318,7 @@ async function pageRefunds() {
     <td>${refund.id}</td><td class="mono">${esc(refund.out_trade_no)}</td><td>${esc(refund.nickname ?? '')}</td>
     <td>¥${Number(refund.amount).toFixed(2)}</td><td>${esc(refund.reason)}</td>
     <td>${refund.status === 'pending' ? '<span class="pill">待审批</span>' : pillOf(refund.status)}</td>
-    <td class="row-actions">${refund.status === 'pending' ? `<button class="btn sm primary" data-approve="${refund.id}">通过</button>
+    <td class="row-actions">${refund.status === 'pending' ? `<button class="btn sm primary" data-approve="${refund.id}" data-info="${esc(`${refund.out_trade_no} · ${refund.nickname ?? ''} · ¥${Number(refund.amount).toFixed(2)}`)}">通过</button>
       <button class="btn sm danger" data-reject="${refund.id}">驳回</button>` : '—'}</td>
   </tr>`)
   view.innerHTML = panel('退款审核', `
@@ -1303,6 +1326,9 @@ async function pageRefunds() {
     ${table(['ID', '单号', '用户', '金额', '原因', '状态', '操作'], rows)}`)
   view.querySelectorAll('[data-approve]').forEach((button) => {
     button.addEventListener('click', async () => {
+      // 通过是不可逆的资金动作（回收权益 + 标记已退款），必须先确认影响面
+      const info = button.dataset.info ?? ''
+      if (!window.confirm(`确认通过这笔退款？\n\n${info}\n\n通过后：订单置为已退款、该用户对应权益立即回收。`)) return
       try {
         const result = await api(`/admin/api/refunds/${button.dataset.approve}/approve`, { method: 'POST', body: {} })
         toast(result.warning ?? '退款完成，权益已回收')

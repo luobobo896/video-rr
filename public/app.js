@@ -422,7 +422,9 @@ function openPaywall(detail, options = {}) {
     ? channels.map((channel) => `<button class="channel" data-channel="${escapeHtml(channel.code)}">${escapeHtml(channel.label)}</button>`).join('')
     : `<div class="paywall-sub" style="color:#ff8a8a">${escapeHtml(unavailableChannelReason() || '当前暂无可用支付渠道，请联系客服开通')}</div>`
 
+  let busy = false
   const go = async (channel) => {
+    if (busy) return
     const payload = selected
     track('paywall_click', { dramaId, meta: { channel, product: payload.productType, planId: payload.planId ?? null } })
     if (!state.token) {
@@ -433,6 +435,9 @@ function openPaywall(detail, options = {}) {
       return
     }
     if (!channel) { earn('暂无可用支付渠道'); return }
+    busy = true
+    const buttons = [...modal.querySelectorAll('[data-channel]')]
+    buttons.forEach((button) => { button.disabled = true; button.classList.add('busy') })
     earn('正在创建订单…')
     // 弹窗必须在 await 之前打开，否则 iOS Safari / 微信内会被拦截
     const popup = channel === 'usdt' ? null : window.open('', '_blank', 'width=520,height=680')
@@ -442,12 +447,15 @@ function openPaywall(detail, options = {}) {
       if (order.payUrl) {
         const target = order.payUrl.startsWith('http') ? order.payUrl : BASE + order.payUrl
         if (popup) popup.location.href = target
-        else window.open(target, '_blank', 'width=520,height=680')
+        else {
+          // 弹窗被拦（微信/部分浏览器）：退回当前页跳转，否则用户点支付没有任何反应
+          toast('若未自动跳转，请允许本站弹出窗口')
+          location.href = target
+          return
+        }
       }
       if (order.simulated) earn('已打开模拟收银台，付款后自动到账')
-      if (order.usdt) {
-        earnHtml(`请向 <b>${escapeHtml(order.usdt.address)}</b> 转入 <b>${order.usdt.amount} USDT</b>（${order.usdt.network}），15 分钟内有效`)
-      }
+      if (order.usdt) showUsdt(order.usdt, order.outTradeNo)
       const done = await waitOrderPaid(order.outTradeNo, (tick) => {
         earn(`等待支付… ${ORDER_STATUS[tick.status] ?? tick.status}（到账后自动更新，无需刷新）`)
       }, () => !stillMine())
@@ -460,12 +468,60 @@ function openPaywall(detail, options = {}) {
       } else if (done && (done.status === 'closed' || done.status === 'refunded')) {
         earn(`订单${ORDER_STATUS[done.status]}，可在「我的」页继续支付或重新下单`)
       } else if (done) {
-        earn('仍在等待到账（USDT 需 19 个区块确认，通常 1–3 分钟）。可关闭此窗，到账后自动开通，也可在「我的」页继续支付')
+        const confirms = order.usdt?.minConfirmations ?? 19
+        earn(`仍在等待到账（USDT 需 ${confirms} 个区块确认，通常 1–3 分钟）。可关闭此窗，到账后自动开通，也可在「我的」页继续支付`)
       }
     } catch (error) {
       if (popup && !popup.closed) popup.close()
       earn(error.message)
+    } finally {
+      busy = false
+      buttons.forEach((button) => { button.disabled = false; button.classList.remove('busy') })
     }
+  }
+
+  /** USDT 收银台：地址一键复制 + 实时倒计时 + 服务端下发的汇率/确认数（不再写死）。 */
+  function showUsdt(usdt, outTradeNo) {
+    const deadline = usdt.expiresAt ? new Date(String(usdt.expiresAt).replace(' ', 'T') + 'Z').getTime() : Date.now() + 15 * 60_000
+    const box = document.createElement('div')
+    box.className = 'usdt-box'
+    box.innerHTML = `<div class="usdt-row"><span>金额</span><b id="usdt-amount">${Number(usdt.amount).toFixed(2)} USDT</b></div>
+      <div class="usdt-row"><span>汇率</span><span>1 USDT ≈ ¥${Number(usdt.rate ?? 0).toFixed(2)}</span></div>
+      <div class="usdt-row"><span>网络</span><span>${escapeHtml(usdt.network ?? 'TRC20')}（${usdt.minConfirmations ?? 19} 确认）</span></div>
+      <div class="usdt-addr"><code id="usdt-address">${escapeHtml(usdt.address ?? '')}</code>
+        <button class="btn-ghost" id="usdt-copy">复制地址</button></div>
+      <div class="usdt-row"><span>剩余</span><b id="usdt-left">--:--</b></div>
+      <div class="usdt-tip">请精确转账该金额，多笔同额订单可能混淆；到账后自动开通权益。</div>`
+    const host = $('#paywall-msg')
+    host?.insertAdjacentElement('afterend', box)
+    const buttonsEnable = () => modal.querySelectorAll('[data-channel]').forEach((button) => { button.disabled = false; button.classList.remove('busy') })
+    const tick = () => {
+      const left = Math.max(0, Math.floor((deadline - Date.now()) / 1000))
+      const node = box.querySelector('#usdt-left')
+      if (!node) return
+      node.textContent = `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`
+      if (left === 0) {
+        clearInterval(timer)
+        box.querySelector('#usdt-copy')?.setAttribute('disabled', 'disabled')
+        earn('订单已超时，请重新下单')
+        buttonsEnable()
+      }
+    }
+    const timer = setInterval(tick, 1000)
+    tick()
+    box.querySelector('#usdt-copy')?.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(String(usdt.address ?? ''))
+        toast('收款地址已复制')
+      } catch {
+        const range = document.createRange()
+        range.selectNodeContents(box.querySelector('#usdt-address'))
+        const selection = window.getSelection()
+        selection.removeAllRanges()
+        selection.addRange(range)
+        toast('已选中地址，请按 Ctrl/⌘+C 复制')
+      }
+    })
   }
 
   const markSelected = (next) => {
@@ -594,13 +650,13 @@ function renderChrome() {
     <a class="logo" href="#/home"><span class="logo-mark">影</span>影巢</a>
     <form class="search" id="search-form">
       <span>🔍</span>
-      <input id="search-input" placeholder="搜索剧名、演员、导演" autocomplete="off" />
+      <input id="search-input" placeholder="搜索剧名、简介、标签" autocomplete="off" />
     </form>
     <div class="top-actions">
-      <a class="top-action" href="#/me"><span class="ico">🕘</span>历史</a>
-      <a class="top-action" href="#/me"><span class="ico">⭐</span>收藏</a>
-      <a class="top-action" href="#/me"><span class="ico">✉️</span>消息</a>
-      <a class="top-action" href="#/me"><span class="ico">💎</span>会员</a>
+      <a class="top-action" href="#/me?tab=history"><span class="ico">🕘</span>历史</a>
+      <a class="top-action" href="#/me?tab=favorite"><span class="ico">⭐</span>收藏</a>
+      <a class="top-action" href="#/me?tab=message"><span class="ico">✉️</span>消息</a>
+      <a class="top-action" href="#/me?tab=vip"><span class="ico">💎</span>会员</a>
       <button class="btn-login" id="login-btn" title="${state.user ? '进入个人中心' : '登录 / 注册'}" aria-label="${state.user ? `进入个人中心（当前账号 ${escapeHtml(state.user.nickname ?? '我的账号')}）` : '登录或注册'}">${state.user ? escapeHtml(state.user.nickname ?? '我的账号') : '登录'}</button>
     </div>`
   $('#search-form').addEventListener('submit', (event) => {
@@ -1211,7 +1267,7 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
 
   const episode = data.episode ?? detail.episodes.find((item) => String(item.no) === String(episodeNo)) ?? {}
   const sourceLabel = { free: '免费观看', subscription: '会员权益', purchase: '已购买', trial: '试看' }[data.source] ?? ''
-  const expiredNotice = data.hls ? `播放链接 ${Math.round((data.expiresIn ?? 300) / 60)} 分钟内有效，过期自动续期` : ''
+  const expiredNotice = data.hls ? `播放链接 ${Math.round((data.expiresIn ?? 300) / 60)} 分钟内有效，失效后自动重连` : ''
 
   view.innerHTML = `
     <div class="player-wrap">
@@ -1502,7 +1558,7 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
   vipFloat()
 }
 
-async function renderMe() {
+async function renderMe(params = {}) {
   if (!state.token) {
     view.innerHTML = `
       <div class="section-head" style="margin-top:26px"><div class="section-title">我的</div></div>
@@ -1543,7 +1599,7 @@ async function renderMe() {
           ${(data.completion?.missing ?? []).length ? `<span class="me-sub">待完善：${escapeHtml(data.completion.missing.join('、'))}</span>` : ''}
         </div>
       </div>
-      <div class="me-card">
+      <div class="me-card" id="me-vip">
         <div class="me-card-title">会员权益</div>
         ${sub
           ? `<div class="me-big">会员中<small class="me-days">剩 ${Math.max(0, Math.ceil((Date.parse(String(sub.validTo).replace(' ', 'T')) - Date.now()) / 86400000))} 天</small></div>
@@ -1568,7 +1624,7 @@ async function renderMe() {
         }).join('')}</div>`}
       </div>
     </div>
-    <div class="section-head"><div class="section-title">消息</div><div class="section-hint">权益与订单通知</div></div>
+    <div class="section-head" id="me-message"><div class="section-title">消息</div><div class="section-hint">权益与订单通知</div></div>
     <div class="me-grid">
       ${messages.length === 0 ? '<div class="me-card"><div class="me-sub">暂无消息</div></div>'
         : messages.slice(0, 4).map((message) => `<div class="me-card">
@@ -1577,12 +1633,14 @@ async function renderMe() {
             <div class="me-sub">${escapeHtml(message.body)}</div>
           </div>`).join('')}
     </div>
-    <div class="section-head"><div class="section-title">观看历史</div></div>
+    <div class="section-head" id="me-history"><div class="section-title">观看历史</div></div>
     <div class="grid">${data.history.map((item) => `<a class="card" href="#/play/${item.dramaId}/${item.episode}"><div class="poster"><img src="${escapeHtml(mediaUrl(item.coverUrl))}" alt="" /></div><div class="card-title">${escapeHtml(item.title)}</div><div class="card-sub">看到第 ${item.episode} 集</div></a>`).join('') || '<div class="empty">还没有观看记录</div>'}</div>
-    <div class="section-head"><div class="section-title">我的收藏</div></div>
+    <div class="section-head" id="me-favorite"><div class="section-title">我的收藏</div></div>
     <div class="grid">${data.favorites.map((item) => posterCard(item)).join('') || '<div class="empty">还没有收藏</div>'}</div>`
-  $('#me-subscribe').addEventListener('click', async () => {
-    const { plans } = await api('/api/plans')
+  // 顶栏四个入口带 ?tab=：个人中心是整页，进来后滚到对应区块（否则四个入口行为完全一样）
+  const meAnchor = { history: '#me-history', favorite: '#me-favorite', message: '#me-message', vip: '#me-vip' }[params.tab]
+  if (meAnchor) setTimeout(() => document.querySelector(meAnchor)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 150)
+  $('#me-subscribe').addEventListener('click', async () => {    const { plans } = await api('/api/plans')
     openPaywall({ dramaId: 0, priceInfo: { plans } }, { title: '开通 / 续费会员' })
   })
   $('#edit-profile').addEventListener('click', () => openProfileEdit(data.user))
@@ -1850,7 +1908,7 @@ async function route() {
     else if (segments[0] === 'drama') await renderDrama(segments[1])
     else if (segments[0] === 'play') await renderPlay(segments[1], segments[2] ?? '1', params)
     else if (segments[0] === 'playlists') await renderPlaylists()
-  else if (segments[0] === 'me') await renderMe()
+  else if (segments[0] === 'me') await renderMe(params)
     else await renderHome()
   } catch (error) {
     if (error.code === '0401') {

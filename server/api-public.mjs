@@ -625,8 +625,15 @@ export async function handlePublic(pathname, url, req, res) {
         req.on('end', () => resolve(body))
       })
       const params = Object.fromEntries(new URLSearchParams(raw))
-      const result = handleAlipayNotify(params)
-      return send(res, result)
+      // 支付宝只认纯文本 success：任何 JSON 信封（含异常被外层兜成信封）都会触发 25 小时重试
+      let ok = false
+      try {
+        ok = handleAlipayNotify(params)?.code === '0000'
+      } catch (error) {
+        console.warn('[notify/alipay]', error?.message ?? error)
+      }
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+      return res.end(ok ? 'success' : 'failure')
     }
 
     /* USDT 只走进程内链上监听（usdt-watch.mjs），不提供公网回调入口 */

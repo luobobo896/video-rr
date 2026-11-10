@@ -179,6 +179,49 @@ export function createOrder({ userId, productType, planId, dramaId, channel, cou
   const channelCode = row.channel_code
   const config = channelConfig(row)
   const rate = Number(config.rate ?? getSetting('site', {}).usdtRate ?? 7.2)
+  const alipayConfigured = Boolean(config.appId && config.privateKey && config.publicKey)
+  if (channelCode === 'alipay' && !alipayConfigured && !SIM_PAY_ALLOWED()) {
+    throw new CommerceError('channel_not_configured', '支付宝商户密钥未配置，暂不可用', 409)
+  }
+
+  /** 渠道相关的返回体（新建单与复用单共用，避免两处分支漂移）。 */
+  const paymentOf = (order) => {
+    if (channelCode === 'alipay') {
+      return {
+        order,
+        payUrl: alipayConfigured ? buildAlipayPayUrl(order, config) : `/pay/alipay-sim/${order.out_trade_no}`,
+        simulated: !alipayConfigured,
+      }
+    }
+    if (channelCode === 'usdt') {
+      return {
+        order,
+        payUrl: null,
+        usdt: {
+          network: config.network ?? 'TRC20',
+          address: order.usdt_address,
+          amount: order.usdt_amount,
+          rate: order.usdt_rate,
+          expiresAt: order.expires_at,
+          minConfirmations: Number(config.minConfirmations ?? 19),
+        },
+      }
+    }
+    return { order, payUrl: `/pay/mock/${order.out_trade_no}` }
+  }
+
+  // 幂等：120 秒内同一用户 + 同一商品 + 同渠道的未支付订单直接复用，避免连点产生多笔
+  const reusable = one(`SELECT * FROM orders
+    WHERE user_id = ? AND channel = ? AND status IN ('created', 'pending')
+      AND product_type = ? AND COALESCE(plan_id, 0) = ? AND COALESCE(drama_id, 0) = ?
+      AND ABS(amount_cny - ?) < 0.005
+      AND datetime(created_at) >= datetime('now', '-120 seconds')
+    ORDER BY id DESC LIMIT 1`,
+  userId, channelCode, productType,
+  productType === 'subscription' ? plan.id : 0,
+  productType === 'single' ? Number(dramaId) : 0,
+  amount)
+  if (reusable) return { ...paymentOf(reusable), reused: true }
 
   const order = {
     outTradeNo: outTradeNo(),
@@ -206,33 +249,7 @@ export function createOrder({ userId, productType, planId, dramaId, channel, cou
   }),
   )
   const created = one('SELECT * FROM orders WHERE id = ?', Number(info.lastInsertRowid))
-
-  if (channelCode === 'alipay') {
-    const configured = Boolean(config.appId && config.privateKey && config.publicKey)
-    if (!configured && !SIM_PAY_ALLOWED()) {
-      throw new CommerceError('channel_not_configured', '支付宝商户密钥未配置，暂不可用', 409)
-    }
-    return {
-      order: created,
-      payUrl: configured ? buildAlipayPayUrl(created, config) : `/pay/alipay-sim/${created.out_trade_no}`,
-      simulated: !configured,
-    }
-  }
-  if (channelCode === 'usdt') {
-    return {
-      order: created,
-      payUrl: null,
-      usdt: {
-        network: config.network ?? 'TRC20',
-        address: created.usdt_address,
-        amount: created.usdt_amount,
-        rate: created.usdt_rate,
-        expiresAt: created.expires_at,
-        minConfirmations: Number(config.minConfirmations ?? 19),
-      },
-    }
-  }
-  return { order: created, payUrl: `/pay/mock/${created.out_trade_no}` }
+  return paymentOf(created)
 }
 
 /* ---------------- 支付：发放 + 幂等 ---------------- */

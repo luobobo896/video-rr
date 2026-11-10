@@ -489,3 +489,21 @@ button { font-family: inherit; cursor: pointer; }
 }
 .card .poster { position: relative; }
 .me-days { margin-left: 8px; font-size: 12px; font-weight: 500; color: var(--text-3); }
+
+/* ---------- USDT 收银台（复制地址 / 倒计时 / 汇率） ---------- */
+.usdt-box {
+  margin-top: 10px; padding: 12px; border-radius: 12px;
+  background: rgba(120, 255, 190, .06); border: 1px solid rgba(120, 255, 190, .22);
+  font-size: 13px; display: flex; flex-direction: column; gap: 8px;
+}
+.usdt-row { display: flex; justify-content: space-between; gap: 12px; color: var(--text-2); }
+.usdt-row b { color: var(--text-1); font-variant-numeric: tabular-nums; }
+.usdt-addr { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.usdt-addr code {
+  flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  background: rgba(0, 0, 0, .28); padding: 6px 8px; border-radius: 8px;
+}
+.usdt-tip { color: var(--text-3); font-size: 12px; line-height: 1.5; }
+.channel:disabled { opacity: .5; cursor: not-allowed; }
+.channel.busy { position: relative; }

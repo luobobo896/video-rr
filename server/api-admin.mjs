@@ -153,6 +153,24 @@ const PERM = {
   paySettings: 'admin.write',
 }
 
+/**
+ * 上传类接口的前置鉴权：必须在把请求体写进磁盘之前调用，
+ * 否则匿名请求也能往 storage/uploads 写 2GB 垃圾文件。
+ */
+export function preAuthorizeAdmin(req, perm) {
+  const auth = authOf(req)
+  const principal = auth?.role === 'admin' ? loadPrincipal(Number(auth.sub)) : undefined
+  if (!principal) return { ok: false, code: '0401', msg: '需要管理员登录', status: 401 }
+  if (principal.admin.must_change_password) {
+    return { ok: false, code: '0403', msg: '请先修改初始密码', status: 403, data: { required: 'password_change' } }
+  }
+  if (perm && !hasPermission(principal, perm)) {
+    audit({ actorId: principal.admin.id, actorName: principal.admin.username, action: 'rbac.denied', targetType: 'permission', targetId: perm, ip: clientIpOf(req), result: 'denied' })
+    return { ok: false, code: '0403', msg: '无权限执行该操作', status: 403, data: { required: perm } }
+  }
+  return { ok: true, principal }
+}
+
 export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   const method = req.method
   const body = rawBody !== undefined ? rawBody : (['POST', 'PUT', 'PATCH'].includes(method) ? await readBody(req) : {})
@@ -325,13 +343,31 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
     const dramaId = Number(seg[1])
     const before = one('SELECT * FROM dramas WHERE id = ?', dramaId)
     if (!before) return send(res, {}, '0404', '剧集不存在', 404)
+    const nextStatus = body.status ?? before.status
+    // 上架是独立权限 + 必须过资料完整性校验（否则编辑口可以绕过发布口的检查）
+    if (nextStatus === 'published' && before.status !== 'published') {
+      if (!guard(PERM.dramaPublish)) return deny(PERM.dramaPublish)
+      const check = dramaCompleteness({
+        ...before,
+        title: body.title ?? before.title,
+        category: body.category ?? before.category,
+        cover_url: body.coverUrl ?? before.cover_url,
+        year: Number(body.year ?? before.year),
+        area: body.area ?? before.area,
+        score: Number(body.score ?? before.score),
+      })
+      if (!check.complete) {
+        return send(res, { completeness: check, fields: Object.keys(check.fields).filter((key) => !check.fields[key]), missing: check.missing },
+          '0400', `以下信息未补全，无法上架：${labelMissing(check.missing)}`, 400)
+      }
+    }
     run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, score = ?, status = ?, sort = ?
       WHERE id = ?`,
     body.title ?? before.title, body.subTitle ?? before.sub_title, body.coverUrl ?? before.cover_url,
     body.description ?? before.description, Number(body.year ?? before.year), body.area ?? before.area,
-    body.category ?? before.category, Number(body.score ?? before.score), body.status ?? before.status,
+    body.category ?? before.category, Number(body.score ?? before.score), nextStatus,
     Number(body.sort ?? before.sort), dramaId)
-    log('content.drama.update', 'drama', dramaId, before, body)
+    log('content.drama.update', 'drama', dramaId, before, { ...body, status: nextStatus })
     return send(res, one('SELECT * FROM dramas WHERE id = ?', dramaId))
   }
 
@@ -764,9 +800,12 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   }
   if (seg[0] === 'users' && seg[1] && seg[2] === 'status' && method === 'POST') {
     if (!guard(PERM.userManage)) return deny(PERM.userManage)
-    run('UPDATE users SET status = ? WHERE id = ?', body.status === 'banned' ? 'banned' : 'active', Number(seg[1]))
-    log('user.status.update', 'user', seg[1], null, { status: body.status }, body.reason)
-    return send(res, { ok: true })
+    const nextStatus = body.status === 'banned' ? 'banned' : 'active'
+    run('UPDATE users SET status = ? WHERE id = ?', nextStatus, Number(seg[1]))
+    // 封禁必须立刻断掉已发出的 token（7 天有效期内否则继续可用）
+    const revoked = nextStatus === 'banned' ? await revokeSessions(Number(seg[1]), 'user') : 0
+    log('user.status.update', 'user', seg[1], null, { status: nextStatus, revokedSessions: revoked }, body.reason)
+    return send(res, { ok: true, revokedSessions: revoked })
   }
   // 邮件通道异常时的运维兜底：给指定用户签发一次性登录码（明文只返回这一次，写审计）
   if (seg[0] === 'users' && seg[1] && seg[2] === 'login-code' && method === 'POST') {

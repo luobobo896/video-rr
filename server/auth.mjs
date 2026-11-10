@@ -213,11 +213,24 @@ export function publicUser(user) {
   }
 }
 
+/**
+ * 校验 token 并确认账号仍然可登录（封禁即时生效）。
+ * 之前只验签名+过期，封禁只拦登录入口，已发出的 token 还能用满 7 天。
+ */
 export function authOf(req) {
   const header = req.headers.authorization ?? ''
   const token = header.startsWith('Bearer ') ? header.slice(7) : undefined
   if (!token) return undefined
   const payload = verifyToken(token)
   if (!payload) return undefined
+  const id = Number(payload.sub)
+  if (!id) return undefined
+  if (payload.role === 'admin') {
+    const admin = db.prepare('SELECT id, status FROM admins WHERE id = ?').get(id)
+    if (!admin || admin.status !== 'active') return undefined
+  } else {
+    const user = db.prepare('SELECT id, status FROM users WHERE id = ?').get(id)
+    if (!user || user.status !== 'active') return undefined
+  }
   return { token, ...payload }
 }

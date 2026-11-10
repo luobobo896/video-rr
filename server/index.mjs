@@ -12,7 +12,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path'
 import { db, seedIfEmpty, ROOT, ensureSettings, ensurePaySafety, ensureUserSchema, ensureAdminSchema, ensureAdminCredentials, ensureLinkSecret, ensureOpsSchema, migrateCodesToNumeric, migratePayChannels, syncMenuCatalog } from './db.mjs'
 import { cleanupCodes } from './otp.mjs'
 import { handlePublic } from './api-public.mjs'
-import { handleAdmin } from './api-admin.mjs'
+import { handleAdmin, preAuthorizeAdmin } from './api-admin.mjs'
 import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
 import { verifyLink } from './entitlements.mjs'
 import { closeExpiredOrders, reconcile } from './commerce.mjs'
@@ -26,6 +26,11 @@ import { connectRedis, redisStatus } from './redis.mjs'
  */
 const BASE_PATH = (process.env.MH_BASE_PATH ?? '').replace(/\/+$/, '')
 import { scanOnce } from './usdt-watch.mjs'
+
+/** 订单号只允许这几种字符，避免把路径片段直接插进 HTML/JS。 */
+const ORDER_NO_RE = /^[A-Za-z0-9_-]{4,64}$/
+const SIM_PAY_OPEN = () => process.env.MH_ALLOW_SIM_PAY === '1'
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch])
 
 mkdirSync(UPLOAD_DIR, { recursive: true })
 mkdirSync(HLS_DIR, { recursive: true })
@@ -130,6 +135,7 @@ function serveStatic(rootDir, pathname, res) {
 
 /** 模拟支付页（仅测试环境；生产关闭 mock 渠道后本页 404）。 */
 function mockPayPage(outTradeNo, res) {
+  const orderNo = escapeHtml(outTradeNo)
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8" />
 <title>模拟支付 · 影巢</title>
 <style>body{background:#0e0f13;color:#e8e8ee;font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0}
@@ -137,7 +143,7 @@ function mockPayPage(outTradeNo, res) {
 h1{font-size:18px;margin:0 0 8px}p{color:#9aa3b2;font-size:13px}
 button{margin-top:16px;padding:12px 24px;border:0;border-radius:10px;background:linear-gradient(135deg,#ff7a59,#ff4d6d);color:#fff;font-size:15px;cursor:pointer}
 </style></head><body><div class="card">
-<h1>模拟支付（测试渠道）</h1><p>订单号 ${outTradeNo}</p>
+<h1>模拟支付（测试渠道）</h1><p>订单号 ${orderNo}</p>
 <p>当前为测试支付通道，接入真实支付宝 / USDT 后自动下线</p>
 <button id="pay">模拟支付成功</button>
 <a id="back" href="${BASE_PATH}/#/me" style="display:none;margin-top:14px;color:#ff7a59;font-size:14px">返回站点查看订单</a>
@@ -146,7 +152,7 @@ button{margin-top:16px;padding:12px 24px;border:0;border-radius:10px;background:
 <script>
 document.getElementById('pay').addEventListener('click', async () => {
   const ticket = new URLSearchParams(location.search).get('ticket') ?? ''
-  const res = await fetch('${BASE_PATH}/api/pay/mock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}', ticket }) })
+  const res = await fetch('${BASE_PATH}/api/pay/mock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: ${JSON.stringify(outTradeNo)}, ticket }) })
   const json = await res.json()
   document.getElementById('result').textContent = json.code === '0000' ? '支付成功，权益已到账，可回到站点观看' : ('失败：' + json.msg)
   if (json.code === '0000') document.getElementById('back').style.display = 'inline-block'
@@ -177,7 +183,7 @@ button.ghost{background:#eef2f8;color:#4a5468;margin-top:10px}
 </style></head><body><div class="card">
 <div class="brand"><span class="logo">支</span>支付宝 · 沙箱收银台</div>
 ${missing}
-<div class="muted">订单号 ${outTradeNo}</div>
+<div class="muted">订单号 ${escapeHtml(outTradeNo)}</div>
 <div class="amount">¥ ${amount}</div>
 <div class="row"><span>收款方</span><span>影巢（沙箱）</span></div>
 <div class="row"><span>商品</span><span>会员 / 单片</span></div>
@@ -193,7 +199,7 @@ document.getElementById('pay').addEventListener('click', async () => {
   const button = document.getElementById('pay')
   button.disabled = true
   button.textContent = '支付中…'
-  const res = await fetch('${BASE_PATH}/api/pay/alipay-sim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}', ticket: new URLSearchParams(location.search).get('ticket') ?? '' }) })
+  const res = await fetch('${BASE_PATH}/api/pay/alipay-sim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: ${JSON.stringify(outTradeNo)}, ticket: new URLSearchParams(location.search).get('ticket') ?? '' }) })
   const json = await res.json()
   if (json.code === '0000') {
     document.getElementById('msg').textContent = '支付成功，权益已到账，正在返回…'
@@ -318,16 +324,27 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/pay/mock/')) {
-      return mockPayPage(pathname.split('/')[3], res)
+      const orderNo = pathname.split('/')[3] ?? ''
+      if (!SIM_PAY_OPEN() || !ORDER_NO_RE.test(orderNo)) { res.writeHead(404); res.end('404'); return }
+      return mockPayPage(orderNo, res)
     }
 
     if (pathname.startsWith('/pay/alipay-sim/')) {
-      return alipaySimPage(pathname.split('/')[3], res)
+      const orderNo = pathname.split('/')[3] ?? ''
+      if (!SIM_PAY_OPEN() || !ORDER_NO_RE.test(orderNo)) { res.writeHead(404); res.end('404'); return }
+      return alipaySimPage(orderNo, res)
     }
 
     if (pathname.startsWith('/admin/api/')) {
       const uploadMatch = /^\/admin\/api\/episodes\/(\d+)\/upload$/.exec(pathname)
       if (uploadMatch && req.method === 'POST') {
+        // 先鉴权再落盘：否则匿名请求也能往 storage/uploads 写满上限（默认 2GB）
+        const gate = preAuthorizeAdmin(req, 'episode.write')
+        if (!gate.ok) {
+          res.writeHead(gate.status, { 'content-type': 'application/json; charset=utf-8', connection: 'close' })
+          res.end(JSON.stringify({ code: gate.code, msg: gate.msg, data: gate.data ?? {} }))
+          return
+        }
         const uploaded = await streamToUpload(req)
         return await handleAdmin(pathname, url, req, res, undefined, { uploadPath: uploaded.path, uploadSize: uploaded.size })
       }
