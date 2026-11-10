@@ -1065,19 +1065,49 @@ async function openRuleEditor(dramaId, title) {
         <div class="field" style="grid-column:1/-1"><label>备注（给运营看）</label>
           <div style="display:flex;gap:8px"><input data-k="note" value="${esc(rule.note)}" />
           <button class="btn sm danger" data-del-rule="${index}">删除</button></div></div>
+        <div class="muted rule-preview" data-preview="${index}" style="grid-column:1/-1"></div>
       </div>`).join('') || '<p class="muted">还没有规则：全部剧集走整体策略。</p>'
+      const previewText = (rule) => {
+        const fromNo = Number(rule.fromNo)
+        const toRaw = String(rule.toNo ?? '').trim()
+        const toNo = toRaw === '' ? null : Number(toRaw)
+        const range = !Number.isInteger(fromNo) || fromNo < 1
+          ? '（还没填起始集）'
+          : toNo === null ? `第 ${fromNo} 集起` : `第 ${fromNo}–${toNo} 集`
+        if (rule.mode === 'single') return `${range} → 需单集购买 ¥${Number(rule.price || 0).toFixed(2)}（会员也要买）`
+        if (rule.mode === 'vip') return `${range} → 需开通会员才能看`
+        return `${range} → 免费观看`
+      }
+      const paintPreviews = () => {
+        host.querySelectorAll('[data-preview]').forEach((node) => {
+          const rule = rules[Number(node.dataset.preview)]
+          if (rule) node.textContent = previewText(rule)
+        })
+      }
+      paintPreviews()
       host.querySelectorAll('[data-del-rule]').forEach((node) => node.addEventListener('click', () => {
         rules.splice(Number(node.dataset.delRule), 1)
         paint()
       }))
       host.querySelectorAll('[data-rule]').forEach((node) => node.addEventListener('input', () => {
-        const rule = rules[Number(node.dataset.rule)]
+        const index = Number(node.dataset.rule)
+        const rule = rules[index]
         node.querySelectorAll('[data-k]').forEach((input) => { rule[input.dataset.k] = input.value })
+        const preview = host.querySelector(`[data-preview="${index}"]`)
+        if (preview) preview.textContent = previewText(rule)
       }))
     }
     paint()
     body.querySelector('#rule-add').addEventListener('click', () => {
-      rules.push({ fromNo: 1, toNo: '', mode: 'vip', price: 0, note: '' })
+      // 默认给「最后两集单独收费」——新增一行直接保存也不会把整部剧变成会员专享
+      const lastNo = Number(data.lastNo ?? 1)
+      rules.push({
+        fromNo: Math.max(1, lastNo - 1),
+        toNo: lastNo,
+        mode: 'single',
+        price: Number(data.defaults.singlePrice ?? 0),
+        note: '',
+      })
       paint()
     })
     body.querySelector('#rule-clear').addEventListener('click', async () => {
@@ -1089,13 +1119,28 @@ async function openRuleEditor(dramaId, title) {
       } catch (error) { toast(error.message) }
     })
     body.querySelector('#rule-save').addEventListener('click', async () => {
-      const payload = rules.map((rule) => ({
-        fromNo: Number(rule.fromNo),
-        toNo: rule.toNo === '' || rule.toNo === null ? null : Number(rule.toNo),
-        mode: rule.mode,
-        price: Number(rule.price || 0),
-        note: rule.note ?? '',
-      }))
+      // 以界面上的实际输入为准（表单里手改过、或浏览器自动填充的值都算数）
+      const payload = []
+      for (const node of body.querySelectorAll('[data-rule]')) {
+        const value = {}
+        node.querySelectorAll('[data-k]').forEach((input) => { value[input.dataset.k] = input.value })
+        const fromNo = Number(value.fromNo)
+        if (!Number.isInteger(fromNo) || fromNo < 1) {
+          return toast('每条规则都要填起始集（≥1）')
+        }
+        const toRaw = String(value.toNo ?? '').trim()
+        const toNo = toRaw === '' ? null : Number(toRaw)
+        if (toNo !== null && (!Number.isInteger(toNo) || toNo < fromNo)) {
+          return toast(`第 ${fromNo} 集那条：结束集不能小于起始集`)
+        }
+        payload.push({
+          fromNo,
+          toNo,
+          mode: value.mode,
+          price: Number(value.price || 0),
+          note: value.note ?? '',
+        })
+      }
       try {
         await api(`/admin/api/dramas/${dramaId}/pricing-rules`, { method: 'PUT', body: { rules: payload } })
         toast('规则已保存')
