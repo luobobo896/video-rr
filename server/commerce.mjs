@@ -5,6 +5,7 @@
 import { createHash, createSign, createVerify, randomBytes } from 'node:crypto'
 import { db, getSetting } from './db.mjs'
 import { grantPurchase, grantSubscription, revokeByOrder, policyOf } from './entitlements.mjs'
+import { currentKeyVersion, maskConfig, openSecret, sealSecret } from './secretbox.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -30,6 +31,59 @@ export class CommerceError extends Error {
     this.code = code
     this.status = status
   }
+}
+
+/* ---------------- 支付渠道（多渠道路由 + 配置解密） ---------------- */
+
+export function channelConfig(row) {
+  if (!row?.config_cipher) return {}
+  try { return openSecret(row.config_cipher) } catch (error) { console.error('[pay-channel] 解密失败', row.id, error.message); return {} }
+}
+
+export function listChannels({ scene } = {}) {
+  const rows = scene
+    ? all('SELECT * FROM pay_channels WHERE scene = ? OR scene = \'all\' ORDER BY priority, id', scene)
+    : all('SELECT * FROM pay_channels ORDER BY priority, id')
+  return rows.map((row) => ({
+    ...row,
+    config_cipher: undefined,
+    config_preview: row.config_preview ? JSON.parse(row.config_preview) : maskConfig(channelConfig(row)),
+    hasSecret: Boolean(row.config_cipher),
+  }))
+}
+
+/**
+ * 选渠道：显式指定优先；否则按场景取默认（is_default），再按 priority 兜底。
+ * 会校验金额区间与币种，避免"配了但用不了"。
+ */
+export function resolveChannel({ scene = 'all', channelCode, amount = 0, currency } = {}) {
+  const rows = all("SELECT * FROM pay_channels WHERE status = 'enabled' ORDER BY is_default DESC, priority ASC, id ASC")
+  const candidates = rows.filter((row) => {
+    if (channelCode) return row.channel_code === channelCode
+    return row.scene === 'all' || row.scene === scene
+  }).filter((row) => {
+    if (currency && row.currency && row.currency !== currency && row.channel_code !== 'usdt') return false
+    if (row.min_amount > 0 && amount < row.min_amount) return false
+    if (row.max_amount > 0 && amount > row.max_amount) return false
+    return true
+  })
+  return candidates[0]
+}
+
+export function paymentOptions(scene = 'all') {
+  return listChannels({ scene })
+    .filter((row) => row.status === 'enabled')
+    .map((row) => ({
+      code: row.channel_code, name: row.name, scene: row.scene, currency: row.currency,
+      isDefault: Boolean(row.is_default), priority: row.priority,
+      minAmount: row.min_amount, maxAmount: row.max_amount,
+      configured: Object.values(row.config_preview ?? {}).some((value) => value && value !== ''),
+    }))
+}
+
+function resolveByCode(channelCode) {
+  const rows = all('SELECT * FROM pay_channels WHERE channel_code = ? ORDER BY is_default DESC, priority ASC LIMIT 1', channelCode)
+  return rows[0]
 }
 
 /* ---------------- 优惠券 ---------------- */
@@ -64,22 +118,27 @@ export function basePriceOf({ productType, planId, dramaId }) {
   return { price: policy.single_price_cny, policy }
 }
 
-export function createOrder({ userId, productType, planId, dramaId, channel = 'mock', couponCode }) {
+export function createOrder({ userId, productType, planId, dramaId, channel, couponCode }) {
   if (!userId) throw new CommerceError('unauthorized', '请先登录', 401)
   const { price, plan, policy } = basePriceOf({ productType, planId, dramaId })
   const couponResult = validateCoupon(couponCode, price)
   if (!couponResult.ok) throw new CommerceError('coupon_invalid', couponResult.message)
   const amount = Math.max(0.01, Math.round((price - couponResult.discount) * 100) / 100)
 
-  const site = getSetting('site', {})
-  const pay = getSetting('pay', {})
-  const rate = Number(site.usdtRate ?? 7.2)
+  // 渠道解析：显式指定 > 场景默认 > 优先级兜底；金额/币种不满足则跳过
+  const scene = productType === 'subscription' ? 'subscription' : 'single'
+  const row = resolveChannel({ scene, channelCode: channel || undefined, amount })
+  if (!row) throw new CommerceError('channel_unavailable', '没有可用的支付渠道（后台「支付渠道」里启用一个）')
+  const channelCode = row.channel_code
+  const config = channelConfig(row)
+  const rate = Number(config.rate ?? getSetting('site', {}).usdtRate ?? 7.2)
+
   const order = {
     outTradeNo: outTradeNo(),
     amount,
-    usdtAmount: channel === 'usdt' ? Math.round((amount / rate) * 100) / 100 : null,
-    usdtRate: channel === 'usdt' ? rate : null,
-    address: channel === 'usdt' ? (pay.usdt?.address ?? '') : null,
+    usdtAmount: channelCode === 'usdt' ? Math.round((amount / rate) * 100) / 100 : null,
+    usdtRate: channelCode === 'usdt' ? rate : null,
+    address: channelCode === 'usdt' ? (config.walletAddress ?? '') : null,
   }
 
   const info = run(`INSERT INTO orders
@@ -89,32 +148,32 @@ export function createOrder({ userId, productType, planId, dramaId, channel = 'm
   order.outTradeNo, userId, productType,
   productType === 'subscription' ? plan.id : null,
   productType === 'single' ? Number(dramaId) : null,
-  amount, couponResult.coupon?.id ?? null, channel,
-  channel === 'mock' ? `/pay/mock/${order.outTradeNo}` : null,
+  amount, couponResult.coupon?.id ?? null, channelCode,
+  channelCode === 'mock' ? `/pay/mock/${order.outTradeNo}` : null,
   order.usdtAmount, order.usdtRate, order.address,
   new Date(Date.now() + 15 * 60_000).toISOString().slice(0, 19).replace('T', ' '),
-  JSON.stringify({ basePrice: price, discount: couponResult.discount, purchaseKind: policy?.purchase_kind ?? null, couponCode: couponCode ?? null }),
+  JSON.stringify({
+    basePrice: price, discount: couponResult.discount, purchaseKind: policy?.purchase_kind ?? null,
+    couponCode: couponCode ?? null,
+    channelId: row.id, channelEnv: row.env, channelKeyVersion: row.key_version,
+  }),
   )
   const created = one('SELECT * FROM orders WHERE id = ?', Number(info.lastInsertRowid))
 
-  if (channel === 'alipay') {
-    const alipay = getSetting('pay', {}).alipay
-    if (!alipay?.enabled) throw new CommerceError('channel_disabled', '支付宝支付未开通（后台「支付配置」里开启并填入商户参数）')
-    return { order: created, payUrl: buildAlipayPayUrl(created) }
+  if (channelCode === 'alipay') {
+    return { order: created, payUrl: buildAlipayPayUrl(created, config) }
   }
-  if (channel === 'usdt') {
-    const usdt = getSetting('pay', {}).usdt
-    if (!usdt?.enabled) throw new CommerceError('channel_disabled', 'USDT 支付未开通')
+  if (channelCode === 'usdt') {
     return {
       order: created,
       payUrl: null,
       usdt: {
-        network: usdt.network ?? 'TRC20',
+        network: config.network ?? 'TRC20',
         address: created.usdt_address,
         amount: created.usdt_amount,
         rate: created.usdt_rate,
         expiresAt: created.expires_at,
-        minConfirmations: usdt.minConfirmations ?? 19,
+        minConfirmations: Number(config.minConfirmations ?? 19),
       },
     }
   }
@@ -208,19 +267,18 @@ export function alipayVerify(params, publicKeyPem) {
   return verify.verify(publicKeyPem, sign, 'base64')
 }
 
-export function buildAlipayPayUrl(order) {
-  const pay = getSetting('pay', {}).alipay ?? {}
-  if (!pay.appId || !pay.privateKey) throw new CommerceError('alipay_not_configured', '支付宝商户参数未配置')
+export function buildAlipayPayUrl(order, config = channelConfig(resolveByCode('alipay') ?? {})) {
+  if (!config.appId || !config.privateKey) throw new CommerceError('alipay_not_configured', '支付宝渠道未配置 AppID / 商户私钥（后台「支付渠道」里填写）')
   const params = {
-    app_id: pay.appId,
+    app_id: config.appId,
     method: 'alipay.trade.page.pay',
     format: 'JSON',
     charset: 'utf-8',
     sign_type: 'RSA2',
     timestamp: new Date().toISOString().slice(0, 19).replace('T', ' '),
     version: '1.0',
-    notify_url: pay.notifyUrl,
-    return_url: pay.returnUrl,
+    notify_url: config.notifyUrl,
+    return_url: config.returnUrl,
     biz_content: JSON.stringify({
       out_trade_no: order.out_trade_no,
       total_amount: order.amount_cny.toFixed(2),
@@ -228,14 +286,14 @@ export function buildAlipayPayUrl(order) {
       product_code: 'FAST_INSTANT_TRADE_PAY',
     }),
   }
-  params.sign = alipaySign(params, pay.privateKey)
-  return `${pay.gateway ?? 'https://openapi.alipay.com/gateway.do'}?${new URLSearchParams(params).toString()}`
+  params.sign = alipaySign(params, config.privateKey)
+  return `${config.gateway ?? 'https://openapi.alipay.com/gateway.do'}?${new URLSearchParams(params).toString()}`
 }
 
 export function handleAlipayNotify(body) {
-  const pay = getSetting('pay', {}).alipay ?? {}
-  if (!pay.publicKey) throw new CommerceError('alipay_not_configured', '支付宝公钥未配置', 500)
-  if (!alipayVerify(body, pay.publicKey)) throw new CommerceError('sign_invalid', '支付宝验签失败', 400)
+  const config = channelConfig(resolveByCode('alipay') ?? {})
+  if (!config.publicKey) throw new CommerceError('alipay_not_configured', '支付宝公钥未配置', 500)
+  if (!alipayVerify(body, config.publicKey)) throw new CommerceError('sign_invalid', '支付宝验签失败', 400)
   if (!['TRADE_SUCCESS', 'TRADE_FINISHED'].includes(body.trade_status)) {
     return { ignored: true, tradeStatus: body.trade_status }
   }
@@ -250,8 +308,8 @@ export function handleAlipayNotify(body) {
 
 /* --- USDT（TRC20，链上确认后入账） --- */
 export function handleUsdtNotify({ outTradeNo, txid, amount, confirmations }) {
-  const pay = getSetting('pay', {}).usdt ?? {}
-  const minConf = Number(pay.minConfirmations ?? 19)
+  const config = channelConfig(resolveByCode('usdt') ?? {})
+  const minConf = Number(config.minConfirmations ?? 19)
   if (!txid) throw new CommerceError('txid_missing', '缺少链上 txid')
   const order = one('SELECT * FROM orders WHERE out_trade_no = ?', String(outTradeNo))
   if (!order) throw new CommerceError('order_not_found', '订单不存在', 404)
@@ -383,4 +441,117 @@ export function closeExpiredOrders() {
   return Number(result.changes ?? 0)
 }
 
-export { nowSql }
+/* ---------------- 渠道管理（后台） ---------------- */
+
+const CHANNEL_FIELDS = new Set(['channel_code', 'name', 'scene', 'env', 'status', 'priority', 'currency', 'min_amount', 'max_amount', 'remark'])
+
+/** 新增/更新渠道。config 只接收"新增的明文"，未提供的敏感字段保留原值（写后不可读）。 */
+export function upsertChannel(payload, channelId) {
+  const existing = channelId
+    ? one('SELECT * FROM pay_channels WHERE id = ?', Number(channelId))
+    : one('SELECT * FROM pay_channels WHERE channel_code = ? AND env = ? AND scene = ?',
+      String(payload.channelCode ?? payload.channel_code ?? ''), payload.env ?? 'sandbox', payload.scene ?? 'all')
+
+  const code = String(payload.channelCode ?? payload.channel_code ?? existing?.channel_code ?? '').trim()
+  if (!code) throw new CommerceError('channel_code_required', '渠道编码必填')
+
+  const mergedConfig = { ...(existing ? channelConfig(existing) : {}) }
+  const providedConfig = payload.config ?? {}
+  let configDirty = false
+  for (const [key, value] of Object.entries(providedConfig)) {
+    if (value === undefined || value === null) continue
+    if (value === '' && key in mergedConfig) continue       // 空值 = 不修改
+    mergedConfig[key] = value
+    configDirty = true
+  }
+  if (!existing) configDirty = true
+
+  const fields = {
+    channel_code: code,
+    name: payload.name ?? existing?.name ?? code,
+    scene: payload.scene ?? existing?.scene ?? 'all',
+    env: payload.env ?? existing?.env ?? 'sandbox',
+    status: payload.status ?? existing?.status ?? 'disabled',
+    priority: Number(payload.priority ?? existing?.priority ?? 100),
+    currency: payload.currency ?? existing?.currency ?? 'CNY',
+    min_amount: Number(payload.minAmount ?? existing?.min_amount ?? 0),
+    max_amount: Number(payload.maxAmount ?? existing?.max_amount ?? 0),
+    remark: payload.remark ?? existing?.remark ?? null,
+  }
+
+  const cipher = configDirty || !existing ? sealSecret(mergedConfig) : existing.config_cipher
+  const preview = configDirty || !existing ? JSON.stringify(maskConfig(mergedConfig)) : existing.config_preview
+  const version = existing?.key_version ?? currentKeyVersion()
+
+  if (existing) {
+    run(`UPDATE pay_channels SET channel_code=?, name=?, scene=?, env=?, status=?, priority=?, currency=?,
+      min_amount=?, max_amount=?, config_cipher=?, config_preview=?, key_version=?, remark=?, updated_at=datetime('now')
+      WHERE id=?`,
+    fields.channel_code, fields.name, fields.scene, fields.env, fields.status, fields.priority,
+    fields.currency, fields.min_amount, fields.max_amount, cipher, preview, version, fields.remark, existing.id)
+    return one('SELECT * FROM pay_channels WHERE id = ?', existing.id)
+  }
+  const info = run(`INSERT INTO pay_channels
+    (channel_code, name, scene, env, status, is_default, priority, currency, min_amount, max_amount, config_cipher, config_preview, key_version, remark)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  fields.channel_code, fields.name, fields.scene, fields.env, fields.status, fields.priority,
+  fields.currency, fields.min_amount, fields.max_amount, cipher, preview, version, fields.remark)
+  return one('SELECT * FROM pay_channels WHERE id = ?', Number(info.lastInsertRowid))
+}
+
+export function setChannelStatus({ channelId, status }) {
+  const channel = one('SELECT * FROM pay_channels WHERE id = ?', Number(channelId))
+  if (!channel) throw new CommerceError('channel_not_found', '渠道不存在', 404)
+  run("UPDATE pay_channels SET status = ?, updated_at = datetime('now') WHERE id = ?", status === 'enabled' ? 'enabled' : 'disabled', channel.id)
+  // 停用后清掉默认标记，避免"默认渠道不可用"
+  if (status !== 'enabled' && channel.is_default) {
+    run('UPDATE pay_channels SET is_default = 0 WHERE id = ?', channel.id)
+  }
+  return one('SELECT * FROM pay_channels WHERE id = ?', channel.id)
+}
+
+/** 设默认：同一 scene 内唯一；切换在一个事务里完成，避免并发出现双默认。 */
+export function setDefaultChannel({ channelId }) {
+  const channel = one('SELECT * FROM pay_channels WHERE id = ?', Number(channelId))
+  if (!channel) throw new CommerceError('channel_not_found', '渠道不存在', 404)
+  if (channel.status !== 'enabled') throw new CommerceError('channel_disabled', '只有启用中的渠道可设为默认')
+  db.exec('BEGIN')
+  try {
+    run('UPDATE pay_channels SET is_default = 0 WHERE scene = ?', channel.scene)
+    run('UPDATE pay_channels SET is_default = 1, updated_at = datetime(\'now\') WHERE id = ?', channel.id)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+  return one('SELECT * FROM pay_channels WHERE id = ?', channel.id)
+}
+
+export function deleteChannel({ channelId }) {
+  const channel = one('SELECT * FROM pay_channels WHERE id = ?', Number(channelId))
+  if (!channel) throw new CommerceError('channel_not_found', '渠道不存在', 404)
+  if (channel.is_default) throw new CommerceError('channel_is_default', '默认渠道不能删除，请先切换默认')
+  run('DELETE FROM pay_channels WHERE id = ?', channel.id)
+  return { deleted: true }
+}
+
+/** 测试渠道：校验必填配置是否齐全（不发真实请求，避免误扣款）。 */
+export function testChannel({ channelId }) {
+  const channel = one('SELECT * FROM pay_channels WHERE id = ?', Number(channelId))
+  if (!channel) throw new CommerceError('channel_not_found', '渠道不存在', 404)
+  const config = channelConfig(channel)
+  const required = {
+    alipay: ['appId', 'privateKey', 'publicKey'],
+    wechat: ['appId', 'mchId', 'apiV3Key'],
+    usdt: ['walletAddress'],
+  }[channel.channel_code] ?? []
+  const missing = required.filter((key) => !config[key])
+  return {
+    channelId: channel.id, channelCode: channel.channel_code,
+    ok: missing.length === 0, missing,
+    keyVersion: channel.key_version, env: channel.env,
+    checkedAt: nowSql(),
+  }
+}
+
+export { nowSql, resolveByCode }

@@ -2,9 +2,12 @@
 import { db, getSetting, setSetting } from './db.mjs'
 import { authOf, loginAdmin } from './auth.mjs'
 import { send } from './api-public.mjs'
-import { hasPermission, listAdmins, listAudit, listPermissionCatalog, listRoles, loadPrincipal, setAdminRoles, updateRolePermissions } from './rbac.mjs'
+import { hasPermission, listAdmins, listAudit, listPermissionCatalog, listRoles, loadPrincipal, menuTree, roleMenuBinding, setAdminRoles, updateRoleMenus } from './rbac.mjs'
 import { audit } from './rbac.mjs'
-import { commerceStats, createRefund, approveRefund, rejectRefund, reconcile, listOrders, closeExpiredOrders } from './commerce.mjs'
+import {
+  commerceStats, createRefund, approveRefund, rejectRefund, reconcile, listOrders, closeExpiredOrders,
+  listChannels, upsertChannel, setChannelStatus, setDefaultChannel, deleteChannel, testChannel, paymentOptions, channelConfig,
+} from './commerce.mjs'
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
 import { policyOf } from './entitlements.mjs'
 
@@ -48,6 +51,8 @@ const PERM = {
   cs: 'cs.toolkit',
   roles: 'admin.read',
   rolesWrite: 'admin.write',
+  payChannelRead: 'payment.channel.read',
+  payChannelWrite: 'payment.channel.write',
   audit: 'audit.read',
   analytics: 'analytics.read',
   paySettings: 'admin.write',
@@ -487,6 +492,24 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   }
 
   /* ---------- RBAC ---------- */
+  if (pathname === '/admin/api/menus' && method === 'GET') {
+    if (!guard(PERM.roles)) return deny(PERM.roles)
+    return send(res, { tree: menuTree(), flat: listPermissionCatalog() })
+  }
+
+  if (seg[0] === 'roles' && seg[1] && seg[2] === 'menus' && method === 'GET') {
+    if (!guard(PERM.roles)) return deny(PERM.roles)
+    return send(res, roleMenuBinding(seg[1]))
+  }
+
+  if (seg[0] === 'roles' && seg[1] && seg[2] === 'menus' && method === 'PUT') {
+    if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
+    const before = roleMenuBinding(seg[1]).checked
+    const updated = updateRoleMenus(seg[1], body.codes ?? body.permissions ?? [])
+    log('admin.role.menus', 'role', seg[1], before, updated)
+    return send(res, updated)
+  }
+
   if (pathname === '/admin/api/roles' && method === 'GET') {
     if (!guard(PERM.roles)) return deny(PERM.roles)
     return send(res, { roles: listRoles(), permissions: listPermissionCatalog() })
@@ -514,6 +537,59 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   }
 
   /* ---------- 支付配置 ---------- */
+  /* ---------- 支付渠道 ---------- */
+  if (pathname === '/admin/api/pay-channels' && method === 'GET') {
+    if (!guard(PERM.payChannelRead)) return deny(PERM.payChannelRead)
+    return send(res, {
+      list: listChannels(),
+      options: paymentOptions('all'),
+      keyVersion: (await import('./secretbox.mjs')).currentKeyVersion(),
+      keyVersions: (await import('./secretbox.mjs')).keyVersions(),
+    })
+  }
+
+  if (pathname === '/admin/api/pay-channels' && method === 'POST') {
+    if (!guard(PERM.payChannelWrite)) return deny(PERM.payChannelWrite)
+    const channel = upsertChannel(body)
+    log('payment.channel.create', 'pay_channel', channel.id, null, { ...body, config: Object.keys(body.config ?? {}) })
+    return send(res, { id: channel.id })
+  }
+
+  if (seg[0] === 'pay-channels' && seg[1] && seg.length === 2 && method === 'PUT') {
+    if (!guard(PERM.payChannelWrite)) return deny(PERM.payChannelWrite)
+    const channel = upsertChannel(body, Number(seg[1]))
+    log('payment.channel.update', 'pay_channel', seg[1], null, { ...body, config: Object.keys(body.config ?? {}) })
+    return send(res, { id: channel.id })
+  }
+
+  if (seg[0] === 'pay-channels' && seg[1] && seg[2] === 'status' && method === 'POST') {
+    if (!guard(PERM.payChannelWrite)) return deny(PERM.payChannelWrite)
+    const channel = setChannelStatus({ channelId: seg[1], status: body.status })
+    log('payment.channel.status', 'pay_channel', seg[1], null, { status: channel.status }, body.reason)
+    return send(res, { status: channel.status })
+  }
+
+  if (seg[0] === 'pay-channels' && seg[1] && seg[2] === 'default' && method === 'POST') {
+    if (!guard(PERM.payChannelWrite)) return deny(PERM.payChannelWrite)
+    const channel = setDefaultChannel({ channelId: seg[1] })
+    log('payment.channel.setDefault', 'pay_channel', seg[1], null, { scene: channel.scene }, body.reason)
+    return send(res, { id: channel.id, scene: channel.scene, isDefault: true })
+  }
+
+  if (seg[0] === 'pay-channels' && seg[1] && seg[2] === 'test' && method === 'POST') {
+    if (!guard(PERM.payChannelRead)) return deny(PERM.payChannelRead)
+    const result = testChannel({ channelId: seg[1] })
+    log('payment.channel.test', 'pay_channel', seg[1], null, result)
+    return send(res, result)
+  }
+
+  if (seg[0] === 'pay-channels' && seg[1] && seg.length === 2 && method === 'DELETE') {
+    if (!guard(PERM.payChannelWrite)) return deny(PERM.payChannelWrite)
+    const result = deleteChannel({ channelId: seg[1] })
+    log('payment.channel.delete', 'pay_channel', seg[1], null, null, body.reason)
+    return send(res, result)
+  }
+
   if (pathname === '/admin/api/pay-settings' && method === 'GET') {
     if (!guard(PERM.paySettings)) return deny(PERM.paySettings)
     const pay = getSetting('pay', {})

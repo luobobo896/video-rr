@@ -19,7 +19,7 @@ const NAV = [
   ['users', '用户', 'user.read'],
   ['roles', '角色权限', 'admin.read'],
   ['audit', '审计日志', 'audit.read'],
-  ['pay', '支付配置', 'admin.write'],
+  ['pay', '支付渠道', 'payment.channel.read'],
 ]
 
 const state = { token: localStorage.getItem('mh-admin-token') ?? '', page: 'dashboard', params: {}, timers: [] }
@@ -710,35 +710,141 @@ async function pageRefunds() {
   })
 }
 
-/* ---------------- 角色权限 ---------------- */
+/* ---------------- 角色权限（树形菜单） ---------------- */
+const menuState = { tree: [], checked: new Set(), roleId: null, keyword: '', expanded: new Set() }
+
+function flattenTree(nodes, depth = 0, acc = []) {
+  for (const node of nodes) {
+    acc.push({ ...node, depth })
+    if (node.children?.length) flattenTree(node.children, depth + 1, acc)
+  }
+  return acc
+}
+
+function treeVisible(node, keyword) {
+  if (!keyword) return true
+  const haystack = `${node.name}${node.code}${node.path ?? ''}`.toLowerCase()
+  return haystack.includes(keyword.toLowerCase()) || (node.children ?? []).some((child) => treeVisible(child, keyword))
+}
+
+/** 半选：自己没有勾，但有子孙勾了。 */
+function computeHalf(nodes) {
+  let any = false
+  for (const node of nodes) {
+    const selfChecked = menuState.checked.has(node.code)
+    const childAny = node.children?.length ? computeHalf(node.children) : false
+    node.__half = !selfChecked && childAny
+    any = any || selfChecked || childAny
+  }
+  return any
+}
+
+function setSubtree(node, checked) {
+  if (checked) menuState.checked.add(node.code)
+  else menuState.checked.delete(node.code)
+  for (const child of node.children ?? []) setSubtree(child, checked)
+}
+
+function findNode(nodes, code) {
+  for (const node of nodes) {
+    if (node.code === code) return node
+    const hit = node.children ? findNode(node.children, code) : undefined
+    if (hit) return hit
+  }
+  return undefined
+}
+
+function renderTreeNode(node, keyword, depth = 0) {
+  if (!treeVisible(node, keyword)) return ''
+  const isChecked = menuState.checked.has(node.code)
+  const hasChildren = Boolean(node.children?.length)
+  const expanded = menuState.expanded.has(node.code) || Boolean(keyword)
+  const typeTag = { dir: '目录', menu: '菜单', button: '按钮' }[node.type] ?? node.type
+  return `<div class="tnode">
+    <div class="trow ${node.type}" style="padding-left:${depth * 18 + 4}px">
+      <span class="tcaret" data-toggle="${node.code}">${hasChildren ? (expanded ? '▾' : '▸') : '·'}</span>
+      <label class="tlabel">
+        <input type="checkbox" data-check="${node.code}" ${isChecked ? 'checked' : ''} ${node.__half ? 'data-half="1"' : ''} />
+        <span class="ticon">${node.icon ?? ''}</span>
+        <span class="tname">${esc(node.name)}</span>
+        <span class="ttype ${node.type}">${typeTag}</span>
+        <span class="tcode mono">${esc(node.code)}</span>
+        ${node.path ? `<span class="tpath mono">${esc(node.path)}</span>` : ''}
+      </label>
+    </div>
+    ${hasChildren && expanded ? node.children.map((child) => renderTreeNode(child, keyword, depth + 1)).join('') : ''}
+  </div>`
+}
+
 async function pageRoles() {
-  const [roleData, adminData] = await Promise.all([api('/admin/api/roles'), api('/admin/api/admins')])
-  const domains = [...new Set(roleData.permissions.map((perm) => perm.domain))]
-  const roleBlocks = roleData.roles.map((role) => `<div class="panel" style="background:var(--panel-2);margin-bottom:12px">
-    <h3>${esc(role.name)} <span class="muted" style="font-size:12px">${esc(role.code)}</span><span class="spacer"></span>
-      <button class="btn sm primary" data-save-role="${role.id}">保存权限</button></h3>
-    <div class="perm-grid" data-role="${role.id}">
-      ${domains.map((domain) => `<div class="perm-domain"><div class="muted">${esc(domain)}</div>
-        ${roleData.permissions.filter((perm) => perm.domain === domain).map((perm) => `<label class="perm-item">
-          <input type="checkbox" value="${perm.code}" ${role.permissions.includes(perm.code) ? 'checked' : ''} />
-          <span title="${esc(perm.code)}">${esc(perm.name)}</span></label>`).join('')}
-      </div>`).join('')}
-    </div></div>`)
-  const adminRows = adminData.list.map((admin) => `<tr>
-    <td>${admin.id}</td><td class="mono">${esc(admin.username)}</td><td>${esc(admin.display_name ?? '')}</td>
-    <td>${admin.roles.map((role) => esc(role.name)).join(' / ')}</td><td>${pillOf(admin.status)}</td>
-  </tr>`)
-  view.innerHTML = panel('角色权限', `
-    <p class="muted">权限点：&lt;域&gt;.&lt;对象&gt;.&lt;动作&gt;。接口层是唯一可信校验，菜单只是渲染。</p>
-    ${roleBlocks.join('')}
+  const [menuData, roleData, adminData] = await Promise.all([
+    api('/admin/api/menus'), api('/admin/api/roles'), api('/admin/api/admins'),
+  ])
+  const roles = roleData.roles
+  if (!menuState.roleId) menuState.roleId = roles[0]?.id ?? null
+  const role = roles.find((item) => item.id === menuState.roleId) ?? roles[0]
+  menuState.roleId = role?.id ?? null
+
+  menuState.tree = JSON.parse(JSON.stringify(menuData.tree))
+  const binding = await api(`/admin/api/roles/${menuState.roleId}/menus`)
+  menuState.checked = new Set(binding.checked)
+  // 首次进入默认展开目录与菜单（按钮层不用展开）
+  if (menuState.expanded.size === 0) {
+    for (const node of flattenTree(menuState.tree)) {
+      if (node.type !== 'button') menuState.expanded.add(node.code)
+    }
+  }
+  computeHalf(menuState.tree)
+
+  view.innerHTML = panel('角色权限 · 树形菜单', `
+    <div class="role-bar">
+      ${roles.map((item) => `<button class="role-tab ${item.id === menuState.roleId ? 'active' : ''}" data-role-tab="${item.id}">${esc(item.name)}</button>`).join('')}
+    </div>
+    <div class="tree-toolbar">
+      <input id="tree-search" placeholder="搜索菜单 / 权限 / 路由" value="${esc(menuState.keyword)}" />
+      <button class="btn sm" id="tree-expand">展开全部</button>
+      <button class="btn sm" id="tree-collapse">收起全部</button>
+      <button class="btn sm" id="tree-check-all">全选</button>
+      <button class="btn sm" id="tree-uncheck-all">清空</button>
+      <span class="spacer"></span>
+      <span class="muted" id="tree-count">已选 ${menuState.checked.size} 项</span>
+      <button class="btn primary" id="tree-save">保存</button>
+    </div>
+    <div class="tree" id="menu-tree">${menuState.tree.map((node) => renderTreeNode(node, menuState.keyword)).join('')}</div>
+    <p class="muted">父子联动：勾选目录/菜单会带动全部子项；只勾部分子项时父节点为半选（后端保存时自动补齐父级）。</p>
     <h3>管理员</h3>
-    ${table(['ID', '账号', '姓名', '角色', '状态'], adminRows)}`)
-  view.querySelectorAll('[data-save-role]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const box = view.querySelector(`[data-role="${button.dataset.saveRole}"]`)
-      const permissions = [...box.querySelectorAll('input:checked')].map((input) => input.value)
-      await api(`/admin/api/roles/${button.dataset.saveRole}`, { method: 'PUT', body: { permissions } })
-      toast('权限已保存（权限变更需重新登录生效）')
+    ${table(['ID', '账号', '姓名', '角色', '状态'], adminData.list.map((admin) => `<tr>
+      <td>${admin.id}</td><td class="mono">${esc(admin.username)}</td><td>${esc(admin.display_name ?? '')}</td>
+      <td>${admin.roles.map((item) => esc(item.name)).join(' / ')}</td><td>${pillOf(admin.status)}</td>
+    </tr>`))}`)
+
+  const refresh = () => pageRoles()
+  view.querySelectorAll('[data-role-tab]').forEach((button) => {
+    button.addEventListener('click', () => { menuState.roleId = Number(button.dataset.roleTab); menuState.keyword = ''; refresh() })
+  })
+  $('#tree-search').addEventListener('input', (event) => { menuState.keyword = event.target.value; refresh() })
+  $('#tree-expand').addEventListener('click', () => { for (const node of flattenTree(menuState.tree)) menuState.expanded.add(node.code); refresh() })
+  $('#tree-collapse').addEventListener('click', () => { menuState.expanded.clear(); refresh() })
+  $('#tree-check-all').addEventListener('click', () => { for (const node of flattenTree(menuState.tree)) menuState.checked.add(node.code); refresh() })
+  $('#tree-uncheck-all').addEventListener('click', () => { menuState.checked.clear(); refresh() })
+  $('#tree-save').addEventListener('click', async () => {
+    const result = await api(`/admin/api/roles/${menuState.roleId}/menus`, { method: 'PUT', body: { codes: [...menuState.checked] } })
+    toast(`已保存 ${result.checked.length} 个节点（含自动补齐父级）`)
+    await refresh()
+  })
+  view.querySelectorAll('[data-check]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const node = findNode(menuState.tree, input.dataset.check)
+      if (node) setSubtree(node, input.checked)
+      refresh()
+    })
+  })
+  view.querySelectorAll('[data-toggle]').forEach((caret) => {
+    caret.addEventListener('click', () => {
+      const code = caret.dataset.toggle
+      if (menuState.expanded.has(code)) menuState.expanded.delete(code)
+      else menuState.expanded.add(code)
+      refresh()
     })
   })
 }
@@ -757,19 +863,171 @@ async function pageAudit() {
   view.innerHTML = panel('审计日志', table(['ID', '时间', '操作人', '动作', '对象', '原因', '结果', 'IP'], rows))
 }
 
-/* ---------------- 支付配置 ---------------- */
+/* ---------------- 支付渠道（多渠道 + 加密配置） ---------------- */
+const CHANNEL_PRESETS = {
+  alipay: {
+    label: '支付宝', currency: 'CNY',
+    fields: [
+      ['appId', 'AppID'],
+      ['privateKey', '商户私钥（PEM，加密存储）', 'textarea', true],
+      ['publicKey', '支付宝公钥（PEM，加密存储）', 'textarea', true],
+      ['gateway', '网关地址'],
+      ['notifyUrl', '异步通知地址'],
+    ],
+  },
+  wechat: {
+    label: '微信支付', currency: 'CNY',
+    fields: [
+      ['appId', 'AppID'],
+      ['mchId', '商户号'],
+      ['apiV3Key', 'APIv3 密钥（加密存储）', 'text', true],
+      ['serialNo', '商户证书序列号'],
+    ],
+  },
+  usdt: {
+    label: 'USDT', currency: 'USDT',
+    fields: [
+      ['walletAddress', '收款地址（TRC20）'],
+      ['network', '网络'],
+      ['minConfirmations', '最小确认数'],
+      ['rate', '汇率（1 USDT = ? CNY）'],
+    ],
+  },
+  mock: { label: '模拟支付', currency: 'CNY', fields: [] },
+}
+
+function channelConfigForm(code, preview = {}) {
+  const preset = CHANNEL_PRESETS[code] ?? { label: code, fields: [] }
+  return preset.fields.map(([key, label, type = 'text', secret = false]) => {
+    const current = preview?.[key] ?? ''
+    const hint = secret ? '留空表示不修改（当前：' + (current || '未设置') + '）' : ''
+    return `<label class="field"><span>${esc(label)}</span>
+      ${type === 'textarea'
+        ? `<textarea data-cfg="${key}" rows="2" placeholder="${esc(hint || '请输入')}"></textarea>`
+        : `<input data-cfg="${key}" value="" placeholder="${esc(hint || '请输入')}" />`}
+    </label>`
+  }).join('')
+}
+
 async function pagePay() {
-  const data = await api('/admin/api/pay-settings')
-  view.innerHTML = panel('支付配置', `
-    <p class="muted">mock 仅演示用，生产必须关闭；支付宝需 appId + 商户私钥 + 支付宝公钥；USDT 填收款地址与最小确认数。</p>
-    <div class="form-row"><label>USDT 汇率（1 USDT = ? CNY）<input id="usdt-rate" type="number" step="0.01" value="${data.usdtRate}" style="width:110px" /></label></div>
-    <textarea id="pay-json" class="mono" style="width:100%;height:340px;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:12px">${esc(JSON.stringify(data.pay, null, 2))}</textarea>
-    <div style="margin-top:12px"><button class="btn primary" id="pay-save">保存</button></div>`)
-  $('#pay-save').addEventListener('click', async () => {
-    let pay
-    try { pay = JSON.parse($('#pay-json').value) } catch { return toast('JSON 格式错误') }
-    await api('/admin/api/pay-settings', { method: 'PUT', body: { pay, usdtRate: Number($('#usdt-rate').value) } })
-    toast('已保存')
+  const data = await api('/admin/api/pay-channels')
+  const rows = data.list.map((channel) => `<tr>
+    <td>${channel.id}</td>
+    <td><span class="pill">${esc(channel.channel_code)}</span></td>
+    <td>${esc(channel.name)}</td>
+    <td>${esc(channel.scene)}</td>
+    <td>${channel.env === 'prod' ? '<span class="pill bad">生产</span>' : '<span class="pill">沙箱</span>'}</td>
+    <td>${channel.status === 'enabled' ? '<span class="pill ok">启用</span>' : '<span class="pill">停用</span>'}</td>
+    <td>${channel.is_default ? '<span class="pill ok">默认</span>' : '—'}</td>
+    <td>${channel.priority}</td>
+    <td>${esc(channel.currency)}</td>
+    <td class="mono">v${channel.key_version}</td>
+    <td class="row-actions">
+      <button class="btn sm" data-edit="${channel.id}">编辑</button>
+      <button class="btn sm" data-test="${channel.id}">测试</button>
+      <button class="btn sm" data-status="${channel.id}" data-current="${channel.status}">${channel.status === 'enabled' ? '停用' : '启用'}</button>
+      <button class="btn sm" data-default="${channel.id}" ${channel.status !== 'enabled' || channel.is_default ? 'disabled' : ''}>设为默认</button>
+      <button class="btn sm danger" data-del="${channel.id}" ${channel.is_default ? 'disabled' : ''}>删除</button>
+    </td>
+  </tr>`)
+
+  view.innerHTML = panel('支付渠道', `
+    <p class="muted">敏感字段（AppID/私钥/APIv3 密钥/收款地址）以 AES-256-GCM 加密存储，列表只回显掩码；密钥版本 v${data.keyVersion}，可用版本 ${data.keyVersions.join(' / ')}。</p>
+    ${table(['ID', '编码', '名称', '场景', '环境', '状态', '默认', '优先级', '币种', '密钥版本', '操作'], rows)}
+    <div id="pay-form" class="panel" style="background:var(--panel-2);margin-top:14px;display:none"></div>`,
+  '<button class="btn primary" id="add-channel">新增渠道</button>')
+
+  const form = $('#pay-form')
+  const openForm = (channel) => {
+    form.style.display = 'block'
+    const code = channel?.channel_code ?? 'alipay'
+    form.innerHTML = `
+      <h3>${channel ? '编辑渠道 #' + channel.id : '新增渠道'}<span class="spacer"></span><button class="btn sm" id="close-form">关闭</button></h3>
+      <div class="form-row">
+        <label>渠道
+          <select id="f-code" ${channel ? 'disabled' : ''}>
+            ${Object.entries(CHANNEL_PRESETS).map(([key, preset]) => `<option value="${key}" ${key === code ? 'selected' : ''}>${esc(preset.label)}（${key}）</option>`).join('')}
+          </select>
+        </label>
+        <label>名称<input id="f-name" value="${esc(channel?.name ?? '支付宝')}" /></label>
+        <label>场景
+          <select id="f-scene">
+            ${['all', 'subscription', 'single'].map((scene) => `<option value="${scene}" ${channel?.scene === scene ? 'selected' : ''}>${scene}</option>`).join('')}
+          </select>
+        </label>
+        <label>环境
+          <select id="f-env">
+            ${['sandbox', 'prod'].map((env) => `<option value="${env}" ${channel?.env === env ? 'selected' : ''}>${env}</option>`).join('')}
+          </select>
+        </label>
+        <label>优先级<input id="f-priority" type="number" value="${channel?.priority ?? 100}" style="width:80px" /></label>
+        <label>币种<input id="f-currency" value="${esc(channel?.currency ?? 'CNY')}" style="width:90px" /></label>
+        <label>最小额<input id="f-min" type="number" step="0.01" value="${channel?.min_amount ?? 0}" style="width:90px" /></label>
+        <label>最大额<input id="f-max" type="number" step="0.01" value="${channel?.max_amount ?? 0}" style="width:90px" /></label>
+      </div>
+      <div class="cfg-grid" id="cfg-fields">${channelConfigForm(code, channel?.config_preview)}</div>
+      <div class="form-row" style="margin-top:12px">
+        <button class="btn primary" id="save-channel">保存</button>
+        <span class="muted">私钥类字段只写不读：留空表示保持原值。</span>
+      </div>`
+    $('#f-code').addEventListener('change', (event) => {
+      $('#cfg-fields').innerHTML = channelConfigForm(event.target.value)
+    })
+    $('#close-form').addEventListener('click', () => { form.style.display = 'none' })
+    $('#save-channel').addEventListener('click', async () => {
+      const config = {}
+      form.querySelectorAll('[data-cfg]').forEach((input) => {
+        if (input.value !== '') config[input.dataset.cfg] = input.value
+      })
+      const payload = {
+        channelCode: channel?.channel_code ?? $('#f-code').value,
+        name: $('#f-name').value, scene: $('#f-scene').value, env: $('#f-env').value,
+        priority: Number($('#f-priority').value), currency: $('#f-currency').value,
+        minAmount: Number($('#f-min').value), maxAmount: Number($('#f-max').value),
+        config,
+      }
+      await api(channel ? `/admin/api/pay-channels/${channel.id}` : '/admin/api/pay-channels',
+        { method: channel ? 'PUT' : 'POST', body: payload })
+      toast('已保存（密钥加密入库）')
+      await pagePay()
+    })
+  }
+
+  $('#add-channel').addEventListener('click', () => openForm(null))
+  view.querySelectorAll('[data-edit]').forEach((button) => {
+    button.addEventListener('click', () => openForm(data.list.find((item) => item.id === Number(button.dataset.edit))))
+  })
+  view.querySelectorAll('[data-test]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const result = await api(`/admin/api/pay-channels/${button.dataset.test}/test`, { method: 'POST', body: {} })
+      toast(result.ok ? '配置完整，可用' : `缺少字段：${result.missing.join(', ')}`)
+    })
+  })
+  view.querySelectorAll('[data-status]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const next = button.dataset.current === 'enabled' ? 'disabled' : 'enabled'
+      const reason = prompt('变更原因（必填）')
+      if (!reason) return
+      await api(`/admin/api/pay-channels/${button.dataset.status}/status`, { method: 'POST', body: { status: next, reason } })
+      await pagePay()
+    })
+  })
+  view.querySelectorAll('[data-default]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const reason = prompt('切换默认渠道的原因（必填）')
+      if (!reason) return
+      await api(`/admin/api/pay-channels/${button.dataset.default}/default`, { method: 'POST', body: { reason } })
+      toast('默认渠道已切换')
+      await pagePay()
+    })
+  })
+  view.querySelectorAll('[data-del]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const reason = prompt('删除原因（必填）')
+      if (!reason) return
+      await api(`/admin/api/pay-channels/${button.dataset.del}`, { method: 'DELETE', body: { reason } })
+      await pagePay()
+    })
   })
 }
 

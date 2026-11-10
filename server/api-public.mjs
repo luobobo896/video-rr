@@ -5,7 +5,7 @@ import {
   decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, secureLink,
 } from './entitlements.mjs'
 import {
-  CommerceError, createOrder, handleAlipayNotify, handleUsdtNotify, listOrders, markPaid, mockPay, validateCoupon,
+  CommerceError, createOrder, handleAlipayNotify, handleUsdtNotify, listOrders, markPaid, mockPay, paymentOptions, validateCoupon,
 } from './commerce.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
@@ -77,21 +77,21 @@ export async function handlePublic(pathname, url, req, res) {
   try {
     /* ---------- 基础 ---------- */
     if (pathname === '/api/constants') {
+      const channels = paymentOptions('all')
       return send(res, {
         site: { name: '影巢' },
         categories: [
           { code: 'TV', name: '电视剧' }, { code: 'MOVIE', name: '电影' },
           { code: 'PLAYLET', name: '短剧' }, { code: 'ANIME', name: '动漫' },
         ],
-        pay: (() => {
-          const pay = getSetting('pay', {})
-          return {
-            alipay: Boolean(pay.alipay?.enabled),
-            usdt: Boolean(pay.usdt?.enabled),
-            mock: Boolean(pay.mock?.enabled),
-            usdtNetwork: pay.usdt?.network ?? 'TRC20',
-          }
-        })(),
+        pay: {
+          channels,
+          alipay: channels.some((channel) => channel.code === 'alipay'),
+          usdt: channels.some((channel) => channel.code === 'usdt'),
+          mock: channels.some((channel) => channel.code === 'mock'),
+          usdtNetwork: channels.find((channel) => channel.code === 'usdt')?.currency === 'USDT' ? 'TRC20' : 'TRC20',
+          defaultChannel: channels.find((channel) => channel.isDefault)?.code ?? channels[0]?.code ?? null,
+        },
       })
     }
 

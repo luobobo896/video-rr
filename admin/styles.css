@@ -105,3 +105,28 @@ table input, table select {
   font-size: 12.5px;
 }
 table input:focus, table select:focus { outline: none; border-color: #ff4d6d; }
+
+/* ===== 树形菜单权限 ===== */
+.role-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.role-tab { padding: 8px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); cursor: pointer; font-size: 13px; }
+.role-tab.active { color: #fff; border-color: #ff4d6d; background: rgba(255,77,109,.12); }
+.tree-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.tree-toolbar input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); min-width: 220px; }
+.tree { border: 1px solid var(--line); border-radius: 12px; padding: 8px; background: rgba(255,255,255,.015); max-height: 560px; overflow: auto; }
+.trow { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 8px; }
+.trow:hover { background: rgba(255,255,255,.04); }
+.trow.dir { background: rgba(255,255,255,.03); margin-top: 4px; }
+.tcaret { width: 16px; text-align: center; color: var(--muted); cursor: pointer; user-select: none; }
+.tlabel { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; flex: 1; }
+.tlabel input { accent-color: #ff4d6d; }
+.tlabel input[data-half="1"] { outline: 1px solid #ffb84d; outline-offset: 1px; }
+.tname { color: var(--text); }
+.ttype { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: rgba(255,255,255,.06); color: var(--muted); }
+.ttype.dir { background: rgba(96,165,250,.16); color: #7cb2ff; }
+.ttype.menu { background: rgba(74,222,128,.14); color: #4ade80; }
+.ttype.button { background: rgba(255,184,77,.14); color: #ffb84d; }
+.tcode { font-size: 11px; color: var(--muted); }
+.tpath { font-size: 11px; color: #6b7484; }
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.field input, .field textarea { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font-family: inherit; }

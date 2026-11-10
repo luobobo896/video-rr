@@ -20,6 +20,8 @@ before(async () => {
   db = dbModule.db
   seedIfEmpty = dbModule.seedIfEmpty
   seedIfEmpty()
+  dbModule.syncMenuCatalog()
+  dbModule.migratePayChannels()
   ent = await import('../server/entitlements.mjs')
   commerce = await import('../server/commerce.mjs')
   rbac = await import('../server/rbac.mjs')

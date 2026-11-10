@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { hashPassword } from './auth.mjs'
+import { currentKeyVersion, maskConfig, sealSecret } from './secretbox.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const ROOT = join(HERE, '..')
@@ -52,7 +53,13 @@ CREATE TABLE IF NOT EXISTS roles (
 CREATE TABLE IF NOT EXISTS permissions (
   code TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  domain TEXT NOT NULL
+  domain TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'button',        -- dir 目录 | menu 菜单 | button 按钮
+  parent_code TEXT,                            -- 树形父节点（NULL = 顶级目录）
+  sort INTEGER NOT NULL DEFAULT 0,
+  path TEXT,                                   -- 前端路由（menu 级使用）
+  icon TEXT,
+  visible INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS role_permissions (
   role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
@@ -284,62 +291,171 @@ CREATE TABLE IF NOT EXISTS danmus (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+
+-- ===== 支付渠道（多渠道路由 + 敏感配置加密）=====
+CREATE TABLE IF NOT EXISTS pay_channels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_code TEXT NOT NULL,                              -- alipay | wechat | usdt | mock
+  name TEXT NOT NULL,
+  scene TEXT NOT NULL DEFAULT 'all',                       -- all | subscription | single
+  env TEXT NOT NULL DEFAULT 'sandbox',                     -- sandbox | prod
+  status TEXT NOT NULL DEFAULT 'disabled',                 -- enabled | disabled
+  is_default INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL DEFAULT 100,                   -- 数字越小越优先
+  currency TEXT NOT NULL DEFAULT 'CNY',
+  min_amount REAL NOT NULL DEFAULT 0,
+  max_amount REAL NOT NULL DEFAULT 0,                      -- 0 = 不限
+  config_cipher TEXT,                                      -- AES-256-GCM 密文（含 AppID/私钥等）
+  config_preview TEXT,                                     -- 脱敏预览（可安全回显）
+  key_version INTEGER NOT NULL DEFAULT 1,
+  remark TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (channel_code, env, scene)
+);
+CREATE INDEX IF NOT EXISTS idx_pay_default ON pay_channels(scene, status, is_default);
 `)
 
 const count = (table) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n
 
 /** 权限点目录（`<域>.<对象>.<动作>`）。 */
-export const PERMISSIONS = [
-  ['dashboard.read', '查看概览', 'dashboard'],
-  ['content.drama.read', '查看剧集', 'content'],
-  ['content.drama.write', '新建/编辑剧集', 'content'],
-  ['content.drama.publish', '上架/下架剧集', 'content'],
-  ['content.drama.delete', '删除剧集', 'content'],
-  ['content.episode.write', '管理分集与上传', 'content'],
-  ['content.policy.write', '编辑付费策略', 'content'],
-  ['content.review', '审核弹幕/评论', 'content'],
-  ['commerce.plan.write', '管理套餐', 'commerce'],
-  ['commerce.coupon.write', '管理优惠券', 'commerce'],
-  ['finance.order.read', '查看订单', 'finance'],
-  ['finance.refund.create', '发起退款', 'finance'],
-  ['finance.refund.approve', '审批退款（双人复核）', 'finance'],
-  ['finance.reconcile.run', '执行对账', 'finance'],
-  ['ops.banner.write', '管理 Banner', 'ops'],
-  ['ops.section.write', '管理首页楼层', 'ops'],
-  ['ops.rank.write', '管理榜单', 'ops'],
-  ['user.read', '查看用户', 'user'],
-  ['user.manage', '禁用/解禁用户', 'user'],
-  ['cs.toolkit', '客服工具（补发权益/查单）', 'cs'],
-  ['admin.read', '查看管理员与角色', 'admin'],
-  ['admin.write', '管理管理员与角色', 'admin'],
-  ['audit.read', '查看审计日志', 'audit'],
-  ['analytics.read', '查看经营数据', 'analytics'],
+/**
+ * 菜单/权限树（RuoYi 风格：目录 dir → 菜单 menu → 按钮 button）。
+ * code 既是菜单标识也是权限点：后端 @PreAuthorize 校验 button 级 code；
+ * 角色绑定到"节点集合"，保存时自动补齐父级，保证树形结构完整。
+ */
+export const MENU_TREE = [
+  { code: 'dashboard', name: '概览', type: 'menu', parent: null, sort: 10, path: '/dashboard', icon: '📊' },
+
+  { code: 'dir:content', name: '内容管理', type: 'dir', parent: null, sort: 20, path: '/content', icon: '🎬' },
+  { code: 'content.drama', name: '剧集管理', type: 'menu', parent: 'dir:content', sort: 10, path: '/dramas', icon: '📺' },
+  { code: 'content.drama.read', name: '查看剧集', type: 'button', parent: 'content.drama', sort: 10 },
+  { code: 'content.drama.write', name: '新建/编辑剧集', type: 'button', parent: 'content.drama', sort: 20 },
+  { code: 'content.drama.publish', name: '上架/下架', type: 'button', parent: 'content.drama', sort: 30 },
+  { code: 'content.drama.delete', name: '删除剧集', type: 'button', parent: 'content.drama', sort: 40 },
+  { code: 'content.episode', name: '分集与视频', type: 'menu', parent: 'dir:content', sort: 20, path: '/episodes', icon: '🎞️' },
+  { code: 'content.episode.write', name: '管理分集与上传', type: 'button', parent: 'content.episode', sort: 10 },
+  { code: 'content.policy', name: '付费策略', type: 'menu', parent: 'dir:content', sort: 30, path: '/policies', icon: '💳' },
+  { code: 'content.policy.write', name: '编辑付费策略', type: 'button', parent: 'content.policy', sort: 10 },
+  { code: 'content.review', name: '内容审核', type: 'menu', parent: 'dir:content', sort: 40, path: '/review', icon: '🛡️' },
+  { code: 'content.review.write', name: '审核弹幕/评论', type: 'button', parent: 'content.review', sort: 10 },
+
+  { code: 'dir:commerce', name: '交易管理', type: 'dir', parent: null, sort: 30, path: '/commerce', icon: '💰' },
+  { code: 'commerce.plan', name: '套餐定价', type: 'menu', parent: 'dir:commerce', sort: 10, path: '/plans', icon: '🏷️' },
+  { code: 'commerce.plan.write', name: '管理套餐', type: 'button', parent: 'commerce.plan', sort: 10 },
+  { code: 'commerce.coupon', name: '优惠券', type: 'menu', parent: 'dir:commerce', sort: 20, path: '/coupons', icon: '🎟️' },
+  { code: 'commerce.coupon.write', name: '管理优惠券', type: 'button', parent: 'commerce.coupon', sort: 10 },
+  { code: 'commerce.order', name: '订单', type: 'menu', parent: 'dir:commerce', sort: 30, path: '/orders', icon: '🧾' },
+  { code: 'finance.order.read', name: '查看订单', type: 'button', parent: 'commerce.order', sort: 10 },
+  { code: 'commerce.refund', name: '退款审核', type: 'menu', parent: 'dir:commerce', sort: 40, path: '/refunds', icon: '↩️' },
+  { code: 'finance.refund.create', name: '发起退款', type: 'button', parent: 'commerce.refund', sort: 10 },
+  { code: 'finance.refund.approve', name: '审批退款（双人复核）', type: 'button', parent: 'commerce.refund', sort: 20 },
+  { code: 'commerce.reconcile', name: '对账', type: 'menu', parent: 'dir:commerce', sort: 50, path: '/reconcile', icon: '⚖️' },
+  { code: 'finance.reconcile.run', name: '执行对账', type: 'button', parent: 'commerce.reconcile', sort: 10 },
+
+  { code: 'dir:ops', name: '运营中心', type: 'dir', parent: null, sort: 40, path: '/ops', icon: '🎯' },
+  { code: 'ops.banner', name: 'Banner', type: 'menu', parent: 'dir:ops', sort: 10, path: '/ops', icon: '🖼️' },
+  { code: 'ops.banner.write', name: '管理 Banner', type: 'button', parent: 'ops.banner', sort: 10 },
+  { code: 'ops.section', name: '首页楼层', type: 'menu', parent: 'dir:ops', sort: 20, path: '/sections', icon: '🧱' },
+  { code: 'ops.section.write', name: '管理首页楼层', type: 'button', parent: 'ops.section', sort: 10 },
+  { code: 'ops.rank', name: '榜单', type: 'menu', parent: 'dir:ops', sort: 30, path: '/ranks', icon: '🏆' },
+  { code: 'ops.rank.write', name: '管理榜单', type: 'button', parent: 'ops.rank', sort: 10 },
+
+  { code: 'dir:user', name: '用户中心', type: 'dir', parent: null, sort: 50, path: '/user', icon: '👤' },
+  { code: 'user.list', name: '用户管理', type: 'menu', parent: 'dir:user', sort: 10, path: '/users', icon: '👥' },
+  { code: 'user.read', name: '查看用户', type: 'button', parent: 'user.list', sort: 10 },
+  { code: 'user.manage', name: '禁用/解禁用户', type: 'button', parent: 'user.list', sort: 20 },
+  { code: 'cs.toolkit', name: '客服工具', type: 'menu', parent: 'dir:user', sort: 20, path: '/cs', icon: '🎧' },
+  { code: 'cs.toolkit.grant', name: '补发权益', type: 'button', parent: 'cs.toolkit', sort: 10 },
+
+  { code: 'dir:system', name: '系统管理', type: 'dir', parent: null, sort: 60, path: '/system', icon: '⚙️' },
+  { code: 'system.role', name: '角色权限', type: 'menu', parent: 'dir:system', sort: 10, path: '/roles', icon: '🔐' },
+  { code: 'admin.read', name: '查看角色/管理员', type: 'button', parent: 'system.role', sort: 10 },
+  { code: 'admin.write', name: '管理角色/管理员', type: 'button', parent: 'system.role', sort: 20 },
+  { code: 'system.audit', name: '审计日志', type: 'menu', parent: 'dir:system', sort: 20, path: '/audit', icon: '📜' },
+  { code: 'audit.read', name: '查看审计日志', type: 'button', parent: 'system.audit', sort: 10 },
+  { code: 'system.paychannel', name: '支付渠道', type: 'menu', parent: 'dir:system', sort: 30, path: '/pay', icon: '💳' },
+  { code: 'payment.channel.read', name: '查看支付渠道', type: 'button', parent: 'system.paychannel', sort: 10 },
+  { code: 'payment.channel.write', name: '管理支付渠道（含密钥）', type: 'button', parent: 'system.paychannel', sort: 20 },
+  { code: 'system.analytics', name: '经营数据', type: 'menu', parent: 'dir:system', sort: 40, path: '/analytics', icon: '📈' },
+  { code: 'analytics.read', name: '查看经营数据', type: 'button', parent: 'system.analytics', sort: 10 },
 ]
 
+/** 兼容旧代码：扁平权限点列表（仅按钮/菜单，不含目录）。 */
+export const PERMISSIONS = MENU_TREE.filter((node) => node.type !== 'dir')
+  .map((node) => [node.code, node.name, node.parent ?? node.code.split('.')[0]])
+
+/** 角色默认菜单集合（自动补齐父级，见 expandWithAncestors）。 */
 export const ROLES = [
-  ['super_admin', '超级管理员', '拥有全部权限（含审批退款）', PERMISSIONS.map((p) => p[0])],
+  ['super_admin', '超级管理员', '拥有全部权限（含密钥与退款审批）', MENU_TREE.map((node) => node.code)],
   ['content_ops', '内容运营', '剧集/分集/付费策略/审核', [
-    'dashboard.read', 'content.drama.read', 'content.drama.write', 'content.drama.publish',
-    'content.episode.write', 'content.policy.write', 'content.review',
+    'dashboard', 'content.drama', 'content.drama.read', 'content.drama.write', 'content.drama.publish',
+    'content.episode', 'content.episode.write', 'content.policy', 'content.policy.write',
+    'content.review', 'content.review.write',
   ]],
-  ['finance', '财务', '订单、退款、对账', ['dashboard.read', 'finance.order.read', 'finance.refund.create', 'finance.refund.approve', 'finance.reconcile.run', 'analytics.read']],
-  ['cs', '客服', '查单、补发权益、禁言用户', ['dashboard.read', 'finance.order.read', 'user.read', 'cs.toolkit']],
-  ['auditor', '审核员', '内容审核与只读', ['dashboard.read', 'content.review', 'audit.read', 'content.drama.read']],
-  ['analyst', '数据分析', '只读经营数据', ['dashboard.read', 'analytics.read', 'finance.order.read']],
+  ['finance', '财务', '订单、退款、对账、经营数据', [
+    'dashboard', 'commerce.order', 'finance.order.read', 'commerce.refund',
+    'finance.refund.create', 'finance.refund.approve', 'commerce.reconcile', 'finance.reconcile.run',
+    'system.analytics', 'analytics.read',
+  ]],
+  ['cs', '客服', '查单、补发权益、用户查看', [
+    'dashboard', 'commerce.order', 'finance.order.read', 'user.list', 'user.read', 'cs.toolkit', 'cs.toolkit.grant',
+  ]],
+  ['auditor', '审核员', '内容审核 + 审计只读', [
+    'dashboard', 'content.review', 'content.review.write', 'system.audit', 'audit.read', 'content.drama', 'content.drama.read',
+  ]],
+  ['analyst', '数据分析', '只读经营数据', [
+    'dashboard', 'system.analytics', 'analytics.read', 'commerce.order', 'finance.order.read',
+  ]],
 ]
+
+const BY_CODE = new Map(MENU_TREE.map((node) => [node.code, node]))
+export const menuNode = (code) => BY_CODE.get(code)
+
+/** 补齐父级：角色保存时不允许出现"孤儿按钮"。 */
+export function expandWithAncestors(codes) {
+  const result = new Set()
+  for (const code of codes) {
+    let node = BY_CODE.get(code)
+    while (node) {
+      result.add(node.code)
+      node = node.parent ? BY_CODE.get(node.parent) : undefined
+    }
+  }
+  return [...result]
+}
+
+/** 组装嵌套树（前端 el-tree 直接可用）。 */
+export function buildMenuTree(codes) {
+  const allowed = codes ? new Set(codes) : null
+  const nodes = MENU_TREE.filter((node) => !allowed || allowed.has(node.code))
+    .sort((a, b) => a.sort - b.sort)
+    .map((node) => ({ ...node, children: [] }))
+  const index = new Map(nodes.map((node) => [node.code, node]))
+  const roots = []
+  for (const node of nodes) {
+    const parent = node.parent ? index.get(node.parent) : undefined
+    if (parent) parent.children.push(node)
+    else roots.push(node)
+  }
+  return roots
+}
 
 export function seedIfEmpty() {
   if (count('dramas') > 0) return { seeded: false }
 
-  // 权限与角色
-  const insertPerm = db.prepare('INSERT OR IGNORE INTO permissions (code, name, domain) VALUES (?, ?, ?)')
-  for (const [code, name, domain] of PERMISSIONS) insertPerm.run(code, name, domain)
+  // 菜单/权限树 + 角色
+  const insertPerm = db.prepare(`INSERT OR IGNORE INTO permissions (code, name, domain, type, parent_code, sort, path, icon, visible)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`)
+  for (const node of MENU_TREE) {
+    insertPerm.run(node.code, node.name, node.parent ?? node.code.split('.')[0], node.type, node.parent ?? null, node.sort ?? 0, node.path ?? null, node.icon ?? null)
+  }
   const insertRole = db.prepare('INSERT OR IGNORE INTO roles (code, name, description, is_system) VALUES (?, ?, ?, 1)')
   const insertRolePerm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission_code) VALUES (?, ?)')
   for (const [code, name, description, perms] of ROLES) {
     insertRole.run(code, name, description)
     const role = db.prepare('SELECT id FROM roles WHERE code = ?').get(code)
-    for (const perm of perms) insertRolePerm.run(role.id, perm)
+    for (const menuCode of expandWithAncestors(perms)) insertRolePerm.run(role.id, menuCode)
   }
 
   // 管理员：admin 超管；其余为演示角色
@@ -452,6 +568,89 @@ export function seedIfEmpty() {
     throw error
   }
   return { seeded: true, dramas: count('dramas'), episodes: count('episodes') }
+}
+
+/**
+ * 目录/菜单/权限同步（幂等）：老库启动时补齐树形节点，不依赖重新建库。
+ */
+export function syncMenuCatalog() {
+  const insert = db.prepare(`INSERT INTO permissions (code, name, domain, type, parent_code, sort, path, icon, visible)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+    ON CONFLICT(code) DO UPDATE SET name = excluded.name, type = excluded.type,
+      parent_code = excluded.parent_code, sort = excluded.sort, path = excluded.path, icon = excluded.icon`)
+  for (const node of MENU_TREE) {
+    insert.run(node.code, node.name, node.parent ?? node.code.split('.')[0], node.type, node.parent ?? null, node.sort ?? 0, node.path ?? null, node.icon ?? null)
+  }
+  // 老库里角色的按钮权限补齐父级菜单，避免树形渲染时父节点缺失
+  const roles = db.prepare('SELECT id, code FROM roles').all()
+  const current = db.prepare('SELECT permission_code FROM role_permissions WHERE role_id = ?')
+  const insertRolePerm = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission_code) VALUES (?, ?)')
+  for (const role of roles) {
+    if (role.code === 'super_admin') {
+      // 超管始终拥有全部菜单/按钮（含后续新增）
+      for (const node of MENU_TREE) insertRolePerm.run(role.id, node.code)
+      continue
+    }
+    const codes = current.all(role.id).map((row) => row.permission_code)
+    for (const code of expandWithAncestors(codes)) insertRolePerm.run(role.id, code)
+  }
+}
+
+/**
+ * 支付渠道迁移：把旧的 settings.pay JSON 拆成多行渠道记录（含加密后的密钥）。
+ * 幂等：pay_channels 已有数据则跳过。
+ */
+export function migratePayChannels() {
+  if (count('pay_channels') > 0) return { migrated: false }
+  const pay = getSetting('pay', {}) ?? {}
+  const site = getSetting('site', {}) ?? {}
+  const rows = [
+    {
+      channel_code: 'alipay', name: '支付宝', scene: 'all', env: 'sandbox',
+      status: pay.alipay?.enabled ? 'enabled' : 'disabled', priority: 10, currency: 'CNY',
+      config: {
+        appId: pay.alipay?.appId ?? '',
+        privateKey: pay.alipay?.privateKey ?? '',
+        publicKey: pay.alipay?.publicKey ?? '',
+        gateway: pay.alipay?.gateway ?? 'https://openapi.alipay.com/gateway.do',
+        notifyUrl: pay.alipay?.notifyUrl ?? '',
+        refundEnabled: Boolean(pay.alipay?.refundEnabled),
+      },
+    },
+    {
+      channel_code: 'usdt', name: 'USDT（TRC20）', scene: 'all', env: 'sandbox',
+      status: pay.usdt?.enabled ? 'enabled' : 'disabled', priority: 20, currency: 'USDT',
+      config: {
+        walletAddress: pay.usdt?.address ?? '',
+        network: pay.usdt?.network ?? 'TRC20',
+        minConfirmations: pay.usdt?.minConfirmations ?? 19,
+        rate: site.usdtRate ?? 7.2,
+      },
+    },
+    {
+      channel_code: 'mock', name: '模拟支付（演示）', scene: 'all', env: 'sandbox',
+      status: pay.mock?.enabled ? 'enabled' : 'disabled', priority: 99, currency: 'CNY',
+      config: {},
+    },
+  ]
+  const insert = db.prepare(`INSERT INTO pay_channels
+    (channel_code, name, scene, env, status, is_default, priority, currency, config_cipher, config_preview, key_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+  db.exec('BEGIN')
+  try {
+    let firstEnabled = true
+    for (const row of rows) {
+      const isDefault = row.status === 'enabled' && firstEnabled ? 1 : 0
+      if (isDefault) firstEnabled = false
+      insert.run(row.channel_code, row.name, row.scene, row.env, row.status, isDefault, row.priority, row.currency,
+        sealSecret(row.config), JSON.stringify(maskConfig(row.config)), currentKeyVersion())
+    }
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+  return { migrated: true, channels: rows.length }
 }
 
 export function getSetting(key, fallback) {

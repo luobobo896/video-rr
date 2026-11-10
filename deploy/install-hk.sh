@@ -35,6 +35,11 @@ if ! grep -q '^MH_LINK_SECRET=' "$APP/.env"; then
   printf 'MH_LINK_SECRET=%s\n' "$LINK" >> "$APP/.env"
   chmod 600 "$APP/.env"
 fi
+if ! grep -q '^MH_CONFIG_KEYS=' "$APP/.env"; then
+  CONFIG_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+  printf 'MH_CONFIG_KEYS=1:%s\nMH_CONFIG_KEY_VERSION=1\n' "$CONFIG_KEY" >> "$APP/.env"
+  chmod 600 "$APP/.env"
+fi
 set -a; . "$APP/.env"; set +a
 [ -n "${MH_LINK_SECRET:-}" ] || { echo "MH_LINK_SECRET 缺失"; exit 1; }
 

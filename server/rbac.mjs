@@ -1,5 +1,6 @@
 /** RBAC：角色/权限/数据域 + 审计日志。 */
 import { db } from './db.mjs'
+import { buildMenuTree, expandWithAncestors, menuNode } from './db.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -56,7 +57,47 @@ export function listRoles() {
 }
 
 export function listPermissionCatalog() {
-  return all('SELECT * FROM permissions ORDER BY domain, code')
+  return all('SELECT * FROM permissions ORDER BY domain, sort, code')
+}
+
+/* ---------------- 树形菜单权限 ---------------- */
+
+/** 只读的完整菜单树（前端 el-tree 的数据源）。 */
+export function menuTree() {
+  return buildMenuTree()
+}
+
+/** 角色已勾选的菜单/按钮 code（含父级，前端回显用）。 */
+export function roleMenuCodes(roleId) {
+  return all('SELECT permission_code FROM role_permissions WHERE role_id = ?', Number(roleId)).map((row) => row.permission_code)
+}
+
+/** 角色 + 完整树 + 已勾选集合，一次返回，减少前端往返。 */
+export function roleMenuBinding(roleId) {
+  return {
+    roleId: Number(roleId),
+    checked: roleMenuCodes(roleId),
+    tree: buildMenuTree(),
+  }
+}
+
+/**
+ * 保存角色菜单：入参为勾选 code（前端可只传叶子），
+ * 后端自动补齐父级，保证树完整性；目录节点不可单独授权给"只有子节点"的角色。
+ */
+export function updateRoleMenus(roleId, codes) {
+  const normalized = expandWithAncestors((codes ?? []).filter((code) => menuNode(code)))
+  db.exec('BEGIN')
+  try {
+    db.prepare('DELETE FROM role_permissions WHERE role_id = ?').run(Number(roleId))
+    const insert = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission_code) VALUES (?, ?)')
+    for (const code of normalized) insert.run(Number(roleId), code)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+  return { roleId: Number(roleId), checked: normalized }
 }
 
 export function updateRolePermissions(roleId, codes) {
