@@ -18,6 +18,34 @@ export function recordPlay({ userId, dramaId, episodeId, episodeNo, source = 'pl
   } catch { /* 埋点失败不影响播放 */ }
 }
 
+/** 行为埋点白名单：只收已知类型，避免被当成任意写入的口子 */
+export const TRACK_TYPES = new Set([
+  'impression', 'detail_view', 'paywall_view', 'paywall_click', 'play_end', 'search', 'share',
+])
+
+/**
+ * 漏斗上游埋点。播放开始已有 play_events，这里补曝光/详情/付费墙/完播。
+ * 完播用 value = 完播率（position/duration），方便算平均完播。
+ */
+export function recordEvent({ type, userId, dramaId, episodeId, path, value, position, duration, meta, ip, ua } = {}) {
+  const kind = String(type ?? '')
+  if (!TRACK_TYPES.has(kind)) return false
+  try {
+    db.prepare(`INSERT INTO track_events
+      (type, user_id, drama_id, episode_id, path, value, position, duration, meta_json, ip, ua)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      kind, userId ?? null, dramaId ? Number(dramaId) : null, episodeId ? Number(episodeId) : null,
+      String(path ?? '').slice(0, 200),
+      Number.isFinite(Number(value)) ? Number(value) : null,
+      Number.isFinite(Number(position)) ? Number(position) : null,
+      Number.isFinite(Number(duration)) ? Number(duration) : null,
+      meta ? JSON.stringify(meta).slice(0, 500) : null,
+      String(ip ?? '').slice(0, 64), String(ua ?? '').slice(0, 200),
+    )
+    return true
+  } catch { return false }
+}
+
 const dateRange = (days) => {
   const since = new Date(Date.now() - days * 86400_000).toISOString().slice(0, 10)
   return since
@@ -99,5 +127,44 @@ export function analyticsReport({ days = 7 } = {}) {
 
   const perViewer = totals.viewers ? Number((totals.plays / totals.viewers).toFixed(2)) : 0
 
-  return { range: { days, since }, totals: { ...totals, playsPerViewer: perViewer }, playsByDay: plays, topDramas, sourceSplit, ordersByDay, byChannel, byProduct, funnel, money, users, subscriptions, content }
+  /* ---------- 漏斗上游（曝光 → 详情 → 付费墙 → 下单 → 支付）---------- */
+  const countOf = (type) => one('SELECT COUNT(*) AS n FROM track_events WHERE type = ? AND date(created_at) >= date(?)', type, since).n
+  const upstream = {
+    detailViews: countOf('detail_view'),
+    paywallViews: countOf('paywall_view'),
+    paywallClicks: countOf('paywall_click'),
+    playEnds: countOf('play_end'),
+    searches: countOf('search'),
+    shares: countOf('share'),
+    impressions: countOf('impression'),
+  }
+  upstream.detailToPaywall = upstream.detailViews ? Number(((upstream.paywallViews / upstream.detailViews) * 100).toFixed(2)) : 0
+  upstream.paywallToOrder = upstream.paywallViews ? Number(((funnel.orders / upstream.paywallViews) * 100).toFixed(2)) : 0
+  upstream.orderToPaid = funnel.payRate
+
+  const trackByType = all(`SELECT type, COUNT(*) AS n FROM track_events
+    WHERE date(created_at) >= date(?) GROUP BY type ORDER BY n DESC`, since)
+  const trackByDay = all(`SELECT date(created_at) AS day, type, COUNT(*) AS n FROM track_events
+    WHERE date(created_at) >= date(?) GROUP BY day, type ORDER BY day`, since)
+  const completion = one(`SELECT COUNT(*) AS n, COALESCE(AVG(value),0) AS avgRate FROM track_events
+    WHERE type = 'play_end' AND value IS NOT NULL AND date(created_at) >= date(?)`, since)
+  const completionStats = {
+    samples: completion.n,
+    avgRate: Number(Number(completion.avgRate ?? 0).toFixed(3)),
+    finished: one(`SELECT COUNT(*) AS n FROM track_events
+      WHERE type = 'play_end' AND COALESCE(value,0) >= 0.9 AND date(created_at) >= date(?)`, since).n,
+  }
+  const topDetailViews = all(`SELECT t.drama_id AS dramaId, d.title, COUNT(*) AS n, COALESCE(AVG(t.value),0) AS avgRate
+    FROM track_events t LEFT JOIN dramas d ON d.id = t.drama_id
+    WHERE t.type = 'detail_view' AND date(t.created_at) >= date(?)
+    GROUP BY t.drama_id ORDER BY n DESC LIMIT 10`, since)
+  const searchTerms = all(`SELECT path AS term, COUNT(*) AS n FROM track_events
+    WHERE type = 'search' AND date(created_at) >= date(?) AND path <> ''
+    GROUP BY path ORDER BY n DESC LIMIT 10`, since)
+
+  return {
+    range: { days, since }, totals: { ...totals, playsPerViewer: perViewer }, playsByDay: plays, topDramas, sourceSplit,
+    ordersByDay, byChannel, byProduct, funnel, money, users, subscriptions, content,
+    tracking: { upstream, byType: trackByType, byDay: trackByDay, completion: completionStats, topDetailViews, searchTerms },
+  }
 }

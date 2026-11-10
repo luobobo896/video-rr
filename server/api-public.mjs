@@ -10,7 +10,8 @@ import { OtpError, normalizeEmail, sendCode, verifyCode } from './otp.mjs'
 import {
   LINK_TTL, decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, secureLink,
 } from './entitlements.mjs'
-import { recordPlay } from './analytics.mjs'
+import { recordEvent, recordPlay } from './analytics.mjs'
+import { clientIpOf } from './ratelimit.mjs'
 import { listTags, tagsOfDrama, dramaIdsByTag } from './tags.mjs'
 import {
   CommerceError, createOrder, handleAlipayNotify, listOrders, markPaid, mockPay, paymentOptions, validateCoupon,
@@ -95,7 +96,7 @@ const readBody = (req) => new Promise((resolve) => {
   })
 })
 
-const clientIp = (req) => String(req.headers['x-forwarded-for'] ?? req.socket?.remoteAddress ?? '').split(',')[0].trim().replace('::ffff:', '')
+const clientIp = (req) => clientIpOf(req)
 
 export async function handlePublic(pathname, url, req, res) {
   const auth = authOf(req)
@@ -110,6 +111,7 @@ export async function handlePublic(pathname, url, req, res) {
   const OPEN_PATHS = new Set([
     '/api/constants', '/api/home', '/api/feed', '/api/auth/login', '/api/category', '/api/rank',
     '/api/search', '/api/tags', '/api/auth/email/send', '/api/auth/email/login', '/api/auth/email/password',
+    '/api/track',
   ])
   const OPEN_PREFIXES = ['/api/drama/', '/api/category/', '/api/tags/']
   // 只有支付宝服务端回调是公开的（自带 RSA2 验签）；其余回调一律留在内网/进程内
@@ -122,6 +124,7 @@ export async function handlePublic(pathname, url, req, res) {
     /* ---------- 基础 ---------- */
     if (pathname === '/api/constants') {
       const channels = paymentOptions('all')
+      const live = channels.filter((channel) => channel.usable)
       const site = getSetting('site', {}) ?? {}
       return send(res, {
         site: { name: '影巢' },
@@ -134,11 +137,11 @@ export async function handlePublic(pathname, url, req, res) {
         ],
         pay: {
           channels,
-          alipay: channels.some((channel) => channel.code === 'alipay'),
-          usdt: channels.some((channel) => channel.code === 'usdt'),
-          mock: channels.some((channel) => channel.code === 'mock'),
-          usdtNetwork: channels.find((channel) => channel.code === 'usdt')?.currency === 'USDT' ? 'TRC20' : 'TRC20',
-          defaultChannel: channels.find((channel) => channel.isDefault)?.code ?? channels[0]?.code ?? null,
+          alipay: live.some((channel) => channel.code === 'alipay'),
+          usdt: live.some((channel) => channel.code === 'usdt'),
+          mock: live.some((channel) => channel.code === 'mock'),
+          usdtNetwork: 'TRC20',
+          defaultChannel: live.find((channel) => channel.isDefault)?.code ?? live[0]?.code ?? null,
         },
         auth: {
           method: 'email',
@@ -566,6 +569,17 @@ export async function handlePublic(pathname, url, req, res) {
       db.prepare("INSERT INTO danmus (episode_id, user_id, time_ms, content, status) VALUES (?, ?, ?, ?, 'pending')")
         .run(episode.id, userId, Math.max(0, Math.round(Number(body.timeMs ?? 0))), content)
       return send(res, { ok: true, status: 'pending', message: '已提交，审核通过后展示' })
+    }
+
+    /* 行为埋点：匿名的曝光/详情也收，用于算漏斗上游（只收白名单类型） */
+    if (pathname === '/api/track' && method === 'POST') {
+      const body = await readBody(req)
+      const ok = recordEvent({
+        type: body.type, userId, dramaId: body.dramaId, episodeId: body.episodeId,
+        path: body.path ?? body.term, value: body.value, position: body.position, duration: body.duration,
+        meta: body.meta, ip: clientIp(req), ua: req.headers['user-agent'],
+      })
+      return send(res, { ok })
     }
 
     if (pathname === '/api/me') {

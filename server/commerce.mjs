@@ -45,18 +45,58 @@ export function listChannels({ scene } = {}) {
   const rows = scene
     ? all('SELECT * FROM pay_channels WHERE scene = ? OR scene = \'all\' ORDER BY priority, id', scene)
     : all('SELECT * FROM pay_channels ORDER BY priority, id')
-  return rows.map((row) => ({
-    ...row,
-    config_cipher: undefined,
-    config_preview: row.config_preview ? JSON.parse(row.config_preview) : maskConfig(channelConfig(row)),
-    hasSecret: Boolean(row.config_cipher),
-  }))
+  return rows.map((row) => {
+    // 可用性必须在剥掉密文之前算：channelUsable 需要解密后的 config
+    const verdict = channelUsable(row)
+    return {
+      ...row,
+      config_cipher: undefined,
+      config_preview: row.config_preview ? JSON.parse(row.config_preview) : maskConfig(channelConfig(row)),
+      hasSecret: Boolean(row.config_cipher),
+      usable: verdict.usable,
+      unavailableReason: verdict.usable ? '' : verdict.reason,
+    }
+  })
 }
 
 /**
  * 选渠道：显式指定优先；否则按场景取默认（is_default），再按 priority 兜底。
  * 会校验金额区间与币种，避免"配了但用不了"。
  */
+const SIM_PAY_ALLOWED = () => process.env.MH_ALLOW_SIM_PAY === '1'
+const TRON_ADDRESS = /^T[1-9A-HJ-NP-Za-km-z]{33}$/
+
+/**
+ * 渠道是否真的能收款。
+ * 「启用」只是开关，不等于「可用」：支付宝缺商户密钥、USDT 缺地址时，
+ * 下单必须直接失败，绝不能下发模拟收银台（那等于白送会员）。
+ */
+export function channelUsable(row) {
+  if (!row) return { usable: false, reason: '支付渠道不存在' }
+  if (row.status !== 'enabled') return { usable: false, reason: '支付渠道已停用' }
+  const config = channelConfig(row)
+  switch (row.channel_code) {
+    case 'mock':
+      return SIM_PAY_ALLOWED()
+        ? { usable: true, reason: '' }
+        : { usable: false, reason: '模拟支付通道已关闭' }
+    case 'alipay': {
+      const hasKeys = Boolean(config.appId && config.privateKey && config.publicKey)
+      if (hasKeys) return { usable: true, reason: '' }
+      return SIM_PAY_ALLOWED()
+        ? { usable: true, reason: '', simulated: true }
+        : { usable: false, reason: '支付宝商户密钥未配置（需 appId / 应用私钥 / 支付宝公钥）' }
+    }
+    case 'usdt': {
+      const address = String(config.walletAddress ?? '')
+      if (!TRON_ADDRESS.test(address)) return { usable: false, reason: 'USDT 收款地址未配置或格式不正确' }
+      return { usable: true, reason: '' }
+    }
+    default:
+      return { usable: true, reason: '' }
+  }
+}
+
 export function resolveChannel({ scene = 'all', channelCode, amount = 0, currency } = {}) {
   const rows = all("SELECT * FROM pay_channels WHERE status = 'enabled' ORDER BY is_default DESC, priority ASC, id ASC")
   const candidates = rows.filter((row) => {
@@ -66,7 +106,9 @@ export function resolveChannel({ scene = 'all', channelCode, amount = 0, currenc
     if (currency && row.currency && row.currency !== currency && row.channel_code !== 'usdt') return false
     if (row.min_amount > 0 && amount < row.min_amount) return false
     if (row.max_amount > 0 && amount > row.max_amount) return false
-    return true
+    // 显式指定渠道时不做可用性过滤，让调用方拿到明确的原因（channel_not_configured）
+    if (channelCode) return true
+    return channelUsable(row).usable
   })
   return candidates[0]
 }
@@ -78,12 +120,14 @@ export function paymentOptions(scene = 'all') {
       code: row.channel_code, name: row.name, scene: row.scene, currency: row.currency,
       isDefault: Boolean(row.is_default), priority: row.priority,
       minAmount: row.min_amount, maxAmount: row.max_amount,
-      configured: Object.values(row.config_preview ?? {}).some((value) => value && value !== ''),
+      configured: row.usable,
+      usable: row.usable,
+      unavailableReason: row.unavailableReason ?? '',
     }))
 }
 
 function resolveByCode(channelCode) {
-  const rows = all('SELECT * FROM pay_channels WHERE channel_code = ? ORDER BY is_default DESC, priority ASC LIMIT 1', channelCode)
+  const rows = all("SELECT * FROM pay_channels WHERE channel_code = ? AND status = 'enabled' ORDER BY is_default DESC, priority ASC LIMIT 1", channelCode)
   return rows[0]
 }
 
@@ -129,7 +173,9 @@ export function createOrder({ userId, productType, planId, dramaId, channel, cou
   // 渠道解析：显式指定 > 场景默认 > 优先级兜底；金额/币种不满足则跳过
   const scene = productType === 'subscription' ? 'subscription' : 'single'
   const row = resolveChannel({ scene, channelCode: channel || undefined, amount })
-  if (!row) throw new CommerceError('channel_unavailable', '没有可用的支付渠道（后台「支付渠道」里启用一个）')
+  if (!row) throw new CommerceError('channel_unavailable', '没有可用的支付渠道（后台「支付渠道」里启用并配置好一个）')
+  const verdict = channelUsable(row)
+  if (!verdict.usable) throw new CommerceError('channel_not_configured', verdict.reason, 409)
   const channelCode = row.channel_code
   const config = channelConfig(row)
   const rate = Number(config.rate ?? getSetting('site', {}).usdtRate ?? 7.2)
@@ -163,6 +209,9 @@ export function createOrder({ userId, productType, planId, dramaId, channel, cou
 
   if (channelCode === 'alipay') {
     const configured = Boolean(config.appId && config.privateKey && config.publicKey)
+    if (!configured && !SIM_PAY_ALLOWED()) {
+      throw new CommerceError('channel_not_configured', '支付宝商户密钥未配置，暂不可用', 409)
+    }
     return {
       order: created,
       payUrl: configured ? buildAlipayPayUrl(created, config) : `/pay/alipay-sim/${created.out_trade_no}`,

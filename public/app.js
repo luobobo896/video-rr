@@ -43,6 +43,20 @@ const state = {
 // 未登录点「免费看第 1 集」时记下目标，登录成功后直接跳过去，不让用户再点一次
 let pendingRoute = ''
 
+/** 行为埋点：beacon 优先（不阻塞导航），失败静默——埋点永远不能影响用户体验 */
+function track(type, data = {}) {
+  try {
+    const payload = JSON.stringify({ type, ...data })
+    if (navigator.sendBeacon) {
+      const ok = navigator.sendBeacon(`${BASE}/api/track`, new Blob([payload], { type: 'application/json' }))
+      if (ok) return
+    }
+    fetch(`${BASE}/api/track`, {
+      method: 'POST', keepalive: true, headers: { 'content-type': 'application/json' }, body: payload,
+    }).catch(() => {})
+  } catch { /* ignore */ }
+}
+
 async function api(path, options = {}) {
   const headers = { ...(options.headers ?? {}) }
   if (state.token) headers.authorization = `Bearer ${state.token}`
@@ -225,11 +239,21 @@ const ORDER_STATUS = {
  */
 const PAY = { channels: [], defaultChannel: null, usdtNetwork: 'TRC20', ready: false }
 const CHANNEL_LABEL = { mock: '模拟支付（演示）', alipay: '支付宝', usdt: 'USDT（TRC20）', wechat: '微信支付' }
-const channelList = () => (PAY.channels ?? []).map((channel) => {
+// 只把「真能收钱」的渠道摆给用户：后台启用但缺密钥/缺地址的渠道由服务端标记 usable=false
+const usableChannels = () => (PAY.channels ?? []).filter((channel) => channel.usable !== false)
+const unavailableChannelReason = () => {
+  const broken = (PAY.channels ?? []).find((channel) => channel.usable === false)
+  return broken ? (broken.unavailableReason || `${CHANNEL_LABEL[broken.code] ?? broken.code} 暂不可用`) : ''
+}
+const channelList = () => usableChannels().map((channel) => {
   const code = channel.code ?? channel.channelCode
   return { code, label: CHANNEL_LABEL[code] ?? channel.name ?? code }
 })
-const defaultChannel = () => PAY.defaultChannel ?? channelList()[0]?.code ?? null
+const defaultChannel = () => {
+  const list = channelList()
+  const preferred = list.find((item) => item.code === PAY.defaultChannel)
+  return preferred?.code ?? list[0]?.code ?? null
+}
 const badgeOf = (item) => {
   const access = item.access ?? (item.accessMode === 'paid' ? 'paid' : 'subscription')
   if (access === 'free') return '<span class="badge badge-free">免费</span>'
@@ -261,6 +285,7 @@ async function waitOrderPaid(outTradeNo, onTick) {
 }
 
 function openPaywall(detail, options = {}) {
+  track('paywall_view', { dramaId: detail?.id ?? options.dramaId ?? null, meta: { reason: options.reason ?? '' } })
   const modal = $('#modal')
   const plans = options.plans ?? detail?.priceInfo?.plans ?? []
   const singlePrice = Number(options.price ?? detail?.singlePrice ?? 0)
@@ -308,9 +333,10 @@ function openPaywall(detail, options = {}) {
   const channels = channelList()
   $('#pay-channels').innerHTML = channels.length
     ? channels.map((channel) => `<button class="channel" data-channel="${escapeHtml(channel.code)}">${escapeHtml(channel.label)}</button>`).join('')
-    : '<div class="paywall-sub" style="color:#ff8a8a">当前暂无可用支付渠道，请联系客服开通</div>'
+    : `<div class="paywall-sub" style="color:#ff8a8a">${escapeHtml(unavailableChannelReason() || '当前暂无可用支付渠道，请联系客服开通')}</div>`
 
   const go = async (channel, payload) => {
+    track('paywall_click', { dramaId: detail?.id ?? null, meta: { channel, product: payload?.productType ?? '' } })
     if (!state.token) { close(); openLogin(); return }
     if (!channel) { $('#paywall-msg').textContent = '暂无可用支付渠道'; return }
     $('#paywall-msg').textContent = '正在创建订单…'
@@ -554,6 +580,7 @@ async function renderRank(params) {
 
 async function renderSearch(params) {
   const keyword = params.get('q') ?? ''
+  track('search', { path: keyword })
   const data = await api(`/api/search?keyword=${encodeURIComponent(keyword)}`)
   const home = await api('/api/home').catch(() => ({ hotwords: [] }))
   view.innerHTML = `
@@ -572,6 +599,7 @@ async function renderSearch(params) {
 
 async function renderDrama(id) {
   const detail = await api(`/api/drama/${encodeURIComponent(id)}`)
+  track('detail_view', { dramaId: Number(id) })
   const access = detail.access ?? 'subscription'
   const priceInfo = detail.priceInfo ?? { plans: [], singlePrice: detail.singlePrice ?? 0 }
   const canSingle = detail.accessMode === 'paid'
@@ -805,6 +833,10 @@ async function renderPlay(id, episodeNo) {
     // 连播：本集播完自动进下一集
     video.addEventListener('ended', () => {
       saveHistory()
+      track('play_end', {
+        dramaId: detail.dramaId, episodeId: data.episodeId, position: video.currentTime, duration: video.duration || 0,
+        value: video.duration ? Math.min(1, video.currentTime / video.duration) : 1,
+      })
       if (!data.nextEpisodeNo) return toast('已是最后一集')
       toast(`即将播放第 ${data.nextEpisodeNo} 集`)
       setTimeout(() => { location.hash = `#/play/${detail.dramaId}/${data.nextEpisodeNo}` }, 800)

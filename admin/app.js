@@ -1526,9 +1526,20 @@ async function pageEmail() {
 }
 
 /* ---------------- 经营数据（播放 / 用户 / 订单 / 订阅多维统计） ---------------- */
+const EVENT_LABEL = {
+  impression: '曝光', detail_view: '详情页浏览', paywall_view: '付费墙展示', paywall_click: '付费墙点击',
+  play_end: '播放结束', search: '搜索', share: '分享',
+}
+
 async function pageAnalytics() {
   const days = Number(localStorage.getItem('mh-analytics-days') ?? 7)
   const data = await api(`/admin/api/analytics?days=${days}`)
+  const t = {
+    upstream: {}, byType: [], completion: {}, searchTerms: [], topDetailViews: [],
+    ...(data.tracking ?? {}),
+  }
+  const u = { detailViews: 0, paywallViews: 0, paywallClicks: 0, detailToPaywall: 0, paywallToOrder: 0, orderToPaid: 0, ...t.upstream }
+  const comp = { samples: 0, avgRate: 0, finished: 0, ...t.completion }
   const bars = (rows, key, label) => {
     const max = Math.max(1, ...rows.map((row) => Number(row[key] ?? 0)))
     return `<div class="bars">${rows.map((row) => `<div class="bar-row">
@@ -1594,6 +1605,34 @@ async function pageAnalytics() {
           <tr><td>超时关闭</td><td>${fmt(data.funnel.closed)}</td></tr>
           <tr><td>已退款</td><td>${fmt(data.funnel.refunded)}</td></tr>
           <tr><td>退款中</td><td>${fmt(data.money.pendingRefunds)}</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+    <div class="split" style="margin-top:16px">
+      <div class="panel">
+        <h3>转化漏斗（上游）</h3>
+        <table><tbody>
+          <tr><td>详情页浏览</td><td>${fmt(u.detailViews)}</td></tr>
+          <tr><td>付费墙展示</td><td>${fmt(u.paywallViews)} <span class="muted">详情→付费墙 ${u.detailToPaywall}%</span></td></tr>
+          <tr><td>付费墙点击</td><td>${fmt(u.paywallClicks)}</td></tr>
+          <tr><td>下单</td><td>${fmt(data.funnel.orders)} <span class="muted">付费墙→下单 ${u.paywallToOrder}%</span></td></tr>
+          <tr><td>支付成功</td><td>${fmt(data.funnel.paid)} <span class="muted">下单→支付 ${u.orderToPaid}%</span></td></tr>
+        </tbody></table>
+        <h3 style="margin-top:18px">完播</h3>
+        <table><tbody>
+          <tr><td>播放结束事件</td><td>${fmt(comp.samples)}</td></tr>
+          <tr><td>平均完播率</td><td>${Math.round(Number(comp.avgRate ?? 0) * 100)}%</td></tr>
+          <tr><td>看完（≥90%）</td><td>${fmt(comp.finished)}</td></tr>
+        </tbody></table>
+      </div>
+      <div class="panel">
+        <h3>事件类型</h3>
+        <table><thead><tr><th>事件</th><th>次数</th></tr></thead><tbody>
+          ${(t.byType.length ? t.byType : [{ type: '—', n: 0 }]).map((row) => `<tr><td>${esc(EVENT_LABEL[row.type] ?? row.type)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
+        </tbody></table>
+        <h3 style="margin-top:18px">搜索词 Top 10</h3>
+        <table><thead><tr><th>关键词</th><th>次数</th></tr></thead><tbody>
+          ${(t.searchTerms.length ? t.searchTerms : [{ term: '—', n: 0 }]).map((row) => `<tr><td>${esc(row.term)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
         </tbody></table>
       </div>
     </div>`)

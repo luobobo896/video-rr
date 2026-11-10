@@ -11,6 +11,7 @@ process.env.MH_ADMIN_INIT_PASSWORD = 'admin123'
 process.env.MH_SECRET = 'test-secret'
 process.env.MH_CONFIG_KEYS = `1:${Buffer.alloc(32, 3).toString('base64')}`
 process.env.MH_CONFIG_KEY_VERSION = '1'
+process.env.MH_ALLOW_SIM_PAY = '1'
 
 let db, commerce, alipay, ent, sealSecret
 

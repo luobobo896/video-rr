@@ -347,6 +347,26 @@ CREATE TABLE IF NOT EXISTS play_events (
 CREATE INDEX IF NOT EXISTS idx_play_events_time ON play_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_play_events_drama ON play_events(drama_id);
 
+-- ===== 行为埋点（漏斗上游：曝光 / 详情 / 付费墙 / 完播 / 搜索 / 分享）=====
+CREATE TABLE IF NOT EXISTS track_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,                        -- impression|detail_view|paywall_view|paywall_click|play_end|search|share
+  user_id INTEGER,
+  drama_id INTEGER,
+  episode_id INTEGER,
+  path TEXT,
+  value REAL,                                -- 完播率 / 搜索词长度等数值位
+  position REAL,                             -- 播放进度（秒）
+  duration REAL,                             -- 总时长（秒）
+  meta_json TEXT,
+  ip TEXT,
+  ua TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_track_events_time ON track_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_track_events_type ON track_events(type, created_at);
+CREATE INDEX IF NOT EXISTS idx_track_events_drama ON track_events(drama_id);
+
 -- ===== 标签（C 端筛选 / B 端管理）=====
 CREATE TABLE IF NOT EXISTS tags (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
