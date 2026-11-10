@@ -44,9 +44,15 @@ $CURL -X POST "$BASE/video/api/pay/mock" -H 'content-type: application/json' -d 
   "import sys,json;d=json.load(sys.stdin)['data'];print('  支付结果',d['order']['status'],'重复',d['duplicate'])"
 printf '  订阅后播放第 5 集        %s（应 200）\n' "$($CURL -o /dev/null -w '%{http_code}' "$BASE/video/api/play/$DRAMA/5" -H "authorization: Bearer $USER")"
 
-echo "=== 5. 播放签名 Cookie 有效 ==="
+echo "=== 5. 播放签名 Cookie 有效（用同一路径验证）==="
 $CURL -c /tmp/mh_cookie.txt -o /dev/null "$BASE/video/api/play/$DRAMA/5" -H "authorization: Bearer $USER"
-printf '  带 Cookie 取 m3u8        %s（应 200/404，403 为失败）\n' "$($CURL -b /tmp/mh_cookie.txt -o /dev/null -w '%{http_code}' "$BASE/video/media/hls/1/index.m3u8")"
+HLS=$($CURL "$BASE/video/api/play/$DRAMA/5" -H "authorization: Bearer $USER" | jq_get data.hls)
+if [ -z "$HLS" ]; then
+  echo "  该集还没有片源（后台生成示例视频后再验证）"
+else
+  printf '  带 Cookie 取 %-20s %s（应 200）\n' "$HLS" "$($CURL -b /tmp/mh_cookie.txt -o /dev/null -w '%{http_code}' "$BASE/video$HLS")"
+  printf '  无 Cookie 取同一地址      %s（应 403）\n' "$($CURL -o /dev/null -w '%{http_code}' "$BASE/video$HLS")"
+fi
 rm -f /tmp/mh_cookie.txt
 
 echo "=== 6. 对账 ==="
