@@ -571,9 +571,28 @@ export function seedIfEmpty() {
 }
 
 /**
+ * 老库结构升级：permissions 从扁平权限点扩成树形节点（SQLite 只能逐列 ADD COLUMN）。
+ */
+export function ensureMenuSchema() {
+  const columns = db.prepare('PRAGMA table_info(permissions)').all().map((row) => row.name)
+  const additions = [
+    ['type', "TEXT NOT NULL DEFAULT 'button'"],
+    ['parent_code', 'TEXT'],
+    ['sort', 'INTEGER NOT NULL DEFAULT 0'],
+    ['path', 'TEXT'],
+    ['icon', 'TEXT'],
+    ['visible', 'INTEGER NOT NULL DEFAULT 1'],
+  ]
+  for (const [name, ddl] of additions) {
+    if (!columns.includes(name)) db.exec(`ALTER TABLE permissions ADD COLUMN ${name} ${ddl}`)
+  }
+}
+
+/**
  * 目录/菜单/权限同步（幂等）：老库启动时补齐树形节点，不依赖重新建库。
  */
 export function syncMenuCatalog() {
+  ensureMenuSchema()
   const insert = db.prepare(`INSERT INTO permissions (code, name, domain, type, parent_code, sort, path, icon, visible)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
     ON CONFLICT(code) DO UPDATE SET name = excluded.name, type = excluded.type,
