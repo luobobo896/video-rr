@@ -115,6 +115,9 @@ function cardOf(drama, userId, context = {}) {
     trialSeconds: policy.trial_seconds,
     singlePrice: policy.single_price_cny,
     playCount: Number(drama.play_count ?? 0),
+    // 参考站海报左上角有「最新上线 / 独播 / 正在热播」角标：这里只发可判定的「最新上线」
+    // （created_at 是 datetime('now') 的 UTC 文本，直接按字符串比较即可，30 天内算新）
+    isNew: String(drama.created_at ?? '') >= new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 19).replace('T', ' '),
   }
 }
 
@@ -451,6 +454,23 @@ export async function handlePublic(pathname, url, req, res) {
         resumeEpisodeNo: resume?.episode_no ?? null,
         resumePosition: resume?.position ?? null,
         resumeUpdatedAt: resume?.updated_at ?? null,
+        // 参考站详情页右侧/底部有「类似影视」：同类型优先，不足时用高分剧补齐，最多 8 部
+        similar: (() => {
+          const sameType = all(
+            `SELECT d.* FROM dramas d
+              WHERE d.id <> ? AND d.status = 'published' AND d.category = ?
+              ORDER BY d.score DESC, d.id DESC LIMIT 8`,
+            drama.id, drama.category,
+          )
+          if (sameType.length >= 4) return sameType.map((row) => cardOf(row, userId, context))
+          const fill = all(
+            `SELECT d.* FROM dramas d WHERE d.id <> ? AND d.status = 'published'
+              ORDER BY d.score DESC, d.id DESC LIMIT ?`,
+            drama.id, 8 - sameType.length,
+          )
+          const seen = new Set(sameType.map((row) => row.id))
+          return [...sameType, ...fill.filter((row) => !seen.has(row.id))].map((row) => cardOf(row, userId, context))
+        })(),
       })
     }
 

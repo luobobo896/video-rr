@@ -516,16 +516,21 @@ function posterCard(item, options = {}) {
   // 需要角标时显式传 { badge: true }。
   const badge = options.badge === true ? badgeOf(item) : ''
   const rank = options.rank ? `<span class="rank-no">${options.rank}</span>` : ''
-  const score = options.score && Number(item.score) > 0 ? `<span class="card-score">★ ${Number(item.score).toFixed(1)}</span>` : ''
+  // 参考站海报：左上角「最新上线」角标、右下角评分；列表里不再重复一行评分
+  const ribbon = item.isNew ? '<span class="card-ribbon">最新上线</span>' : ''
+  const score = options.score !== false && Number(item.score) > 0
+    ? `<span class="card-score-badge">★ ${Number(item.score).toFixed(1)}</span>`
+    : ''
   // playCount 由 cardOf 提供；只在明确要求的地方显示（分类列表），避免每张卡都塞满数字
   const plays = options.plays && Number(item.playCount) > 0 ? `<span class="card-plays">▶ ${fmtCount(item.playCount)}</span>` : ''
-  // 三块都为空时整行不渲染：留空 div 会让卡片的 title→图 间距塌掉，多行卡片高度不齐
-  const sub = `${score}${plays}${escapeHtml(item.subTitle || (item.labels ?? []).slice(0, 2).join(' · '))}`
+  const meta = (item.labels ?? []).slice(0, 2).join(' · ')
+  const sub = `${plays}${escapeHtml(item.subTitle || meta)}`
   return `
     <div class="card">
       <a class="poster" href="#/drama/${escapeHtml(item.dramaId)}" title="${escapeHtml(item.title)}">
-        ${badge}${rank}
+        ${badge}${rank}${ribbon}
         <img loading="lazy" src="${escapeHtml(mediaUrl(item.coverUrl))}" alt="${escapeHtml(item.title)}" onerror="this.style.display='none';this.parentNode.classList.add('noimg')" />
+        ${score}
         <span class="play-hint">▶</span>
       </a>
       <div class="card-title">${escapeHtml(item.title)}</div>
@@ -1122,6 +1127,18 @@ async function renderDrama(id) {
       openPaywall(detail, { price: detail.singlePrice, reason: canSingle ? 'single_purchase_required' : 'subscription_required' })
     })
   })
+  // 类似影视：参考站详情页底部有同类型推荐，点了直接换片
+  const similar = (detail.similar ?? []).filter((item) => String(item.dramaId) !== String(detail.dramaId))
+  if (similar.length) {
+    view.insertAdjacentHTML('beforeend', `
+      <section class="section">
+        <div class="section-head">
+          <div class="section-title">类似影视</div>
+          <div class="section-hint">按类型与评分推荐</div>
+        </div>
+        <div class="grid">${similar.slice(0, 8).map((item) => posterCard(item)).join('')}</div>
+      </section>`)
+  }
   $('#fav-btn').addEventListener('click', async (event) => {
     const button = event.currentTarget
     try {
@@ -1441,9 +1458,19 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
   const trialSeconds = Number(data.trialSeconds ?? 0)
   let trialHit = false
   if (data.source === 'trial' && trialSeconds > 0) {
-    notice(`试看 ${trialSeconds} 秒，开通会员或购买后可看全集`)
+    // 参考站是「试看 10:00 后结束，观看完整影片请登录」的倒计时提示，这里同样显示剩余秒数
+    const remainText = (seconds) => {
+      const left = Math.max(0, Math.ceil(seconds))
+      return `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`
+    }
+    notice(`试看剩余 ${remainText(trialSeconds)}，结束后需开通会员或购买`)
     video.addEventListener('timeupdate', () => {
-      if (trialHit || video.currentTime < trialSeconds) return
+      if (trialHit) return
+      const left = trialSeconds - video.currentTime
+      if (left > 0) {
+        notice(`试看剩余 ${remainText(left)}，结束后需开通会员或购买`)
+        return
+      }
       trialHit = true
       video.pause()
       openPaywall(detail, {
@@ -1518,7 +1545,10 @@ async function renderMe() {
       </div>
       <div class="me-card">
         <div class="me-card-title">会员权益</div>
-        ${sub ? `<div class="me-big">会员中</div><div class="me-sub">有效期至 ${escapeHtml(sub.validTo)}</div>` : '<div class="me-big">未开通</div><div class="me-sub">开通后可看全站剧集</div>'}
+        ${sub
+          ? `<div class="me-big">会员中<small class="me-days">剩 ${Math.max(0, Math.ceil((Date.parse(String(sub.validTo).replace(' ', 'T')) - Date.now()) / 86400000))} 天</small></div>
+             <div class="me-sub">有效期至 ${escapeHtml(sub.validTo)}${sub.scope === 'all' ? ' · 全站畅看' : ''}</div>`
+          : '<div class="me-big">未开通</div><div class="me-sub">开通后可看全站剧集（含单片付费内容）</div>'}
         <button class="btn-primary" id="me-subscribe" style="margin-top:12px">${sub ? '续费' : '开通会员'}</button>
       </div>
       <div class="me-card">

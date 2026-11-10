@@ -437,3 +437,55 @@ button { font-family: inherit; cursor: pointer; }
   .cat-filters .filter-row { width: 100%; }
   .cat-filters .filter-row .subtabs { flex-wrap: nowrap; }
 }
+
+/* ---------- 参考站（南瓜电影 / 人人视频）风格的对齐项 ---------- */
+/* 1) 筛选行改成「行标签 + 纯文本选项」，选中项用品牌色，不再用胶囊描边：
+      参考站是 全部类型  动作 战争 科幻 …，选中项橙色，没有边框和底色。 */
+.cat-filters .filter-row .subtabs .pill {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 4px 8px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.cat-filters .filter-row .subtabs .pill:hover { color: #fff; }
+.cat-filters .filter-row .subtabs .pill.active {
+  background: transparent;
+  border: none;
+  color: var(--brand);
+  font-weight: 600;
+}
+.cat-filters .filter-row .subtabs .pill em { color: var(--text-3); }
+.cat-filters .filter-row .subtabs .pill.active em { color: var(--brand); }
+.cat-filters .filter-label { color: var(--text-3); }
+
+/* 2) 海报角标：左上「最新上线」，右下评分（参考站同款位置） */
+.card-ribbon {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #ff7a3d, #ff3d6e);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+}
+.card-score-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--vip);
+  font-size: 12px;
+  font-weight: 700;
+  backdrop-filter: blur(2px);
+}
+.card .poster { position: relative; }
+.me-days { margin-left: 8px; font-size: 12px; font-weight: 500; color: var(--text-3); }
