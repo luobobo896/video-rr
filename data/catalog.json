@@ -29,8 +29,8 @@
       "episodeCount": 10,
       "banner": true,
       "source": {
-        "url": "https://archive.org/download/Sintel/sintel-2048-stereo.mp4",
-        "bytes": 283115520,
+        "url": "https://archive.org/download/Sintel/sintel-2048-surround.mp4",
+        "bytes": 310674005,
         "duration": 888,
         "license": "CC BY 3.0",
         "credit": "Blender Foundation · Durian Open Movie Project"

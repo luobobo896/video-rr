@@ -1507,6 +1507,7 @@ function openChangeEmail(user) {
 }
 
 function loginWall() {
+  document.title = '登录 · 影巢'
   view.innerHTML = `
     <div class="empty" style="margin-top:80px">
       <div style="font-size:18px;margin-bottom:10px">登录后即可播放与查看个人中心</div>
