@@ -35,6 +35,40 @@
         "bbb",
         "caminandes"
       ]
+    },
+    {
+      "title": "纪录片现场",
+      "slugs": [
+        "about-bananas",
+        "joan-cold",
+        "ground-up",
+        "doctor-industry"
+      ]
+    },
+    {
+      "title": "经典电影",
+      "slugs": [
+        "his-girl-friday",
+        "haunted-hill",
+        "tos"
+      ]
+    },
+    {
+      "title": "剧集连播",
+      "slugs": [
+        "lone-ranger",
+        "bonanza-s02e11",
+        "sintel"
+      ]
+    },
+    {
+      "title": "动画短片集",
+      "slugs": [
+        "duck-cover",
+        "spring-fever",
+        "caminandes",
+        "coffee"
+      ]
     }
   ],
   "ranks": [
@@ -88,6 +122,25 @@
         "cosmos",
         "caminandes",
         "coffee"
+      ]
+    },
+    {
+      "name": "高分榜",
+      "type": "HIGHRATE",
+      "slugs": [
+        "his-girl-friday",
+        "duck-cover",
+        "haunted-hill",
+        "lone-ranger"
+      ]
+    },
+    {
+      "name": "期待榜",
+      "type": "EXPECT",
+      "slugs": [
+        "bonanza-s02e11",
+        "haunted-hill",
+        "his-girl-friday"
       ]
     }
   ],
@@ -334,6 +387,398 @@
         "license": "CC BY 4.0",
         "credit": "Blender Animation Studio · Coffee Run"
       }
+    },
+    {
+      "slug": "about-bananas",
+      "title": "关于香蕉",
+      "subTitle": "About Bananas · 1935",
+      "description": "联合果品公司的香蕉从种植园到餐桌。1930 年代企业纪录片的典型样本：航拍、流水线、以及被剪掉的那部分。",
+      "year": 1935,
+      "area": "美国",
+      "category": "DOCUMENTARY",
+      "score": 7.6,
+      "tags": [
+        "纪录片",
+        "美食",
+        "历史",
+        "黑白",
+        "短片"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 0,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/AboutBan1935/AboutBan1935.mp4",
+        "bytes": 68512128,
+        "duration": 664,
+        "license": "Public Domain",
+        "credit": "Prelinger Archives · About Bananas (1935)"
+      },
+      "segmentSeconds": 664,
+      "banner": false
+    },
+    {
+      "slug": "health-posture",
+      "title": "姿势与健康",
+      "subTitle": "Health: Your Posture · 1953",
+      "description": "战后美国中小学的健康教育片：脊柱、椅子、书包，以及「坐直了」这三个字背后的时代焦虑。",
+      "year": 1953,
+      "area": "美国",
+      "category": "DOCUMENTARY",
+      "score": 7.2,
+      "tags": [
+        "纪录片",
+        "医疗",
+        "历史",
+        "黑白",
+        "短片"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 0,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/HealthYo1953/HealthYo1953.mp4",
+        "bytes": 66520877,
+        "duration": 640,
+        "license": "Public Domain",
+        "credit": "Prelinger Archives · Health: Your Posture (1953)"
+      },
+      "segmentSeconds": 640,
+      "banner": false
+    },
+    {
+      "slug": "sleep-health",
+      "title": "睡眠与健康",
+      "subTitle": "Sleep for Health · 1950",
+      "description": "睡眠不足会怎样？1950 年的答案是：注意力涣散、脾气变坏，以及一段夸张到可爱的动画插叙。",
+      "year": 1950,
+      "area": "美国",
+      "category": "DOCUMENTARY",
+      "score": 7.4,
+      "tags": [
+        "纪录片",
+        "医疗",
+        "科普",
+        "历史",
+        "黑白"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 0,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/Sleepfor1950/Sleepfor1950.mp4",
+        "bytes": 66986081,
+        "duration": 644,
+        "license": "Public Domain",
+        "credit": "Prelinger Archives · Sleep for Health (1950)"
+      },
+      "segmentSeconds": 644,
+      "banner": false
+    },
+    {
+      "slug": "joan-cold",
+      "title": "琼不得感冒",
+      "subTitle": "Joan Avoids a Cold · 1947",
+      "description": "琼只要打一个喷嚏，全班就停课。卫生教育片里最会演戏的一家人，也是防疫宣传的教科书。",
+      "year": 1947,
+      "area": "美国",
+      "category": "DOCUMENTARY",
+      "score": 7.8,
+      "tags": [
+        "纪录片",
+        "医疗",
+        "喜剧",
+        "历史",
+        "黑白"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 0,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/JoanAvoi1947/JoanAvoi1947.mp4",
+        "bytes": 65083997,
+        "duration": 625,
+        "license": "Public Domain",
+        "credit": "Prelinger Archives · Joan Avoids a Cold (1947)"
+      },
+      "segmentSeconds": 625,
+      "banner": false
+    },
+    {
+      "slug": "doctor-industry",
+      "title": "工厂医生",
+      "subTitle": "Doctor in Industry · 1946",
+      "description": "工厂里的白大褂：职业病、防护服、工时与体检。战后工业扩张如何把医疗搬进车间。",
+      "year": 1946,
+      "area": "美国",
+      "category": "DOCUMENTARY",
+      "score": 7.3,
+      "tags": [
+        "纪录片",
+        "医疗",
+        "历史",
+        "黑白"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 0,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/Doctorin1946/Doctorin1946.mp4",
+        "bytes": 117249712,
+        "duration": 1128,
+        "license": "Public Domain",
+        "credit": "Prelinger Archives · Doctor in Industry (1946)"
+      },
+      "segmentSeconds": 1128,
+      "banner": false
+    },
+    {
+      "slug": "ground-up",
+      "title": "从头开始",
+      "subTitle": "From the Ground Up · 1954",
+      "description": "一栋房子从地基到封顶。工业宣传片拍出了少见的耐心：砖、木、灰浆，全按工序来。",
+      "year": 1954,
+      "area": "美国",
+      "category": "DOCUMENTARY",
+      "score": 7.5,
+      "tags": [
+        "纪录片",
+        "历史",
+        "科普",
+        "黑白"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 0,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/FromtheG1954/FromtheG1954.mp4",
+        "bytes": 119087429,
+        "duration": 1145,
+        "license": "Public Domain",
+        "credit": "Prelinger Archives · From the Ground Up (1954)"
+      },
+      "segmentSeconds": 1145,
+      "banner": false
+    },
+    {
+      "slug": "duck-cover",
+      "title": "躲避与掩护",
+      "subTitle": "Duck and Cover · 1951",
+      "description": "冷战民防动画：乌龟伯特教你核爆时钻到课桌下。动画史上最著名也最令人不安的九分钟。",
+      "year": 1951,
+      "area": "美国",
+      "category": "ANIME",
+      "score": 8.1,
+      "tags": [
+        "动画",
+        "历史",
+        "战争",
+        "科普",
+        "黑白",
+        "短片"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 0,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/DuckandC1951/DuckandC1951.mp4",
+        "bytes": 57591076,
+        "duration": 555,
+        "license": "Public Domain",
+        "credit": "Prelinger Archives · Duck and Cover (1951)"
+      },
+      "segmentSeconds": 555,
+      "banner": false
+    },
+    {
+      "slug": "spring-fever",
+      "title": "春之狂热",
+      "subTitle": "A Case of Spring Fever · 1940",
+      "description": "一个男人抱怨弹簧，然后弹簧精灵出现了。动画与真人混拍，四十年代的荒诞教科书。",
+      "year": 1940,
+      "area": "美国",
+      "category": "ANIME",
+      "score": 7.7,
+      "tags": [
+        "动画",
+        "喜剧",
+        "奇幻",
+        "黑白",
+        "短片"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 0,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/CaseofSp1940/CaseofSp1940.mp4",
+        "bytes": 51525807,
+        "duration": 497,
+        "license": "Public Domain",
+        "credit": "Prelinger Archives · A Case of Spring Fever (1940)"
+      },
+      "segmentSeconds": 497,
+      "banner": false
+    },
+    {
+      "slug": "his-girl-friday",
+      "title": "女友礼拜五",
+      "subTitle": "His Girl Friday · 1940",
+      "description": "霍华德·霍克斯的快嘴喜剧：报社主编为了留住前妻兼头号记者，把一个死刑犯的案子当成了复婚筹码。每分钟两百词。",
+      "year": 1940,
+      "area": "美国",
+      "category": "MOVIE",
+      "score": 8.6,
+      "tags": [
+        "喜剧",
+        "爱情",
+        "剧情",
+        "经典",
+        "黑白"
+      ],
+      "access": {
+        "mode": "subscription",
+        "freeEpisodes": 1,
+        "trialSeconds": 300,
+        "singlePrice": 6
+      },
+      "episodeCount": 3,
+      "source": {
+        "url": "https://archive.org/download/his_girl_friday/his_girl_friday.mp4",
+        "bytes": 575274912,
+        "duration": 5504,
+        "license": "Public Domain",
+        "credit": "Columbia Pictures · His Girl Friday (1940)"
+      },
+      "segmentSeconds": 1835,
+      "banner": false
+    },
+    {
+      "slug": "haunted-hill",
+      "title": "猛鬼屋",
+      "subTitle": "House on Haunted Hill · 1959",
+      "description": "富翁请五位陌生人住进凶宅，活到天亮拿一万美金。文森特·普莱斯的骨架、血浆与冷笑。",
+      "year": 1959,
+      "area": "美国",
+      "category": "MOVIE",
+      "score": 8,
+      "tags": [
+        "惊悚",
+        "悬疑",
+        "经典",
+        "犯罪"
+      ],
+      "access": {
+        "mode": "subscription",
+        "freeEpisodes": 1,
+        "trialSeconds": 300,
+        "singlePrice": 6
+      },
+      "episodeCount": 3,
+      "source": {
+        "url": "https://archive.org/download/house_on_haunted_hill_ipod/house_on_haunted_hill.mp4",
+        "bytes": 843645455,
+        "duration": 4483,
+        "license": "Public Domain",
+        "credit": "William Castle · House on Haunted Hill (1959)"
+      },
+      "segmentSeconds": 1494,
+      "banner": false
+    },
+    {
+      "slug": "lone-ranger",
+      "title": "游侠传奇",
+      "subTitle": "The Lone Ranger · S01E01 · 1949",
+      "description": "第一集《游侠登场》：六名骑警遭伏，只有一个人活下来，和一头白马的搭档从此开始。",
+      "year": 1949,
+      "area": "美国",
+      "category": "TV",
+      "score": 7.9,
+      "tags": [
+        "冒险",
+        "动作",
+        "历史",
+        "经典"
+      ],
+      "access": {
+        "mode": "free",
+        "freeEpisodes": 1,
+        "trialSeconds": 0,
+        "singlePrice": 0
+      },
+      "episodeCount": 1,
+      "source": {
+        "url": "https://archive.org/download/theloneranger_201705/s01e01_EntertheLoneRanger.mp4",
+        "bytes": 130937929,
+        "duration": 1520,
+        "license": "Public Domain",
+        "credit": "The Lone Ranger (1949) · public domain episode"
+      },
+      "segmentSeconds": 1520,
+      "banner": false
+    },
+    {
+      "slug": "bonanza-s02e11",
+      "title": "大淘金",
+      "subTitle": "Bonanza · S02E11 · 1960",
+      "description": "内华达牧场的卡特赖特一家。本集《拓荒者》，西部剧黄金年代的四十分钟。",
+      "year": 1960,
+      "area": "美国",
+      "category": "TV",
+      "score": 7.6,
+      "tags": [
+        "剧情",
+        "冒险",
+        "历史",
+        "经典"
+      ],
+      "access": {
+        "mode": "subscription",
+        "freeEpisodes": 1,
+        "trialSeconds": 300,
+        "singlePrice": 3
+      },
+      "episodeCount": 2,
+      "source": {
+        "url": "https://archive.org/download/Bonanza_pd/BonanzaS02e11.mp4",
+        "bytes": 246737631,
+        "duration": 2889,
+        "license": "Public Domain",
+        "credit": "Bonanza S02E11 · public domain episode"
+      },
+      "segmentSeconds": 1445,
+      "banner": false
     }
   ]
 }
