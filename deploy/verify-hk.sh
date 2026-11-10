@@ -109,7 +109,10 @@ printf '  USDT 监听 %s\n' "$(printf '%s' "$SEC" | json data.usdtWatch)"
 printf '  近 24h 拦截 %s\n' "$(printf '%s' "$SEC" | json data.last24h)"
 
 echo "=== 5. C 端登录门禁 ==="
-chk "未登录搜索" 401 "$(code "$BASE/video/api/search?kw=test")"
+# 浏览类接口必须对匿名开放（分享链接不能撞登录墙），播放与个人数据必须登录
+chk "未登录可浏览搜索" 200 "$(code "$BASE/video/api/search?keyword=test")"
+chk "未登录可浏览分类" 200 "$(code "$BASE/video/api/category?type=TV")"
+chk "未登录可浏览榜单" 200 "$(code "$BASE/video/api/rank?type=HOT")"
 chk "未登录个人中心" 401 "$(code "$BASE/video/api/me")"
 chk "未登录播放" 401 "$(code "$BASE/video/api/play/1/1")"
 chk "手机号登录已下线" 410 "$(code -X POST "$BASE/video/api/auth/login" -H 'content-type: application/json' -d '{"phone":"13800000000"}')"
