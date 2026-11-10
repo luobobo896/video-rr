@@ -125,7 +125,7 @@ function serveStatic(rootDir, pathname, res) {
   createReadStream(safe).pipe(res)
 }
 
-/** 模拟支付页（仅演示环境；生产关闭 mock 渠道后本页 404）。 */
+/** 模拟支付页（仅测试环境；生产关闭 mock 渠道后本页 404）。 */
 function mockPayPage(outTradeNo, res) {
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8" />
 <title>模拟支付 · 影巢</title>
@@ -134,15 +134,16 @@ function mockPayPage(outTradeNo, res) {
 h1{font-size:18px;margin:0 0 8px}p{color:#9aa3b2;font-size:13px}
 button{margin-top:16px;padding:12px 24px;border:0;border-radius:10px;background:linear-gradient(135deg,#ff7a59,#ff4d6d);color:#fff;font-size:15px;cursor:pointer}
 </style></head><body><div class="card">
-<h1>模拟支付（演示渠道）</h1><p>订单号 ${outTradeNo}</p>
-<p>生产环境请关闭 mock 渠道，接入支付宝 / USDT</p>
+<h1>模拟支付（测试渠道）</h1><p>订单号 ${outTradeNo}</p>
+<p>当前为测试支付通道，接入真实支付宝 / USDT 后自动下线</p>
 <button id="pay">模拟支付成功</button>
 <a id="back" href="${BASE_PATH}/#/me" style="display:none;margin-top:14px;color:#ff7a59;font-size:14px">返回站点查看订单</a>
 <div id="result" style="margin-top:14px;font-size:13px;color:#4ade80"></div>
 </div>
 <script>
 document.getElementById('pay').addEventListener('click', async () => {
-  const res = await fetch('${BASE_PATH}/api/pay/mock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}' }) })
+  const ticket = new URLSearchParams(location.search).get('ticket') ?? ''
+  const res = await fetch('${BASE_PATH}/api/pay/mock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}', ticket }) })
   const json = await res.json()
   document.getElementById('result').textContent = json.code === '0000' ? '支付成功，权益已到账，可回到站点观看' : ('失败：' + json.msg)
   if (json.code === '0000') document.getElementById('back').style.display = 'inline-block'
@@ -189,7 +190,7 @@ document.getElementById('pay').addEventListener('click', async () => {
   const button = document.getElementById('pay')
   button.disabled = true
   button.textContent = '支付中…'
-  const res = await fetch('${BASE_PATH}/api/pay/alipay-sim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}' }) })
+  const res = await fetch('${BASE_PATH}/api/pay/alipay-sim', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}', ticket: new URLSearchParams(location.search).get('ticket') ?? '' }) })
   const json = await res.json()
   if (json.code === '0000') {
     document.getElementById('msg').textContent = '支付成功，权益已到账，正在返回…'

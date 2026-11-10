@@ -344,3 +344,20 @@ button { font-family: inherit; cursor: pointer; }
 .avatar-upload { font-size: 12px; color: #9aa3b2; cursor: pointer; border-bottom: 1px dashed #3a4150; padding-bottom: 2px; }
 .avatar-upload:hover { color: #ff8a5c; border-color: #ff8a5c; }
 .me-profile-fields { flex: 1; min-width: 0; }
+
+/* 自动播放被浏览器拦截时的开始按钮（不是错误，是交互入口） */
+.player-start {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 14px 28px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: rgba(255, 61, 110, 0.92);
+  color: #fff;
+  font-size: var(--fs-16);
+  cursor: pointer;
+  z-index: 6;
+}
+.player-start:hover { background: rgba(255, 61, 110, 1) }

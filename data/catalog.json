@@ -29,8 +29,8 @@
       "episodeCount": 10,
       "banner": true,
       "source": {
-        "url": "https://archive.org/download/Sintel/sintel-2048-stereo_512kb.mp4",
-        "bytes": 77410288,
+        "url": "https://archive.org/download/Sintel/sintel-2048-stereo.mp4",
+        "bytes": 283115520,
         "duration": 888,
         "license": "CC BY 3.0",
         "credit": "Blender Foundation · Durian Open Movie Project"
@@ -71,8 +71,8 @@
       "episodeCount": 1,
       "banner": false,
       "source": {
-        "url": "https://archive.org/download/ElephantsDream/ed_hd.mp4",
-        "bytes": 67801890,
+        "url": "https://download.blender.org/ED/ED_1024.avi",
+        "bytes": 445866736,
         "duration": 654,
         "license": "CC BY 2.5",
         "credit": "Blender Foundation · Orange Open Movie Project"

@@ -492,6 +492,7 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
   }
   if (seg[0] === 'sections' && seg[1] && method === 'DELETE') {
     if (!guard(PERM.sections)) return deny(PERM.sections)
+    run('DELETE FROM section_items WHERE section_id = ?', Number(seg[1]))
     run('DELETE FROM sections WHERE id = ?', Number(seg[1]))
     log('ops.section.delete', 'section', seg[1], null, null, body.reason)
     return send(res, { deleted: true })

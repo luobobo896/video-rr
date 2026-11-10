@@ -67,9 +67,9 @@ export function resolveAccess(userId, dramaId, episodeNo) {
   const purchase = activePurchase(userId, drama.id)
   if (purchase) return { allow: true, source: 'purchase', purchase }
 
-  // 2) 订阅（覆盖 scope）
+  // 2) 订阅（覆盖 scope）；会员「全场畅看」包含单片付费库，单片价格只对非会员生效
   const subscription = activeSubscription(userId)
-  if (subscription && scopeMatches(subscription.scope, drama) && policy.access_mode !== 'paid') {
+  if (subscription && scopeMatches(subscription.scope, drama)) {
     return { allow: true, source: 'subscription', subscription }
   }
 
@@ -128,7 +128,7 @@ export function revokeByOrder(orderId) {
 
 /** 批量判定某部剧的分集状态（一次查询，避免 N+1）。 */
 export function decideEpisodes({ drama, policy, subscription, purchase, episodes }) {
-  const subscriptionCovers = Boolean(subscription) && scopeMatches(subscription.scope, drama) && policy.access_mode !== 'paid'
+  const subscriptionCovers = Boolean(subscription) && scopeMatches(subscription.scope, drama)
   return episodes.map((episode) => {
     let allow = false
     let source = null
@@ -223,4 +223,28 @@ export function verifyPlayToken(token) {
     if (!payload.exp || payload.exp < Date.now()) return undefined
     return payload
   } catch { return undefined }
+}
+
+/**
+ * 收银台票据：模拟支付页在独立标签页打开，带不了 Bearer，也不能把用户 token 放进 URL。
+ * 所以由服务端给该订单签一张短时票据，收银台只提交 { outTradeNo, ticket }。
+ */
+export function signPayTicket(outTradeNo, ttlSeconds = 900) {
+  const body = Buffer.from(JSON.stringify({ o: String(outTradeNo ?? ''), exp: Date.now() + ttlSeconds * 1000 })).toString('base64url')
+  const mac = createHmac('sha256', linkSecret()).update(`pay:${body}`).digest('base64url')
+  return `${body}.${mac}`
+}
+
+export function verifyPayTicket(outTradeNo, ticket) {
+  if (typeof ticket !== 'string' || !ticket.includes('.')) return false
+  const [body, mac] = ticket.split('.')
+  const expected = createHmac('sha256', linkSecret()).update(`pay:${body}`).digest('base64url')
+  const left = Buffer.from(mac)
+  const right = Buffer.from(expected)
+  if (left.length !== right.length || !timingSafeEqual(left, right)) return false
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
+    if (!payload.exp || payload.exp < Date.now()) return false
+    return String(payload.o) === String(outTradeNo ?? '')
+  } catch { return false }
 }

@@ -6,6 +6,8 @@
  *   node scripts/import-catalog.mjs --reset            只清空演示数据与媒体文件
  *   node scripts/import-catalog.mjs --build            清空并重建全部内容（默认）
  *   node scripts/import-catalog.mjs --build --only bbb,sintel
+ *   node scripts/import-catalog.mjs --keep --only sintel --force   只重切指定剧（不动其它内容）
+ *   node scripts/import-catalog.mjs --force            已完整时也重新下载/重切
  *   node scripts/import-catalog.mjs --check            只做一致性自检
  *   node scripts/import-catalog.mjs --list             打印清单
  *
@@ -41,6 +43,8 @@ const valueOf = (flag, fallback = '') => {
   return index >= 0 ? String(argv[index + 1] ?? fallback) : fallback
 }
 const ONLY = valueOf('--only').split(',').map((item) => item.trim()).filter(Boolean)
+const FORCE = has('--force')
+const KEEP = has('--keep')
 
 function stamp() {
   return new Date().toISOString().slice(11, 19)
@@ -260,11 +264,14 @@ async function buildOne(drama, index, segmentSeconds) {
   if (preexisting) {
     const ready = db.prepare("SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ? AND hls_path IS NOT NULL").get(preexisting.id).n
     const total = db.prepare('SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ?').get(preexisting.id).n
-    if (ready > 0 && ready === total) {
-      log('  已存在且片源完整，跳过')
+    if (ready > 0 && ready === total && !FORCE) {
+      log('  已存在且片源完整，跳过（换片源请加 --force）')
       return { dramaId: preexisting.id, skipped: true }
     }
-    log('  已存在但片源不完整，先删除旧记录')
+    log(FORCE ? '  --force：删除旧记录与旧切片后重切' : '  已存在但片源不完整，先删除旧记录')
+    for (const row of db.prepare('SELECT id FROM episodes WHERE drama_id = ?').all(preexisting.id)) {
+      rmSync(join(HLS_DIR, String(row.id)), { recursive: true, force: true })
+    }
     db.prepare('DELETE FROM dramas WHERE id = ?').run(preexisting.id)
   }
 
@@ -343,7 +350,8 @@ async function build() {
   }
 
   let sectionCount = 0
-  for (const [index, section] of (catalog.sections ?? []).entries()) {
+  const hasSections = db.prepare('SELECT COUNT(*) AS n FROM sections').get().n > 0
+  for (const [index, section] of (KEEP && hasSections ? [] : catalog.sections ?? []).entries()) {
     const info = db.prepare('INSERT INTO sections (title, sort, enabled) VALUES (?, ?, 1)').run(section.title, index)
     const sectionId = Number(info.lastInsertRowid)
     for (const [itemIndex, slug] of (section.slugs ?? []).entries()) {
@@ -355,7 +363,8 @@ async function build() {
   }
 
   let rankCount = 0
-  for (const [listIndex, list] of (catalog.ranks ?? []).entries()) {
+  const hasRanks = db.prepare('SELECT COUNT(*) AS n FROM rank_lists').get().n > 0
+  for (const [listIndex, list] of (KEEP && hasRanks ? [] : catalog.ranks ?? []).entries()) {
     const info = db.prepare('INSERT INTO rank_lists (name, type, sort) VALUES (?, ?, ?)').run(list.name, list.type, listIndex)
     const listId = Number(info.lastInsertRowid)
     for (const [itemIndex, slug] of (list.slugs ?? []).entries()) {
@@ -366,7 +375,8 @@ async function build() {
     }
   }
 
-  for (const [index, item] of banners.entries()) {
+  const hasBanners = db.prepare('SELECT COUNT(*) AS n FROM banners').get().n > 0
+  for (const [index, item] of (KEEP && hasBanners ? [] : banners).entries()) {
     db.prepare('INSERT INTO banners (name, title, image, target_drama_id, sort, enabled) VALUES (?, ?, ?, ?, ?, 1)')
       .run(item.drama.title, item.drama.subTitle ?? item.drama.title, item.path, idOf.get(item.drama.slug) ?? null, index)
   }
@@ -426,6 +436,12 @@ async function main() {
     return
   }
   if (has('--check')) return check()
+  if (KEEP) {
+    if (ONLY.length === 0) throw new Error('--keep 需要配合 --only <slug,...> 使用')
+    await build()
+    check()
+    return
+  }
   if (has('--reset') || has('--build') || argv.length === 0) {
     if (has('--reset') && !has('--build')) return resetDemo()
     resetDemo()

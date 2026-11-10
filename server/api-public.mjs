@@ -9,6 +9,7 @@ import {
 import { OtpError, normalizeEmail, sendCode, verifyCode } from './otp.mjs'
 import {
   LINK_TTL, decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, secureLink,
+  signPayTicket, verifyPayTicket,
 } from './entitlements.mjs'
 import { recordEvent, recordPlay } from './analytics.mjs'
 import { clientIpOf } from './ratelimit.mjs'
@@ -118,6 +119,8 @@ export async function handlePublic(pathname, url, req, res) {
     '/api/constants', '/api/home', '/api/feed', '/api/auth/login', '/api/category', '/api/rank',
     '/api/search', '/api/tags', '/api/auth/email/send', '/api/auth/email/login', '/api/auth/email/password',
     '/api/track',
+    // 模拟收银台在独立标签页，带不了 Bearer：靠一次性 HMAC 支付票据校验，见 mayPay()
+    '/api/pay/mock', '/api/pay/alipay-sim',
   ])
   const OPEN_PREFIXES = ['/api/drama/', '/api/category/', '/api/tags/']
   // 只有支付宝服务端回调是公开的（自带 RSA2 验签）；其余回调一律留在内网/进程内
@@ -132,10 +135,14 @@ export async function handlePublic(pathname, url, req, res) {
       const channels = paymentOptions('all')
       const live = channels.filter((channel) => channel.usable)
       const site = getSetting('site', {}) ?? {}
+      // 会员价优先取在售套餐里的最低月价，避免运营忘配 settings.site 时收银台显示「元/月」
+      const plan = all("SELECT price_cny, duration_days FROM plans WHERE status = 'active' ORDER BY price_cny ASC LIMIT 1")[0]
+      const planMonthly = plan ? (Number(plan.price_cny) / Math.max(1, Number(plan.duration_days) / 30)).toFixed(2) : ''
       return send(res, {
         site: { name: '影巢' },
         supportEmail: process.env.MH_SUPPORT_EMAIL || site.supportEmail || '',
-        vipPrice: site.vipPrice ?? '',
+        vipPrice: site.vipPrice ?? (plan ? Number(plan.price_cny).toFixed(2) : ''),
+        vipMonthlyPrice: planMonthly,
         vipUnit: site.vipUnit ?? '元/月',
         categories: [
           { code: 'TV', name: '电视剧' }, { code: 'MOVIE', name: '电影' },
@@ -367,13 +374,15 @@ export async function handlePublic(pathname, url, req, res) {
         channel,
         couponCode: body.couponCode,
       })
+      // 模拟收银台是独立标签页，带不了 Bearer → 用一次性票据换取支付权限
+      const simTicket = result.payUrl && result.simulated ? signPayTicket(result.order.out_trade_no) : null
       return send(res, {
         outTradeNo: result.order.out_trade_no,
         amount: result.order.amount_cny,
         channel: result.order.channel,
         status: result.order.status,
         expiresAt: result.order.expires_at,
-        payUrl: result.payUrl,
+        payUrl: simTicket ? `${result.payUrl}?ticket=${encodeURIComponent(simTicket)}` : result.payUrl,
         simulated: result.simulated ?? false,
         usdt: result.usdt ?? null,
       })
@@ -395,10 +404,13 @@ export async function handlePublic(pathname, url, req, res) {
         if (sync.synced) order = one('SELECT * FROM orders WHERE id = ?', order.id)
       }
       const payable = payUrlFor(order)
+      // 模拟收银台在独立标签页打开，拿不到 Bearer：给订单签一张短时票据放进 payUrl
+      const simTicket = payable.payUrl && payable.simulated ? signPayTicket(order.out_trade_no) : null
+      const payUrl = simTicket ? `${payable.payUrl}?ticket=${encodeURIComponent(simTicket)}` : payable.payUrl
       return send(res, {
         outTradeNo: order.out_trade_no, status: order.status, amount: order.amount_cny,
         channel: order.channel, paidAt: order.paid_at, expiresAt: order.expires_at,
-        payUrl: payable.payUrl, simulated: Boolean(payable.simulated), payReason: payable.reason ?? null,
+        payUrl, simulated: Boolean(payable.simulated), payReason: payable.reason ?? null,
         usdt: order.usdt_amount ? {
           amount: order.usdt_amount, rate: order.usdt_rate, address: order.usdt_address, confirmations: order.usdt_confirmations,
         } : null,
@@ -419,18 +431,19 @@ export async function handlePublic(pathname, url, req, res) {
 
     /* USDT 只走进程内链上监听（usdt-watch.mjs），不提供公网回调入口 */
 
-    /* 模拟支付：仅本地/联调可用（MH_ALLOW_SIM_PAY=1），且只能支付自己的订单 */
+    /* 模拟支付：仅本地/联调可用（MH_ALLOW_SIM_PAY=1），只能是本人订单或用支付票据（sim 收银台在独立标签页，带不了 Bearer） */
     const simPayEnabled = process.env.MH_ALLOW_SIM_PAY === '1'
     const ownOrder = (outTradeNo) => {
       const row = one('SELECT id, user_id FROM orders WHERE out_trade_no = ?', String(outTradeNo ?? ''))
       if (!row) return false
       return Number(row.user_id) === Number(userId)
     }
+    const mayPay = (body) => ownOrder(body.outTradeNo) || verifyPayTicket(body.outTradeNo, body.ticket)
 
     if (pathname === '/api/pay/mock' && method === 'POST') {
       if (!simPayEnabled) return fail(res, '0404', '接口不存在', 404)
       const body = await readBody(req)
-      if (!ownOrder(body.outTradeNo)) return fail(res, '0403', '只能支付本人订单', 403)
+      if (!mayPay(body)) return fail(res, '0403', '支付票据无效或已过期', 403)
       return send(res, mockPay(body.outTradeNo))
     }
 
@@ -438,7 +451,7 @@ export async function handlePublic(pathname, url, req, res) {
     if (pathname.startsWith('/api/pay/alipay-sim') && method === 'POST') {
       if (!simPayEnabled) return fail(res, '0404', '接口不存在', 404)
       const body = await readBody(req)
-      if (!ownOrder(body.outTradeNo)) return fail(res, '0403', '只能支付本人订单', 403)
+      if (!mayPay(body)) return fail(res, '0403', '支付票据无效或已过期', 403)
       const { params } = buildSimulatedAlipayNotify(body.outTradeNo)
       const result = handleAlipayNotify(params, { simulator: true })
       return send(res, { ...result, simulated: true })
@@ -458,10 +471,14 @@ export async function handlePublic(pathname, url, req, res) {
           createdAt: subscription.created_at,
         })
       }
+      const ORDER_STATUS_TEXT = {
+        created: '待支付', pending: '支付确认中', paid: '已支付', fulfilled: '已完成',
+        closed: '已关闭', failed: '支付失败', refunded: '已退款', refunding: '退款中', refund_pending: '退款待审',
+      }
       for (const order of listOrders({ userId, limit: 5 })) {
         messages.push({
           type: 'order', title: `订单 ${order.out_trade_no}`,
-          body: `${order.product_type === 'subscription' ? '会员订阅' : '单片购买'} ¥${Number(order.amount_cny).toFixed(2)} · ${order.status}`,
+          body: `${order.product_type === 'subscription' ? '会员订阅' : '单片购买'} ¥${Number(order.amount_cny).toFixed(2)} · ${ORDER_STATUS_TEXT[order.status] ?? order.status}`,
           createdAt: order.created_at,
         })
       }

@@ -273,7 +273,7 @@ const ORDER_STATUS = {
  * 前端不再内置 mock 默认值——否则后台关掉模拟支付后收银台仍然显示"模拟支付"，制造假单。
  */
 const PAY = { channels: [], defaultChannel: null, usdtNetwork: 'TRC20', ready: false }
-const CHANNEL_LABEL = { mock: '模拟支付（演示）', alipay: '支付宝', usdt: 'USDT（TRC20）', wechat: '微信支付' }
+const CHANNEL_LABEL = { mock: '模拟支付（测试）', alipay: '支付宝', usdt: 'USDT（TRC20）', wechat: '微信支付' }
 // 只把「真能收钱」的渠道摆给用户：后台启用但缺密钥/缺地址的渠道由服务端标记 usable=false
 const usableChannels = () => (PAY.channels ?? []).filter((channel) => channel.usable !== false)
 const unavailableChannelReason = () => {
@@ -556,13 +556,15 @@ function openModal(title, body) {
 
 function vipFloat() {
   if (state.vipDismissed || document.querySelector('.vip-float')) return
+  const price = Number(state.constants.vipPrice)
+  if (!Number.isFinite(price) || price <= 0) return
   const node = document.createElement('div')
   node.className = 'vip-float'
   node.innerHTML = `
     <button class="vip-close" aria-label="关闭">×</button>
     <h4>开通会员 全场畅看</h4>
     <p>会员期内可看全站剧集</p>
-    <div><span class="vip-price">${state.constants.vipPrice ?? '—'}</span><small> ${state.constants.vipUnit ?? '元/月'}</small></div>
+    <div><span class="vip-price">${price.toFixed(2)}</span><small> ${state.constants.vipUnit ?? '元/月'}</small></div>
     <button class="vip-cta">查看套餐</button>`
   node.querySelector('.vip-close').addEventListener('click', () => { state.vipDismissed = true; node.remove() })
   node.querySelector('.vip-cta').addEventListener('click', async () => {
@@ -581,7 +583,7 @@ async function renderHome() {
   const data = await api('/api/home')
   const banners = data.banners ?? []
   const banner = banners[0]
-  const sections = data.sections ?? []
+  const sections = (data.sections ?? []).filter((section) => (section.items ?? []).length > 0)
   const hasHero = Boolean(banner?.name || banner?.image)
 
   if (!hasHero && sections.length === 0) {
@@ -759,8 +761,12 @@ async function renderDrama(id) {
   document.title = `${detail.title} · 影巢`
   const episodes = detail.episodes ?? []
   const firstFree = episodes.find((episode) => episode.allow)
-  const entitled = access === 'owned' || access === 'subscribed'
-  const resumeNo = detail.resumeEpisodeNo ?? null
+  const trialEp = episodes.find((episode) => !episode.allow && Number(episode.trialSeconds) > 0)
+  const trialMinutes = trialEp ? Math.max(1, Math.round(Number(trialEp.trialSeconds) / 60)) : 0
+  const hasSubscription = Boolean(detail.hasSubscription)
+  const owned = episodes.some((episode) => episode.source === 'purchase')
+  const entitled = hasSubscription || owned
+  const resumeNo = Number(detail.resumeEpisodeNo ?? 0) || null
   const priceText = Number(detail.singlePrice ?? 0).toFixed(2)
   const payCta = `<button class="btn-ghost" id="open-paywall">${canSingle ? '解锁全部 ¥' + priceText : '开通会员看全集'}</button>`
   const cta = episodes.length === 0
@@ -770,7 +776,9 @@ async function renderDrama(id) {
       : firstFree
         // 首集免费是拉新的唯一钩子：先让人看到内容，再谈付费
         ? `<button class="btn-primary" id="play-free">▶ 免费看第 ${firstFree.no} 集</button>${payCta}`
-        : `<button class="btn-primary" id="open-paywall">${canSingle ? '购买本片 ¥' + priceText : '开通会员'}</button>`
+        : trialEp
+          ? `<button class="btn-primary" id="play-trial" data-no="${trialEp.no}">▶ 试看 ${trialMinutes} 分钟</button>${payCta}`
+          : `<button class="btn-primary" id="open-paywall">${canSingle ? '购买本片 ¥' + priceText : '开通会员'}</button>`
 
   view.innerHTML = `
     <div class="detail-head">
@@ -821,8 +829,15 @@ async function renderDrama(id) {
     if (!state.token) { pendingRoute = `#/play/${detail.dramaId}/${firstFree.no}`; openLogin(); return }
     location.hash = `#/play/${detail.dramaId}/${firstFree.no}`
   })
+  $('#play-trial')?.addEventListener('click', () => {
+    if (!trialEp) return
+    if (!state.token) { pendingRoute = `#/play/${detail.dramaId}/${trialEp.no}?trial=1`; openLogin(); return }
+    location.hash = `#/play/${detail.dramaId}/${trialEp.no}?trial=1`
+  })
   $('#open-paywall')?.addEventListener('click', () => openPaywall(detail, { price: detail.singlePrice, reason: canSingle ? 'single_purchase_required' : 'subscription_required' }))
   view.querySelectorAll('.ep.locked').forEach((node) => {
+    // 可试看的集优先走播放（由服务端按 trialSeconds 截断），其余才弹付费墙
+    if ((node.getAttribute('href') ?? '').includes('trial=1')) return
     node.addEventListener('click', (event) => {
       event.preventDefault()
       openPaywall(detail, { price: detail.singlePrice, reason: canSingle ? 'single_purchase_required' : 'subscription_required' })
@@ -1117,6 +1132,21 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
   })
 
   await attach(hlsUrl).catch(() => { video.src = BASE + hlsUrl })
+
+  // 浏览器自动播放策略：带声音的 play() 会被拒，此时给一个明显的开始按钮，而不是让用户对着黑屏
+  const showStart = () => {
+    if (document.querySelector('#player-start')) return
+    const wrap = $('#player')
+    if (!wrap) return
+    const button = document.createElement('button')
+    button.id = 'player-start'
+    button.className = 'player-start'
+    button.textContent = '▶ 播放'
+    button.addEventListener('click', () => { button.remove(); void video.play().catch(() => {}) })
+    wrap.appendChild(button)
+  }
+  video.addEventListener('loadedmetadata', () => { void video.play().catch(showStart) }, { once: true })
+  onCleanup(() => document.querySelector('#player-start')?.remove())
 
   video.addEventListener('play', startDanmu, { once: true })
   video.addEventListener('pause', saveHistory)

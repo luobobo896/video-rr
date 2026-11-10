@@ -54,13 +54,17 @@ test('权益判定顺序：单片 > 订阅 > 免费集 > 拒绝', () => {
   db.prepare("INSERT INTO subscriptions (user_id, plan_id, scope, valid_to, status) VALUES (?, 1, 'all', datetime('now','+30 day'), 'active')").run(uid)
   assert.equal(ent.resolveAccess(uid, drama.id, 2).source, 'subscription')
 
-  // 3) 单片付费内容：订阅也不放行，需购买（免费集是拉新钩子，先验证「有免费集」时仍放行第 1 集）
+  // 3) 单片付费内容：会员同样放行（会员「全场畅看」）；非会员需单独购买（免费集是拉新钩子）
   db.prepare("UPDATE content_policies SET access_mode='paid', single_price_cny=12, free_episodes=1 WHERE drama_id=?").run(drama.id)
-  assert.equal(ent.resolveAccess(uid, drama.id, 1).source, 'free')
-  assert.equal(ent.resolveAccess(uid, drama.id, 2).reason, 'single_purchase_required')
-  // 关掉免费集后，第 1 集也必须购买
+  assert.equal(ent.resolveAccess(uid, drama.id, 1).source, 'subscription')
+  assert.equal(ent.resolveAccess(uid, drama.id, 2).source, 'subscription')
+  // 换一个没有订阅的用户，验证单片付费拦截与价格
+  const otherUid = Number(userId())
+  assert.equal(ent.resolveAccess(otherUid, drama.id, 1).source, 'free')
+  assert.equal(ent.resolveAccess(otherUid, drama.id, 2).reason, 'single_purchase_required')
+  // 关掉免费集后，非会员第 1 集也必须购买
   db.prepare("UPDATE content_policies SET free_episodes=0 WHERE drama_id=?").run(drama.id)
-  const blocked = ent.resolveAccess(uid, drama.id, 1)
+  const blocked = ent.resolveAccess(otherUid, drama.id, 1)
   assert.equal(blocked.allow, false)
   assert.equal(blocked.reason, 'single_purchase_required')
   assert.equal(blocked.price, 12)

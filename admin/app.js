@@ -511,7 +511,7 @@ async function pageOps() {
   })
   view.querySelectorAll('[data-del-section]').forEach((button) => {
     button.addEventListener('click', async () => {
-      await api(`/admin/api/sections?id=${button.dataset.delSection}`, { method: 'DELETE' })
+      await api(`/admin/api/sections/${button.dataset.delSection}`, { method: 'DELETE' })
       await pageOps()
     })
   })
