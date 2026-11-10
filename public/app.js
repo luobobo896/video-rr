@@ -36,6 +36,7 @@ const NAV_MAIN = [
   ['综艺', '#/category/VARIETY'],
   ['纪录片', '#/category/DOCUMENTARY'],
   ['即将上线', '#/category/ALL?sort=upcoming'],
+  ['片单广场', '#/playlists'],
 ]
 
 // 内容类型的中文名（服务端 dramaType 是 MOVIE/TV/PLAYLET/VARIETY 这类枚举，
@@ -650,6 +651,33 @@ function vipFloat() {
 }
 
 /* ---------------- 页面 ---------------- */
+
+// 片单广场：参考站的「片单广场」= 编辑精选合集。这里先用首页楼层（sections）当合集，
+// 每个合集渲染成一格网格，点卡片直接进详情；后续可换成人工编排的 playlists 表。
+async function renderPlaylists() {
+  document.title = '片单广场 · 影巢'
+  const data = await api('/api/home')
+  const sections = (data.sections ?? []).filter((section) => (section.items ?? []).length > 0)
+  if (!sections.length) {
+    view.innerHTML = '<div class="section-head" style="margin-top:22px"><div class="section-title">片单广场</div></div>'
+      + '<div class="empty">还没有片单，内容上架后这里会按主题自动成集。</div>'
+    return
+  }
+  const block = (section, index) => {
+    const items = section.items ?? []
+    return '<section class="section">'
+      + '<div class="section-head"><div class="section-title">' + escapeHtml(section.title ?? ('片单 ' + (index + 1))) + '</div>'
+      + '<div class="section-hint">' + items.length + ' 部</div></div>'
+      + '<div class="grid">' + items.map((item) => posterCard(item)).join('') + '</div>'
+      + '</section>'
+  }
+  view.innerHTML = '<div class="section-head" style="margin-top:22px">'
+    + '<div class="section-title">片单广场</div>'
+    + '<div class="section-hint">' + sections.length + ' 个主题片单 · 每张片单都是一组可直接播放的剧集</div>'
+    + '</div>'
+    + sections.map(block).join('')
+  vipFloat()
+}
 
 async function renderHome() {
   const data = await api('/api/home')
@@ -1791,7 +1819,8 @@ async function route() {
     else if (segments[0] === 'search') await renderSearch(params)
     else if (segments[0] === 'drama') await renderDrama(segments[1])
     else if (segments[0] === 'play') await renderPlay(segments[1], segments[2] ?? '1', params)
-    else if (segments[0] === 'me') await renderMe()
+    else if (segments[0] === 'playlists') await renderPlaylists()
+  else if (segments[0] === 'me') await renderMe()
     else await renderHome()
   } catch (error) {
     if (error.code === '0401') {
