@@ -114,6 +114,7 @@ export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
       pendingComments: one("SELECT COUNT(*) AS n FROM comments WHERE status = 'pending'").n,
       queue: queueState(),
       commerce: commerceStats(),
+      mailReady: !isDevMail(),
       pay: (() => {
         const pay = getSetting('pay', {})
         return { alipay: Boolean(pay.alipay?.enabled), usdt: Boolean(pay.usdt?.enabled), mock: Boolean(pay.mock?.enabled) }

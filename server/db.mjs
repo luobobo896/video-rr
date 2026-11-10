@@ -363,6 +363,7 @@ const count = (table) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().
  */
 export const MENU_TREE = [
   { code: 'dashboard', name: '概览', type: 'menu', parent: null, sort: 10, path: '/dashboard', icon: '📊' },
+  { code: 'dashboard.read', name: '查看概览统计', type: 'button', parent: 'dashboard', sort: 10 },
 
   { code: 'dir:content', name: '内容管理', type: 'dir', parent: null, sort: 20, path: '/content', icon: '🎬' },
   { code: 'content.drama', name: '剧集管理', type: 'menu', parent: 'dir:content', sort: 10, path: '/dramas', icon: '📺' },

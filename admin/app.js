@@ -125,39 +125,60 @@ async function route() {
     else if (key === 'pay') await pagePay()
     else if (key === 'email') await pageEmail()
   } catch (error) {
-    view.innerHTML = `<div class="panel">加载失败：${esc(error.message)}</div>`
+    // 单页渲染失败不影响其它页面：给出错误、页面名与重试入口
+    console.error('[admin]', key, error)
+    view.innerHTML = `<div class="panel">
+      <h3>${esc(key)} 加载失败</h3>
+      <p class="muted">${esc(error.message)}</p>
+      <button class="btn primary" id="retry-page">重试</button>
+      <button class="btn" data-home>回到概览</button>
+    </div>`
+    $('#retry-page')?.addEventListener('click', () => route())
+    view.querySelector('[data-home]')?.addEventListener('click', () => { location.hash = '#/dashboard' })
   }
 }
 
 /* ---------------- 概览 ---------------- */
 async function pageDashboard() {
   const stats = await api('/admin/api/stats')
+  const queue = stats.queue ?? { pending: 0, running: false, pendingItems: [] }
+  const commerce = stats.commerce ?? {}
   $('#top-right').innerHTML = `<span class="muted">更新于 ${new Date().toLocaleTimeString('zh-CN')}</span>`
   view.innerHTML = `
     <div class="cards">
       ${card('剧集', fmt(stats.dramas), '部')}
-      ${card('分集', fmt(stats.episodes), `集（就绪 ${stats.readyEpisodes}）`)}
-      ${card('转码队列', `${stats.queue.pending}`, stats.queue.running ? `进行中：EP ${stats.queue.current?.episodeId}` : '空闲')}
+      ${card('分集', fmt(stats.episodes), `集（就绪 ${fmt(stats.readyEpisodes)}）`)}
+      ${card('转码队列', fmt(queue.pending), queue.running ? `进行中：EP ${queue.current?.episodeId ?? '-'}` : '空闲')}
       ${card('待审弹幕', fmt(stats.pendingDanmu), '条')}
       ${card('待审评论', fmt(stats.pendingComments), '条')}
       ${card('用户', fmt(stats.users), '人')}
-      ${card('订单收入', `¥${fmt(stats.revenue)}`, `${stats.orders} 笔订单`)}
+      ${card('订单收入', `¥${fmt(commerce.revenue ?? 0)}`, `${fmt(commerce.orders ?? 0)} 笔订单`)}
     </div>
     <div class="split">
       <div class="panel">
         <h3>转码队列</h3>
-        ${stats.queue.pending === 0 && !stats.queue.running ? '<div class="muted">队列空闲：去「剧集管理 → 分集」上传视频或生成示例视频</div>' : `
+        ${queue.pending === 0 && !queue.running ? '<div class="muted">队列空闲：去「剧集管理 → 分集」上传视频或生成示例视频</div>' : `
           <table><thead><tr><th>分集</th><th>状态</th><th>进度</th></tr></thead><tbody>
-            ${stats.queue.current ? `<tr><td>EP ${stats.queue.current.episodeId}</td><td><span class="pill warn">转码中</span></td><td>${esc(stats.queue.current.source ?? '')}</td></tr>` : ''}
-            ${stats.queue.pendingItems.map((item) => `<tr><td>EP ${item.episodeId}</td><td><span class="pill">排队</span></td><td class="muted">第 ${item.no} 集</td></tr>`).join('')}
+            ${queue.current ? `<tr><td>EP ${queue.current.episodeId}</td><td><span class="pill warn">转码中</span></td><td>${esc(queue.current.source ?? '')}</td></tr>` : ''}
+            ${(queue.pendingItems ?? []).map((item) => `<tr><td>EP ${item.episodeId}</td><td><span class="pill">排队</span></td><td class="muted">第 ${item.no} 集</td></tr>`).join('')}
           </tbody></table>`}
       </div>
       <div class="panel">
-        <h3>直播</h3>
-        <div class="muted">MediaMTX：${stats.live.installed ? (stats.live.running ? '<span class="pill ok">运行中</span>' : '<span class="pill">已安装未启动</span>') : '<span class="pill bad">未安装</span>'}</div>
-        <p class="mono" style="margin-top:10px">RTMP 入流：${esc(stats.live.rtmpBase)}/&lt;key&gt;</p>
-        <p class="mono">HLS 出流：${esc(stats.live.hlsBase)}/&lt;key&gt;/index.m3u8</p>
-        <a class="btn" href="#/live">去管理直播 →</a>
+        <h3>收款与订阅</h3>
+        <table>
+          <tbody>
+            <tr><td>累计收入</td><td>¥${fmt(commerce.revenue ?? 0)}</td></tr>
+            <tr><td>已支付订单</td><td>${fmt(commerce.paidOrders ?? 0)} 笔</td></tr>
+            <tr><td>待支付订单</td><td>${fmt(commerce.pendingOrders ?? 0)} 笔</td></tr>
+            <tr><td>待审退款</td><td>${fmt(commerce.pendingRefunds ?? 0)} 笔 ${(commerce.pendingRefunds ?? 0) > 0 ? '<a href="#/refunds">去处理 →</a>' : ''}</td></tr>
+            <tr><td>活跃订阅</td><td>${fmt(commerce.activeSubscriptions ?? 0)} 个</td></tr>
+            <tr><td>已购单片</td><td>${fmt(commerce.purchases ?? 0)} 个</td></tr>
+          </tbody>
+        </table>
+        <p class="muted" style="margin-top:10px">
+          发信通道状态：${stats.mailReady ? '<span class="pill ok">已配置真实通道</span>' : '<span class="pill warn">开发模式（验证码回显）</span>'}
+          <a href="#/email">去配置 →</a>
+        </p>
       </div>
     </div>`
 }
