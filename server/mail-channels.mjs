@@ -21,7 +21,8 @@ const unseal = (value) => {
 /** 常见厂家预设：选厂家自动填 host/port/加密/认证方式，只需再填账号与凭据 */
 export const PRESETS = [
   { id: 'gmail', name: 'Gmail / Google Workspace', type: 'smtp', host: 'smtp.gmail.com', port: 465, secure: true, authMode: 'login', note: '需要「应用专用密码」（开启两步验证后生成），普通密码无效' },
-  { id: 'outlook', name: 'Outlook / Hotmail / Live', type: 'oauth2', host: 'smtp-mail.outlook.com', port: 587, secure: false, authMode: 'xoauth2', note: '微软只接受 OAuth2（XOAUTH2）或应用专用密码，密码认证必失败' },
+  { id: 'outlook', name: 'Outlook / Hotmail / Live（OAuth2）', type: 'oauth2', host: 'smtp-mail.outlook.com', port: 587, secure: false, authMode: 'xoauth2', note: '微软只接受 OAuth2（XOAUTH2）或应用专用密码，密码认证必失败' },
+  { id: 'outlook-apppass', name: 'Outlook / Hotmail（应用专用密码）', type: 'smtp', host: 'smtp-mail.outlook.com', port: 587, secure: false, authMode: 'login', note: '在 account.live.com/proofs/AppPassword 生成 16 位应用密码，用它当 SMTP 密码' },
   { id: 'qq', name: 'QQ 邮箱', type: 'smtp', host: 'smtp.qq.com', port: 465, secure: true, authMode: 'login', note: '在 QQ 邮箱设置里开启 SMTP 并使用「授权码」作为密码' },
   { id: 'qq-exmail', name: '腾讯企业邮', type: 'smtp', host: 'smtp.exmail.qq.com', port: 465, secure: true, authMode: 'login', note: '密码或客户端专用密码' },
   { id: '163', name: '网易 163', type: 'smtp', host: 'smtp.163.com', port: 465, secure: true, authMode: 'login', note: '需在设置中开启 SMTP 并使用「授权码」' },
