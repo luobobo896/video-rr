@@ -1,13 +1,15 @@
 {
   "name": "mh-clone",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "影巢：视频站全栈复刻（C 端 + 后台 + 转码 + 直播），零外部依赖",
   "scripts": {
     "start": "node server/index.mjs",
     "dev": "node --watch server/index.mjs",
-    "reset-db": "node scripts/reset-db.mjs"
+    "reset-db": "node scripts/reset-db.mjs",
+    "test": "node --test test/",
+    "seed": "node server/index.mjs"
   },
   "engines": {
     "node": ">=22.5"

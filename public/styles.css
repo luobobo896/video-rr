@@ -240,3 +240,39 @@ button { font-family: inherit; cursor: pointer; }
   border: 1px solid var(--line); font-size: 13px; z-index: 80;
 }
 .footer { margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--text-3); font-size: 12px; display: flex; gap: 18px; }
+
+/* ===== 付费/权益 UI ===== */
+.badge-free { background: rgba(74, 222, 128, .16); color: #4ade80; }
+.badge-vip { background: rgba(255, 168, 64, .18); color: #ffb84d; }
+.badge-pay { background: rgba(255, 77, 109, .18); color: #ff6b8a; }
+.badge-own { background: rgba(96, 165, 250, .18); color: #7cb2ff; }
+.ep.locked { opacity: .62; }
+.ep.locked:hover { opacity: 1; }
+
+.paywall { width: min(520px, 92vw); }
+.paywall h3 { margin: 0 0 6px; }
+.paywall-sub { color: #9aa3b2; font-size: 13px; margin: 0 0 14px; }
+.plan-list { display: grid; gap: 8px; }
+.plan-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 14px;
+  background: #1b1f28; border: 1px solid #2a2f3a; border-radius: 12px; color: #e8e8ee; cursor: pointer; }
+.plan-item:hover { border-color: #ff4d6d; }
+.plan-item.single { margin-top: 8px; background: rgba(255, 77, 109, .1); }
+.plan-name { flex: 1; text-align: left; }
+.plan-price { color: #ff8a5c; font-weight: 600; }
+.plan-days { color: #9aa3b2; font-size: 12px; min-width: 56px; text-align: right; }
+.paywall-coupon { display: flex; gap: 8px; margin: 12px 0; }
+.paywall-coupon input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid #2a2f3a; background: #14171d; color: #e8e8ee; }
+.paywall-channels { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.channel { padding: 8px 12px; border-radius: 10px; border: 1px solid #2a2f3a; background: #161a21; color: #cfd6e4; cursor: pointer; font-size: 13px; }
+.channel:hover { border-color: #ff4d6d; color: #fff; }
+.paywall-foot { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #9aa3b2; }
+.paywall-foot span { flex: 1; }
+
+.me-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 16px; }
+.me-card { background: #151920; border: 1px solid #232833; border-radius: 14px; padding: 16px; }
+.me-card-title { font-size: 13px; color: #9aa3b2; margin-bottom: 10px; }
+.me-big { font-size: 20px; font-weight: 600; }
+.me-sub { color: #9aa3b2; font-size: 13px; margin-top: 4px; }
+.me-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 6px 0; border-bottom: 1px dashed #232833; }
+.me-row:last-child { border-bottom: 0; }
+.me-row a { color: #cfd6e4; text-decoration: none; }

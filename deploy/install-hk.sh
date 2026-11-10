@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# 影巢（video-rr）HK 服务器一键部署：Node 服务 + MediaMTX + nginx 子路径
-# 用法（在服务器上以 root 执行）：
-#   bash /opt/video-rr/deploy/install-hk.sh
-# 幂等：重复执行只会更新配置并重启服务。
+# 影巢（video-rr）HK 一键部署：Node 服务 + nginx 子路径（无直播模块）
+# 用法：bash /opt/video-rr/deploy/install-hk.sh   （幂等）
 set -euo pipefail
 
 APP=/opt/video-rr
@@ -10,66 +8,50 @@ DOMAIN=hk.hsddns.com
 SITE=/etc/nginx/sites-enabled/whatsapp-ai-hk
 SNIPPET=/etc/nginx/snippets/video-rr.conf
 HTTPCONF=/etc/nginx/conf.d/10-video-rr-http.conf
-RTMP_PORT=1935
-HLS_PORT=8890
 APP_PORT=8787
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
-log "1/8 目录与依赖"
-mkdir -p "$APP/storage/hls" "$APP/storage/uploads" "$APP/storage/tools"
-apt-get install -y --no-install-recommends ffmpeg curl ca-certificates >/dev/null 2>&1 || true
-command -v ffmpeg >/dev/null || { echo "缺少 ffmpeg，请先 apt-get install -y ffmpeg"; exit 1; }
-command -v node   >/dev/null || { echo "缺少 node（需要 >=22.5，支持 node:sqlite）"; exit 1; }
-node -e "require('node:sqlite')" 2>/dev/null || { echo "当前 node 版本不支持 node:sqlite：$(node -v)"; exit 1; }
+log "1/7 依赖检查"
+mkdir -p "$APP/storage/hls" "$APP/storage/uploads" "$APP/storage/images"
+command -v ffmpeg >/dev/null || { echo "缺少 ffmpeg"; exit 1; }
+command -v node >/dev/null || { echo "缺少 node >=22.5（需要 node:sqlite）"; exit 1; }
+node -e "require('node:sqlite')" 2>/dev/null || { echo "node 版本过低：$(node -v)"; exit 1; }
 
-log "2/8 生成 .env（首次）"
+log "2/7 生成 .env（含播放签名密钥）"
 if [ ! -f "$APP/.env" ]; then
   SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-40)
+  LINK=$(head -c 24 /dev/urandom | base64 | tr -d '\n=+/' | cut -c1-32)
   cat > "$APP/.env" <<EOF
 PORT=$APP_PORT
 MH_SECRET=$SECRET
-MH_RTMP_PORT=$RTMP_PORT
-MH_HLS_PORT=$HLS_PORT
+MH_LINK_SECRET=$LINK
 NODE_ENV=production
 EOF
   chmod 600 "$APP/.env"
 fi
+set -a; . "$APP/.env"; set +a
+[ -n "${MH_LINK_SECRET:-}" ] || { echo "MH_LINK_SECRET 缺失"; exit 1; }
 
-log "3/8 MediaMTX 二进制"
-if [ ! -x "$APP/storage/tools/mediamtx" ]; then
-  TMP=$(mktemp -d)
-  curl -fsSL -o "$TMP/mediamtx.tar.gz" \
-    https://github.com/bluenviron/mediamtx/releases/download/v1.15.2/mediamtx_v1.15.2_linux_amd64.tar.gz
-  tar -xzf "$TMP/mediamtx.tar.gz" -C "$APP/storage/tools"
-  chmod +x "$APP/storage/tools/mediamtx"
-  rm -rf "$TMP"
-fi
-[ -f "$APP/storage/tools/mediamtx.yml" ] || cat > "$APP/storage/tools/mediamtx.yml" <<'EOF'
-logLevel: info
-rtmpAddress: :1935
-hlsAddress: 127.0.0.1:8890
-apiAddress: 127.0.0.1:9997
-paths:
-  all_others:
-EOF
-
-log "4/8 systemd 服务"
-install -m 644 "$APP/deploy/video-rr.service" /etc/systemd/system/video-rr.service
-install -m 644 "$APP/deploy/mediamtx.service" /etc/systemd/system/mediamtx.service
+log "3/7 关闭旧直播组件（本版本无直播）"
+systemctl disable --now mediamtx.service 2>/dev/null || true
+rm -f /etc/systemd/system/mediamtx.service
 systemctl daemon-reload
-systemctl enable --now mediamtx.service
-systemctl enable video-rr.service
+
+log "4/7 systemd 服务"
+install -m 644 "$APP/deploy/video-rr.service" /etc/systemd/system/video-rr.service
+systemctl daemon-reload
+systemctl enable video-rr.service >/dev/null 2>&1
 systemctl restart video-rr.service
 sleep 2
-systemctl --no-pager --lines=0 status video-rr.service | head -3 || true
 curl -fsS "http://127.0.0.1:$APP_PORT/api/constants" >/dev/null && echo "API 正常" || { echo "API 启动失败，看 /var/log/video-rr.err.log"; exit 1; }
+node scripts/rewrite-cover-urls.mjs || true
 
-log "5/8 nginx 片段"
-install -m 644 "$APP/deploy/nginx-video.snippet.conf" "$SNIPPET"
+log "5/7 nginx 片段（注入播放签名密钥）"
+sed "s/__MH_LINK_SECRET__/$MH_LINK_SECRET/g" "$APP/deploy/nginx-video.snippet.conf" > "$SNIPPET"
 install -m 644 "$APP/deploy/nginx-video-http.conf" "$HTTPCONF"
 
-log "6/8 注入 site 配置（备份后幂等）"
+log "6/7 注入 site 配置 + 并发参数"
 if ! grep -q 'video-rr.conf' "$SITE"; then
   cp -a "$SITE" "$SITE.bak-video-$(date +%Y%m%d%H%M%S)"
   python3 - "$SITE" <<'PY'
@@ -90,19 +72,19 @@ else:
 PY
 fi
 
-log "7/8 nginx 并发参数"
 NGX=/etc/nginx/nginx.conf
-cp -a "$NGX" "$NGX.bak-video-$(date +%Y%m%d%H%M%S)"
 sed -i 's/worker_connections 768;/worker_connections 65535;/' "$NGX"
 grep -q 'worker_rlimit_nofile' "$NGX" || sed -i '0,/worker_processes auto;/s//worker_processes auto;\nworker_rlimit_nofile 100000;/' "$NGX"
 nginx -t
 systemctl reload nginx
 
-log "8/8 健康检查"
+log "7/7 健康检查"
 for path in /video/ /video-admin/ /video/api/constants; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "https://$DOMAIN$path" --resolve "$DOMAIN:443:127.0.0.1")
+  code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN$path")
   printf '  %-24s %s\n' "$path" "$code"
 done
+unsigned=$(curl -sk -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/video/media/hls/1/index.m3u8")
+printf '  %-24s %s（应为 403）\n' 'unsigned hls' "$unsigned"
 echo
 echo "完成：C 端 https://$DOMAIN/video/   后台 https://$DOMAIN/video-admin/"
-echo "后台账号：admin / admin123（首次登录后请立刻改密码）"
+echo "后台：admin / admin123（另含 ops01 / fin01 / cs01，密码同为 admin123，务必改掉）"

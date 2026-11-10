@@ -1,20 +1,20 @@
 /**
- * 影巢服务端入口：
+ * 影巢服务端入口（无直播版）：
  *   /            C 端（public/）
  *   /admin      后台（admin/）
  *   /api/*      C 端接口
- *   /admin/api/*后台接口（需 admin token）
- *   /media/hls/*HLS 切片（支持 Range）
- *   /live/*     反代 MediaMTX 的 HLS（直播）
+ *   /admin/api/*后台接口（RBAC 保护）
+ *   /media/hls/*HLS 切片：必须带 sign+expires（与 nginx secure_link 同规则）
  */
 import { createServer } from 'node:http'
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join, normalize, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { db, seedIfEmpty, ROOT } from './db.mjs'
 import { handlePublic } from './api-public.mjs'
 import { handleAdmin } from './api-admin.mjs'
 import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
+import { verifyLink } from './entitlements.mjs'
+import { closeExpiredOrders } from './commerce.mjs'
 
 mkdirSync(UPLOAD_DIR, { recursive: true })
 mkdirSync(HLS_DIR, { recursive: true })
@@ -23,7 +23,7 @@ const seed = seedIfEmpty()
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC = join(ROOT, 'public')
 const ADMIN = join(ROOT, 'admin')
-const LIVE_HLS = `http://127.0.0.1:${process.env.MH_HLS_PORT ?? 8888}`
+const ALLOW_UNSIGNED = process.env.MH_ALLOW_UNSIGNED === '1'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -33,25 +33,15 @@ const MIME = {
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 }
 
-function readBody(req, limit = 2 * 1024 * 1024) {
-  return new Promise((resolvePromise, reject) => {
-    let data = ''
-    req.on('data', (chunk) => {
-      data += chunk
-      if (data.length > limit) reject(new Error('body too large'))
-    })
-    req.on('end', () => resolvePromise(data))
-    req.on('error', reject)
-  })
-}
-
-/** 大文件上传：直接落地到 storage/uploads，返回临时路径。 */
+/** 大文件上传：流式落地（不把整个视频读进内存）。 */
 function streamToUpload(req) {
   const temp = join(UPLOAD_DIR, `upload-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.part`)
   return new Promise((resolvePromise, reject) => {
+    const stream = createReadStream ? undefined : undefined
+    void stream
     const chunks = []
     let size = 0
-    req.on('data', (chunk) => { chunks.push(chunk); size += chunk.length })
+    req.on('data', (chunk) => { chunks.push(chunk); size += chunk.length; if (size > 2 * 1024 * 1024 * 1024) req.destroy() })
     req.on('end', () => {
       try { writeFileSync(temp, Buffer.concat(chunks)); resolvePromise({ path: temp, size }) } catch (error) { reject(error) }
     })
@@ -59,12 +49,12 @@ function streamToUpload(req) {
   })
 }
 
-function serveFileWithRange(req, res, filePath) {
+function serveFileWithRange(req, res, filePath, cacheControl = 'no-cache') {
   const stat = statSync(filePath)
   const type = MIME[extname(filePath)] ?? 'application/octet-stream'
   const range = req.headers.range
   if (!range) {
-    res.writeHead(200, { 'content-type': type, 'content-length': stat.size, 'accept-ranges': 'bytes', 'cache-control': 'no-cache' })
+    res.writeHead(200, { 'content-type': type, 'content-length': stat.size, 'accept-ranges': 'bytes', 'cache-control': cacheControl })
     createReadStream(filePath).pipe(res)
     return
   }
@@ -81,6 +71,7 @@ function serveFileWithRange(req, res, filePath) {
     'content-range': `bytes ${start}-${end}/${stat.size}`,
     'content-length': end - start + 1,
     'accept-ranges': 'bytes',
+    'cache-control': cacheControl,
   })
   createReadStream(filePath, { start, end }).pipe(res)
 }
@@ -94,26 +85,33 @@ function serveStatic(rootDir, pathname, res) {
     res.end('404')
     return
   }
-  res.writeHead(200, { 'content-type': MIME[extname(safe)] ?? 'application/octet-stream', 'cache-control': 'no-store' })
+  res.writeHead(200, { 'content-type': MIME[extname(safe)] ?? 'application/octet-stream', 'cache-control': 'no-cache' })
   createReadStream(safe).pipe(res)
 }
 
-async function proxyLive(req, res, pathname) {
-  const target = `${LIVE_HLS}${pathname}`
-  try {
-    const upstream = await fetch(target, { headers: { range: req.headers.range ?? '' } })
-    const headers = {}
-    for (const key of ['content-type', 'content-length', 'accept-ranges', 'content-range']) {
-      const value = upstream.headers.get(key)
-      if (value) headers[key] = value
-    }
-    res.writeHead(upstream.status, headers)
-    const buffer = Buffer.from(await upstream.arrayBuffer())
-    res.end(buffer)
-  } catch (error) {
-    res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
-    res.end(`直播未启动或 MediaMTX 未运行：${String(error?.message ?? error)}`)
-  }
+/** 模拟支付页（仅演示环境；生产关闭 mock 渠道后本页 404）。 */
+function mockPayPage(outTradeNo, res) {
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8" />
+<title>模拟支付 · 影巢</title>
+<style>body{background:#0e0f13;color:#e8e8ee;font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0}
+.card{background:#171a21;border:1px solid #2a2f3a;border-radius:16px;padding:28px 32px;text-align:center;min-width:320px}
+h1{font-size:18px;margin:0 0 8px}p{color:#9aa3b2;font-size:13px}
+button{margin-top:16px;padding:12px 24px;border:0;border-radius:10px;background:linear-gradient(135deg,#ff7a59,#ff4d6d);color:#fff;font-size:15px;cursor:pointer}
+</style></head><body><div class="card">
+<h1>模拟支付（演示渠道）</h1><p>订单号 ${outTradeNo}</p>
+<p>生产环境请关闭 mock 渠道，接入支付宝 / USDT</p>
+<button id="pay">模拟支付成功</button>
+<div id="result" style="margin-top:14px;font-size:13px;color:#4ade80"></div>
+</div>
+<script>
+document.getElementById('pay').addEventListener('click', async () => {
+  const res = await fetch('/api/pay/mock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ outTradeNo: '${outTradeNo}' }) })
+  const json = await res.json()
+  document.getElementById('result').textContent = json.code === '0000' ? '支付成功，权益已到账，可回到站点观看' : ('失败：' + json.msg)
+})
+</script></body></html>`
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(html)
 }
 
 const server = createServer(async (req, res) => {
@@ -121,12 +119,21 @@ const server = createServer(async (req, res) => {
   const pathname = url.pathname
 
   try {
-    if (pathname.startsWith('/live/')) return await proxyLive(req, res, pathname)
-
     if (pathname.startsWith('/media/hls/')) {
+      const cookies = Object.fromEntries(String(req.headers.cookie ?? '').split(';').map((part) => {
+        const [key, ...rest] = part.trim().split('=')
+        return [key, rest.join('=')]
+      }))
+      const sign = url.searchParams.get('sign') ?? cookies.mh_link
+      const expires = url.searchParams.get('expires') ?? cookies.mh_exp
+      if (!ALLOW_UNSIGNED && !verifyLink(pathname, sign, expires)) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('403 播放链接无效或已过期')
+        return
+      }
       const filePath = join(HLS_DIR, pathname.replace('/media/hls/', ''))
       if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
-      return serveFileWithRange(req, res, filePath)
+      return serveFileWithRange(req, res, filePath, 'private, max-age=600')
     }
 
     if (pathname === '/media/uploads' || pathname.startsWith('/media/uploads/')) {
@@ -154,27 +161,24 @@ const server = createServer(async (req, res) => {
     if (pathname.startsWith('/media/images/')) {
       const filePath = join(ROOT, 'storage', 'images', pathname.replace('/media/images/', ''))
       if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
-      return serveFileWithRange(req, res, filePath)
+      return serveFileWithRange(req, res, filePath, 'public, max-age=604800')
+    }
+
+    if (pathname.startsWith('/pay/mock/')) {
+      return mockPayPage(pathname.split('/')[3], res)
     }
 
     if (pathname.startsWith('/admin/api/')) {
       const uploadMatch = /^\/admin\/api\/episodes\/(\d+)\/upload$/.exec(pathname)
       if (uploadMatch && req.method === 'POST') {
         const uploaded = await streamToUpload(req)
-        return await handleAdmin(pathname, url, req, res, '', { uploadPath: uploaded.path, size: uploaded.size })
+        return await handleAdmin(pathname, url, req, res, undefined, { uploadPath: uploaded.path, uploadSize: uploaded.size })
       }
-      const raw = await readBody(req)
-      return await handleAdmin(pathname, url, req, res, raw)
+      return await handleAdmin(pathname, url, req, res)
     }
 
     if (pathname.startsWith('/api/')) {
-      const raw = await readBody(req)
-      const handled = handlePublic(pathname, url, req, res, raw)
-      if (!handled) {
-        res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
-        res.end(JSON.stringify({ code: '0404', msg: `未知接口 ${pathname}`, data: {} }))
-      }
-      return
+      return await handlePublic(pathname, url, req, res)
     }
 
     if (pathname === '/admin' || pathname.startsWith('/admin/')) {
@@ -183,6 +187,12 @@ const server = createServer(async (req, res) => {
 
     return serveStatic(PUBLIC, pathname === '/' ? 'index.html' : pathname.replace(/^\//, ''), res)
   } catch (error) {
+    if (error?.code && error?.status && !res.headersSent) {
+      // 业务异常（CommerceError 等）：按语义返回 4xx，不吞成 500
+      res.writeHead(error.status, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ code: error.code, msg: error.message, data: {} }))
+      return
+    }
     console.error('[mh-clone]', error)
     if (!res.headersSent) {
       res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
@@ -193,13 +203,19 @@ const server = createServer(async (req, res) => {
   }
 })
 
+// 每分钟关掉超时未支付的订单
+setInterval(() => {
+  try { closeExpiredOrders() } catch (error) { console.error('[closeExpiredOrders]', error) }
+}, 60_000).unref()
+
 server.listen(PORT, '127.0.0.1', () => {
   const stats = {
     dramas: db.prepare('SELECT COUNT(*) AS n FROM dramas').get().n,
     episodes: db.prepare('SELECT COUNT(*) AS n FROM episodes').get().n,
+    plans: db.prepare('SELECT COUNT(*) AS n FROM plans').get().n,
   }
-  console.log(`影巢已启动`)
+  console.log('影巢已启动（无直播模块）')
   console.log(`  C 端      http://127.0.0.1:${PORT}/`)
-  console.log(`  后台      http://127.0.0.1:${PORT}/admin   （admin / admin123）`)
-  console.log(`  数据库    ${seed.seeded ? '已按种子初始化' : '沿用现有'}：${stats.dramas} 部剧 / ${stats.episodes} 集`)
+  console.log(`  后台      http://127.0.0.1:${PORT}/admin   （admin / admin123，另含 ops01/fin01/cs01）`)
+  console.log(`  数据库    ${seed.seeded ? '已按种子初始化' : '沿用现有'}：${stats.dramas} 部剧 / ${stats.episodes} 集 / ${stats.plans} 个套餐`)
 })

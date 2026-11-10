@@ -1,271 +1,535 @@
-/** 后台接口：内容/运营/审核/用户订单/直播/转码，全部要求 admin token。 */
-import { renameSync, unlinkSync } from 'node:fs'
-import { db } from './db.mjs'
-import { loginAdmin, authOf } from './auth.mjs'
-import { envelope, fail, readJsonBody } from './api-public.mjs'
-import { enqueueEpisode, generateSample, probe, queueState, UPLOAD_DIR } from './media.mjs'
-import { liveState, startLive, stopLive, ensureStream, deleteStream } from './live.mjs'
+/** 后台接口：RBAC 保护 + 审计 + 内容/付费策略/套餐/优惠券/订单/退款/对账/权限。 */
+import { db, getSetting, setSetting } from './db.mjs'
+import { authOf, loginAdmin } from './auth.mjs'
+import { send } from './api-public.mjs'
+import { hasPermission, listAdmins, listAudit, listPermissionCatalog, listRoles, loadPrincipal, setAdminRoles, updateRolePermissions } from './rbac.mjs'
+import { audit } from './rbac.mjs'
+import { commerceStats, createRefund, approveRefund, rejectRefund, reconcile, listOrders, closeExpiredOrders } from './commerce.mjs'
+import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
+import { policyOf } from './entitlements.mjs'
 
-const now = () => new Date().toISOString()
-
-function send(res, payload, status = 200) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-  res.end(payload)
-  return true
-}
-
-const one = (sql, ...args) => db.prepare(sql).get(...args)
 const all = (sql, ...args) => db.prepare(sql).all(...args)
+const one = (sql, ...args) => db.prepare(sql).get(...args)
 const run = (sql, ...args) => db.prepare(sql).run(...args)
 
-export async function handleAdmin(pathname, url, req, res, rawBody, context = {}) {
-  const method = req.method ?? 'GET'
-  const body = readJsonBody(rawBody)
+const ipOf = (req) => (req.socket?.remoteAddress ?? '').replace('::ffff:', '')
+const readBody = (req) => new Promise((resolve) => {
+  let raw = ''
+  req.on('data', (chunk) => { raw += chunk; if (raw.length > 2e6) req.destroy() })
+  req.on('end', () => {
+    if (!raw) return resolve({})
+    try { resolve(JSON.parse(raw)) } catch { resolve({}) }
+  })
+})
 
-  // 登录不需要 token
+const PERM = {
+  login: null,
+  me: null,
+  stats: 'dashboard.read',
+  dramas: 'content.drama.read',
+  dramaWrite: 'content.drama.write',
+  dramaPublish: 'content.drama.publish',
+  dramaDelete: 'content.drama.delete',
+  episodes: 'content.drama.read',
+  episodeWrite: 'content.episode.write',
+  policy: 'content.policy.write',
+  plans: 'commerce.plan.write',
+  coupons: 'commerce.coupon.write',
+  orders: 'finance.order.read',
+  refundCreate: 'finance.refund.create',
+  refundApprove: 'finance.refund.approve',
+  reconcile: 'finance.reconcile.run',
+  banners: 'ops.banner.write',
+  sections: 'ops.section.write',
+  ranks: 'ops.rank.write',
+  review: 'content.review',
+  users: 'user.read',
+  userManage: 'user.manage',
+  cs: 'cs.toolkit',
+  roles: 'admin.read',
+  rolesWrite: 'admin.write',
+  audit: 'audit.read',
+  analytics: 'analytics.read',
+  paySettings: 'admin.write',
+}
+
+export async function handleAdmin(pathname, url, req, res, rawBody, opts = {}) {
+  const method = req.method
+  const body = rawBody !== undefined ? rawBody : (['POST', 'PUT', 'PATCH'].includes(method) ? await readBody(req) : {})
+  const seg = pathname.replace('/admin/api/', '').split('/').filter(Boolean)
+
   if (pathname === '/admin/api/login' && method === 'POST') {
     const result = loginAdmin(String(body.username ?? ''), String(body.password ?? ''))
-    if (!result) return send(res, fail('0401', '账号或密码不正确'), 401)
-    return send(res, envelope({ ...result, username: body.username }))
+    if (!result) {
+      audit({ actorType: 'admin', actorName: body.username, action: 'admin.login.failed', ip: ipOf(req), result: 'denied' })
+      return send(res, {}, '0401', '账号或密码错误', 401)
+    }
+    const principal = loadPrincipal(Number(result.token ? JSON.parse(Buffer.from(result.token.split('.')[0], 'base64url').toString()).sub : 0))
+    audit({ actorType: 'admin', actorId: principal?.admin?.id, actorName: principal?.admin?.username, action: 'admin.login', ip: ipOf(req) })
+    return send(res, { token: result.token, expiresAt: result.expiresAt, roles: principal?.roles?.map((role) => role.code) ?? [] })
   }
 
   const auth = authOf(req)
-  if (!auth || auth.role !== 'admin') return send(res, fail('0401', '需要管理员登录'), 401)
+  const principal = auth?.role === 'admin' ? loadPrincipal(Number(auth.sub)) : undefined
+  if (!principal) return send(res, {}, '0401', '需要管理员登录', 401)
 
-  if (pathname === '/admin/api/me') return send(res, envelope({ role: 'admin', id: auth.sub }))
+  const deny = (perm) => {
+    audit({ actorId: principal.admin.id, actorName: principal.admin.username, action: 'rbac.denied', targetType: 'permission', targetId: perm, ip: ipOf(req), result: 'denied' })
+    return send(res, { required: perm }, '0403', '无权限执行该操作', 403)
+  }
+  const guard = (perm) => (!perm || hasPermission(principal, perm) ? true : false)
+  const log = (action, targetType, targetId, before, after, reason) => audit({
+    actorId: principal.admin.id, actorName: principal.admin.username,
+    action, targetType, targetId, before, after, reason, ip: ipOf(req),
+  })
+
+  /* ---------- 会话/概览 ---------- */
+  if (pathname === '/admin/api/me') {
+    return send(res, {
+      admin: { id: principal.admin.id, username: principal.admin.username, displayName: principal.admin.display_name },
+      roles: principal.roles.map((role) => ({ code: role.code, name: role.name })),
+      permissions: [...principal.permissions],
+    })
+  }
 
   if (pathname === '/admin/api/stats') {
-    const countOf = (table, where = '') => one(`SELECT COUNT(*) AS n FROM ${table} ${where}`).n
-    return send(res, envelope({
-      dramas: countOf('dramas'),
-      episodes: countOf('episodes'),
-      readyEpisodes: countOf('episodes', "WHERE status = 'ready'"),
-      pendingDanmu: countOf('danmus', "WHERE status = 'pending'"),
-      pendingComments: countOf('comments', "WHERE status = 'pending'"),
-      users: countOf('users'),
-      orders: countOf('orders'),
-      revenue: one('SELECT COALESCE(SUM(amount), 0) AS n FROM orders WHERE status = \'paid\'').n,
+    if (!guard(PERM.stats)) return deny(PERM.stats)
+    return send(res, {
+      dramas: one('SELECT COUNT(*) AS n FROM dramas').n,
+      episodes: one('SELECT COUNT(*) AS n FROM episodes').n,
+      readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE status = 'ready'").n,
+      users: one('SELECT COUNT(*) AS n FROM users').n,
+      pendingDanmu: one("SELECT COUNT(*) AS n FROM danmus WHERE status = 'pending'").n,
+      pendingComments: one("SELECT COUNT(*) AS n FROM comments WHERE status = 'pending'").n,
       queue: queueState(),
-      live: liveState(),
-      updatedAt: now(),
-    }))
+      commerce: commerceStats(),
+      pay: (() => {
+        const pay = getSetting('pay', {})
+        return { alipay: Boolean(pay.alipay?.enabled), usdt: Boolean(pay.usdt?.enabled), mock: Boolean(pay.mock?.enabled) }
+      })(),
+    })
   }
 
   /* ---------- 剧集 ---------- */
-  if (pathname === '/admin/api/dramas' && method === 'GET') {
-    const keyword = url.searchParams.get('keyword') ?? ''
+  if (seg[0] === 'dramas' && seg.length === 1 && method === 'GET') {
+    if (!guard(PERM.dramas)) return deny(PERM.dramas)
+    const keyword = url.searchParams.get('keyword')
     const rows = keyword
-      ? all('SELECT * FROM dramas WHERE title LIKE ? ORDER BY id DESC LIMIT 100', `%${keyword}%`)
-      : all('SELECT * FROM dramas ORDER BY id DESC LIMIT 100')
-    return send(res, envelope({ list: rows.map((row) => ({
-      ...row,
-      episodeCount: one('SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ?', row.id).n,
-    })) }))
+      ? all('SELECT * FROM dramas WHERE title LIKE ? ORDER BY id DESC', `%${keyword}%`)
+      : all('SELECT * FROM dramas ORDER BY id DESC')
+    return send(res, {
+      list: rows.map((drama) => ({
+        ...drama,
+        episodeCount: one('SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ?', drama.id).n,
+        policy: policyOf(drama.id) ?? null,
+      })),
+    })
   }
 
-  if (pathname === '/admin/api/dramas' && method === 'POST') {
-    const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, score, fee_mode, status)
+  if (seg[0] === 'dramas' && method === 'POST') {
+    if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
+    const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, score, status, sort)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     body.title ?? '未命名', body.subTitle ?? '', body.coverUrl ?? '', body.description ?? '',
-    Number(body.year ?? 2026), body.area ?? '', body.category ?? 'TV', Number(body.score ?? 8.0),
-    body.feeMode ?? 'free', body.status ?? 'published')
-    return send(res, envelope({ id: Number(info.lastInsertRowid) }))
+    Number(body.year ?? 2026), body.area ?? '', body.category ?? 'TV', Number(body.score ?? 8), body.status ?? 'draft', Number(body.sort ?? 0))
+    const dramaId = Number(info.lastInsertRowid)
+    run(`INSERT INTO content_policies (drama_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`, dramaId, body.accessMode ?? 'subscription', Number(body.freeEpisodes ?? 1),
+    Number(body.trialSeconds ?? 0), Number(body.singlePrice ?? 0), body.purchaseKind ?? 'single', Number(body.rentalHours ?? 72))
+    log('content.drama.create', 'drama', dramaId, null, body)
+    return send(res, one('SELECT * FROM dramas WHERE id = ?', dramaId))
   }
 
-  const dramaMatch = /^\/admin\/api\/dramas\/(\d+)$/.exec(pathname)
-  if (dramaMatch) {
-    const id = Number(dramaMatch[1])
-    if (method === 'PUT') {
-      const current = one('SELECT * FROM dramas WHERE id = ?', id)
-      if (!current) return send(res, fail('0001', '不存在'))
-      run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, score = ?, fee_mode = ?, status = ? WHERE id = ?`,
-        body.title ?? current.title, body.subTitle ?? current.sub_title, body.coverUrl ?? current.cover_url,
-        body.description ?? current.description, Number(body.year ?? current.year), body.area ?? current.area,
-        body.category ?? current.category, Number(body.score ?? current.score), body.feeMode ?? current.fee_mode,
-        body.status ?? current.status, id)
-      return send(res, envelope({ ok: true }))
-    }
-    if (method === 'DELETE') {
-      run('DELETE FROM dramas WHERE id = ?', id)
-      return send(res, envelope({ ok: true }))
-    }
-    if (method === 'GET') {
-      const drama = one('SELECT * FROM dramas WHERE id = ?', id)
-      if (!drama) return send(res, fail('0001', '不存在'))
-      const episodes = all('SELECT * FROM episodes WHERE drama_id = ? ORDER BY no', id)
-      return send(res, envelope({ drama, episodes }))
-    }
+  if (seg[0] === 'dramas' && seg[1] && seg.length === 2 && method === 'PUT') {
+    if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
+    const dramaId = Number(seg[1])
+    const before = one('SELECT * FROM dramas WHERE id = ?', dramaId)
+    if (!before) return send(res, {}, '0404', '剧集不存在', 404)
+    run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, score = ?, status = ?, sort = ?
+      WHERE id = ?`,
+    body.title ?? before.title, body.subTitle ?? before.sub_title, body.coverUrl ?? before.cover_url,
+    body.description ?? before.description, Number(body.year ?? before.year), body.area ?? before.area,
+    body.category ?? before.category, Number(body.score ?? before.score), body.status ?? before.status,
+    Number(body.sort ?? before.sort), dramaId)
+    log('content.drama.update', 'drama', dramaId, before, body)
+    return send(res, one('SELECT * FROM dramas WHERE id = ?', dramaId))
   }
 
-  const episodesMatch = /^\/admin\/api\/dramas\/(\d+)\/episodes$/.exec(pathname)
-  if (episodesMatch) {
-    const dramaId = Number(episodesMatch[1])
-    if (method === 'GET') return send(res, envelope({ list: all('SELECT * FROM episodes WHERE drama_id = ? ORDER BY no', dramaId) }))
-    if (method === 'POST') {
-      const no = Number(body.no ?? (one('SELECT COALESCE(MAX(no), 0) AS n FROM episodes WHERE drama_id = ?', dramaId).n + 1))
-      const info = run('INSERT INTO episodes (drama_id, no, title, duration, vip, status) VALUES (?, ?, ?, ?, ?, ?)',
-        dramaId, no, body.title ?? `第 ${no} 集`, Number(body.duration ?? 0), body.vip ? 1 : 0, 'ready')
-      return send(res, envelope({ id: Number(info.lastInsertRowid) }))
-    }
+  if (seg[0] === 'dramas' && seg[1] && seg.length === 2 && method === 'DELETE') {
+    if (!guard(PERM.dramaDelete)) return deny(PERM.dramaDelete)
+    const dramaId = Number(seg[1])
+    const before = one('SELECT * FROM dramas WHERE id = ?', dramaId)
+    if (!before) return send(res, {}, '0404', '剧集不存在', 404)
+    if (!body.reason) return send(res, {}, '0400', '删除需填写原因', 400)
+    run('DELETE FROM dramas WHERE id = ?', dramaId)
+    log('content.drama.delete', 'drama', dramaId, before, null, body.reason)
+    return send(res, { deleted: true })
   }
 
-  const episodeOp = /^\/admin\/api\/episodes\/(\d+)(?:\/(\w+))?$/.exec(pathname)
-  if (episodeOp) {
-    const episodeId = Number(episodeOp[1])
-    const action = episodeOp[2]
-    const episode = one('SELECT * FROM episodes WHERE id = ?', episodeId)
-    if (!episode) return send(res, fail('0001', '分集不存在'))
-
-    if (method === 'DELETE' && !action) {
-      run('DELETE FROM episodes WHERE id = ?', episodeId)
-      return send(res, envelope({ ok: true }))
-    }
-
-    if (action === 'upload' && method === 'POST') {
-      if (!context.uploadPath) return send(res, fail('0400', '没有收到文件'))
-      const target = `${UPLOAD_DIR}\\ep-${episodeId}-${Date.now()}.mp4`
-      renameSync(context.uploadPath, target)
-      const info = await probe(target)
-      run('UPDATE episodes SET source_path = ?, duration = ? WHERE id = ?', target, info?.duration ?? episode.duration, episodeId)
-      enqueueEpisode({ ...episode, source_path: target, duration: info?.duration ?? episode.duration })
-      return send(res, envelope({ ok: true, source: target, probe: info, queue: queueState() }))
-    }
-
-    if (action === 'sample' && method === 'POST') {
-      const seconds = Math.min(180, Math.max(10, Number(body.seconds ?? 30)))
-      const source = await generateSample(seconds, `ep-${episodeId}`)
-      const info = await probe(source)
-      run('UPDATE episodes SET source_path = ?, duration = ? WHERE id = ?', source, info?.duration ?? seconds, episodeId)
-      enqueueEpisode({ ...episode, source_path: source, duration: info?.duration ?? seconds })
-      return send(res, envelope({ ok: true, source, probe: info, queue: queueState() }))
-    }
+  if (seg[0] === 'dramas' && seg[1] && seg[2] === 'publish' && method === 'POST') {
+    if (!guard(PERM.dramaPublish)) return deny(PERM.dramaPublish)
+    const dramaId = Number(seg[1])
+    const before = one('SELECT status FROM dramas WHERE id = ?', dramaId)
+    const status = body.status === 'published' ? 'published' : 'draft'
+    run('UPDATE dramas SET status = ? WHERE id = ?', status, dramaId)
+    log('content.drama.publish', 'drama', dramaId, before, { status }, body.reason)
+    return send(res, { status })
   }
 
-  if (pathname === '/admin/api/jobs') return send(res, envelope(queueState()))
-
-  /* ---------- 首页运营 ---------- */
-  if (pathname === '/admin/api/banners') {
-    if (method === 'GET') return send(res, envelope({ list: all('SELECT * FROM banners ORDER BY sort') }))
-    if (method === 'POST') {
-      const info = run('INSERT INTO banners (name, title, image, target_drama_id, sort, enabled) VALUES (?, ?, ?, ?, ?, ?)',
-        body.name ?? '', body.title ?? '', body.image ?? '', body.targetDramaId ?? null, Number(body.sort ?? 0), body.enabled === false ? 0 : 1)
-      return send(res, envelope({ id: Number(info.lastInsertRowid) }))
-    }
-  }
-  const bannerMatch = /^\/admin\/api\/banners\/(\d+)$/.exec(pathname)
-  if (bannerMatch) {
-    const id = Number(bannerMatch[1])
-    if (method === 'PUT') {
-      const current = one('SELECT * FROM banners WHERE id = ?', id)
-      run('UPDATE banners SET name = ?, title = ?, image = ?, target_drama_id = ?, sort = ?, enabled = ? WHERE id = ?',
-        body.name ?? current.name, body.title ?? current.title, body.image ?? current.image,
-        body.targetDramaId ?? current.target_drama_id, Number(body.sort ?? current.sort),
-        body.enabled === undefined ? current.enabled : (body.enabled ? 1 : 0), id)
-      return send(res, envelope({ ok: true }))
-    }
-    if (method === 'DELETE') { run('DELETE FROM banners WHERE id = ?', id); return send(res, envelope({ ok: true })) }
+  if (seg[0] === 'dramas' && seg[1] && seg[2] === 'episodes' && method === 'GET') {
+    if (!guard(PERM.episodes)) return deny(PERM.episodes)
+    return send(res, { list: all('SELECT * FROM episodes WHERE drama_id = ? ORDER BY no', Number(seg[1])) })
   }
 
-  if (pathname === '/admin/api/sections') {
-    if (method === 'GET') {
-      const sections = all('SELECT * FROM sections ORDER BY sort')
-      return send(res, envelope({ list: sections.map((section) => ({
+  if (seg[0] === 'dramas' && seg[1] && seg[2] === 'episodes' && method === 'POST') {
+    if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
+    const dramaId = Number(seg[1])
+    const nextNo = Number(one('SELECT COALESCE(MAX(no),0) + 1 AS n FROM episodes WHERE drama_id = ?', dramaId).n)
+    const info = run("INSERT INTO episodes (drama_id, no, title, status) VALUES (?, ?, ?, 'ready')",
+      dramaId, Number(body.no ?? nextNo), body.title ?? `第 ${nextNo} 集`)
+    log('content.episode.create', 'episode', Number(info.lastInsertRowid), null, { dramaId, no: body.no ?? nextNo })
+    return send(res, one('SELECT * FROM episodes WHERE id = ?', Number(info.lastInsertRowid)))
+  }
+
+  if (seg[0] === 'dramas' && seg[1] && seg[2] === 'policy' && method === 'GET') {
+    if (!guard(PERM.dramas)) return deny(PERM.dramas)
+    return send(res, policyOf(Number(seg[1])) ?? {})
+  }
+
+  if (seg[0] === 'dramas' && seg[1] && seg[2] === 'policy' && method === 'PUT') {
+    if (!guard(PERM.policy)) return deny(PERM.policy)
+    const dramaId = Number(seg[1])
+    const before = policyOf(dramaId)
+    run(`INSERT INTO content_policies (drama_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(drama_id) DO UPDATE SET access_mode = excluded.access_mode, free_episodes = excluded.free_episodes,
+        trial_seconds = excluded.trial_seconds, single_price_cny = excluded.single_price_cny,
+        purchase_kind = excluded.purchase_kind, rental_hours = excluded.rental_hours, updated_at = datetime('now')`,
+    dramaId, body.accessMode ?? 'subscription', Number(body.freeEpisodes ?? 0), Number(body.trialSeconds ?? 0),
+    Number(body.singlePrice ?? 0), body.purchaseKind ?? 'single', Number(body.rentalHours ?? 72))
+    log('content.policy.update', 'drama', dramaId, before, body)
+    return send(res, policyOf(dramaId))
+  }
+
+  if (seg[0] === 'episodes' && seg[1] && method === 'DELETE') {
+    if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
+    const before = one('SELECT * FROM episodes WHERE id = ?', Number(seg[1]))
+    run('DELETE FROM episodes WHERE id = ?', Number(seg[1]))
+    log('content.episode.delete', 'episode', seg[1], before, null, body.reason)
+    return send(res, { deleted: true })
+  }
+
+  if (seg[0] === 'episodes' && seg[1] && seg[2] === 'upload' && method === 'POST') {
+    if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
+    const episode = one('SELECT * FROM episodes WHERE id = ?', Number(seg[1]))
+    if (!episode) return send(res, {}, '0404', '分集不存在', 404)
+    if (!opts.uploadPath) return send(res, {}, '0400', '未收到上传文件', 400)
+    const info = await probe(opts.uploadPath)
+    run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, opts.uploadPath, episode.id)
+    enqueueEpisode({ ...episode, source_path: opts.uploadPath, duration: info?.duration ?? 0 })
+    log('content.episode.upload', 'episode', episode.id, null, { size: opts.uploadSize, probe: info })
+    return send(res, { ok: true, probe: info, queue: queueState() })
+  }
+
+  if (seg[0] === 'episodes' && seg[1] && seg[2] === 'sample' && method === 'POST') {
+    if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
+    const episode = one('SELECT * FROM episodes WHERE id = ?', Number(seg[1]))
+    if (!episode) return send(res, {}, '0404', '分集不存在', 404)
+    const file = await generateSample(Number(body.seconds ?? 20), `ep-${episode.id}`)
+    const info = await probe(file)
+    run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, file, episode.id)
+    enqueueEpisode({ ...episode, source_path: file, duration: info?.duration ?? 0 })
+    log('content.episode.sample', 'episode', episode.id, null, { file })
+    return send(res, { ok: true, source: file, probe: info, queue: queueState() })
+  }
+
+  if (pathname === '/admin/api/jobs' && method === 'GET') {
+    if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
+    return send(res, queueState())
+  }
+
+  /* ---------- 套餐 ---------- */
+  if (seg[0] === 'plans' && method === 'GET') {
+    if (!guard(PERM.plans)) return deny(PERM.plans)
+    return send(res, { list: all('SELECT * FROM plans ORDER BY sort, id') })
+  }
+  if (seg[0] === 'plans' && method === 'POST') {
+    if (!guard(PERM.plans)) return deny(PERM.plans)
+    const info = run('INSERT INTO plans (code, name, price_cny, duration_days, scope, description, sort, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      body.code ?? `plan-${Date.now()}`, body.name ?? '新套餐', Number(body.price ?? 0), Number(body.days ?? 30),
+      body.scope ?? 'all', body.description ?? '', Number(body.sort ?? 0), body.status ?? 'active')
+    log('commerce.plan.create', 'plan', Number(info.lastInsertRowid), null, body)
+    return send(res, one('SELECT * FROM plans WHERE id = ?', Number(info.lastInsertRowid)))
+  }
+  if (seg[0] === 'plans' && seg[1] && method === 'PUT') {
+    if (!guard(PERM.plans)) return deny(PERM.plans)
+    const before = one('SELECT * FROM plans WHERE id = ?', Number(seg[1]))
+    if (!before) return send(res, {}, '0404', '套餐不存在', 404)
+    run('UPDATE plans SET name = ?, price_cny = ?, duration_days = ?, scope = ?, description = ?, sort = ?, status = ? WHERE id = ?',
+      body.name ?? before.name, Number(body.price ?? before.price_cny), Number(body.days ?? before.duration_days),
+      body.scope ?? before.scope, body.description ?? before.description, Number(body.sort ?? before.sort),
+      body.status ?? before.status, Number(seg[1]))
+    log('commerce.plan.update', 'plan', seg[1], before, body)
+    return send(res, one('SELECT * FROM plans WHERE id = ?', Number(seg[1])))
+  }
+
+  /* ---------- 优惠券 ---------- */
+  if (seg[0] === 'coupons' && method === 'GET') {
+    if (!guard(PERM.coupons)) return deny(PERM.coupons)
+    return send(res, { list: all('SELECT * FROM coupons ORDER BY id DESC') })
+  }
+  if (seg[0] === 'coupons' && method === 'POST') {
+    if (!guard(PERM.coupons)) return deny(PERM.coupons)
+    const info = run(`INSERT INTO coupons (code, name, discount_type, discount_value, min_amount, total, valid_from, valid_to, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    String(body.code ?? '').toUpperCase(), body.name ?? '优惠券', body.discountType ?? 'amount',
+    Number(body.discountValue ?? 0), Number(body.minAmount ?? 0), Number(body.total ?? 0),
+    body.validFrom ?? null, body.validTo ?? null, body.status ?? 'active')
+    log('commerce.coupon.create', 'coupon', Number(info.lastInsertRowid), null, body)
+    return send(res, one('SELECT * FROM coupons WHERE id = ?', Number(info.lastInsertRowid)))
+  }
+  if (seg[0] === 'coupons' && seg[1] && method === 'PUT') {
+    if (!guard(PERM.coupons)) return deny(PERM.coupons)
+    const before = one('SELECT * FROM coupons WHERE id = ?', Number(seg[1]))
+    if (!before) return send(res, {}, '0404', '优惠券不存在', 404)
+    run('UPDATE coupons SET status = ?, valid_to = ?, total = ? WHERE id = ?',
+      body.status ?? before.status, body.validTo ?? before.valid_to, Number(body.total ?? before.total), Number(seg[1]))
+    log('commerce.coupon.update', 'coupon', seg[1], before, body)
+    return send(res, one('SELECT * FROM coupons WHERE id = ?', Number(seg[1])))
+  }
+
+  /* ---------- 订单 / 退款 / 对账 ---------- */
+  if (pathname === '/admin/api/orders' && method === 'GET') {
+    if (!guard(PERM.orders)) return deny(PERM.orders)
+    return send(res, { list: listOrders({ status: url.searchParams.get('status') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 100) }) })
+  }
+
+  if (pathname === '/admin/api/refunds' && method === 'GET') {
+    if (!guard(PERM.orders)) return deny(PERM.orders)
+    return send(res, { list: all(`SELECT r.*, o.out_trade_no, o.amount_cny, o.channel, u.nickname
+      FROM refunds r JOIN orders o ON o.id = r.order_id LEFT JOIN users u ON u.id = o.user_id ORDER BY r.id DESC LIMIT 100`) })
+  }
+
+  if (pathname === '/admin/api/refunds' && method === 'POST') {
+    if (!guard(PERM.refundCreate)) return deny(PERM.refundCreate)
+    if (!body.reason) return send(res, {}, '0400', '退款原因必填', 400)
+    const refund = createRefund({ orderId: Number(body.orderId), amount: body.amount, reason: body.reason, operatorId: principal.admin.id })
+    log('finance.refund.create', 'refund', refund.id, null, refund, body.reason)
+    return send(res, refund)
+  }
+
+  if (seg[0] === 'refunds' && seg[1] && (seg[2] === 'approve' || seg[2] === 'reject') && method === 'POST') {
+    if (!guard(PERM.refundApprove)) return deny(PERM.refundApprove)
+    if (seg[2] === 'approve') {
+      const result = approveRefund({ refundId: Number(seg[1]), approverId: principal.admin.id })
+      log('finance.refund.approve', 'refund', seg[1], null, result, body.reason)
+      return send(res, result)
+    }
+    const result = rejectRefund({ refundId: Number(seg[1]), approverId: principal.admin.id, reason: body.reason })
+    log('finance.refund.reject', 'refund', seg[1], null, result, body.reason)
+    return send(res, result)
+  }
+
+  if (pathname === '/admin/api/reconcile' && method === 'POST') {
+    if (!guard(PERM.reconcile)) return deny(PERM.reconcile)
+    const result = reconcile()
+    log('finance.reconcile.run', 'reconcile', null, null, result)
+    return send(res, result)
+  }
+
+  if (pathname === '/admin/api/close-expired' && method === 'POST') {
+    if (!guard(PERM.orders)) return deny(PERM.orders)
+    const closed = closeExpiredOrders()
+    log('finance.order.closeExpired', 'order', null, null, { closed })
+    return send(res, { closed })
+  }
+
+  /* ---------- 运营位 ---------- */
+  if (seg[0] === 'banners' && method === 'GET') {
+    if (!guard(PERM.banners)) return deny(PERM.banners)
+    return send(res, { list: all('SELECT b.*, d.title AS drama_title FROM banners b LEFT JOIN dramas d ON d.id = b.target_drama_id ORDER BY b.sort') })
+  }
+  if (seg[0] === 'banners' && method === 'POST') {
+    if (!guard(PERM.banners)) return deny(PERM.banners)
+    const info = run('INSERT INTO banners (name, title, image, target_drama_id, sort, enabled) VALUES (?, ?, ?, ?, ?, ?)',
+      body.name ?? '', body.title ?? '', body.image ?? '', Number(body.targetDramaId ?? 0) || null, Number(body.sort ?? 0), body.enabled === false ? 0 : 1)
+    log('ops.banner.create', 'banner', Number(info.lastInsertRowid), null, body)
+    return send(res, { id: Number(info.lastInsertRowid) })
+  }
+  if (seg[0] === 'banners' && seg[1] && method === 'PUT') {
+    if (!guard(PERM.banners)) return deny(PERM.banners)
+    const before = one('SELECT * FROM banners WHERE id = ?', Number(seg[1]))
+    run('UPDATE banners SET name = ?, title = ?, image = ?, target_drama_id = ?, sort = ?, enabled = ? WHERE id = ?',
+      body.name ?? before.name, body.title ?? before.title, body.image ?? before.image,
+      Number(body.targetDramaId ?? before.target_drama_id) || null, Number(body.sort ?? before.sort),
+      body.enabled === undefined ? before.enabled : (body.enabled ? 1 : 0), Number(seg[1]))
+    log('ops.banner.update', 'banner', seg[1], before, body)
+    return send(res, { ok: true })
+  }
+  if (seg[0] === 'banners' && seg[1] && method === 'DELETE') {
+    if (!guard(PERM.banners)) return deny(PERM.banners)
+    const before = one('SELECT * FROM banners WHERE id = ?', Number(seg[1]))
+    run('DELETE FROM banners WHERE id = ?', Number(seg[1]))
+    log('ops.banner.delete', 'banner', seg[1], before, null, body.reason)
+    return send(res, { deleted: true })
+  }
+
+  if (seg[0] === 'sections' && method === 'GET') {
+    if (!guard(PERM.sections)) return deny(PERM.sections)
+    return send(res, {
+      list: all('SELECT * FROM sections ORDER BY sort').map((section) => ({
         ...section,
-        items: all(`SELECT si.*, d.title, d.cover_url FROM section_items si JOIN dramas d ON d.id = si.drama_id WHERE si.section_id = ? ORDER BY si.sort`, section.id),
-      })) }))
+        items: all(`SELECT si.id, si.drama_id, si.sort, d.title FROM section_items si JOIN dramas d ON d.id = si.drama_id
+          WHERE si.section_id = ? ORDER BY si.sort`, section.id),
+      })),
+    })
+  }
+  if (seg[0] === 'sections' && method === 'POST') {
+    if (!guard(PERM.sections)) return deny(PERM.sections)
+    if (body.action === 'attach') {
+      run('INSERT INTO section_items (section_id, drama_id, sort) VALUES (?, ?, ?)',
+        Number(body.sectionId), Number(body.dramaId), Number(body.sort ?? 0))
+      log('ops.section.attach', 'section', body.sectionId, null, body)
+      return send(res, { ok: true })
     }
-    if (method === 'POST') {
-      if (body.action === 'attach') {
-        run('INSERT INTO section_items (section_id, drama_id, sort) VALUES (?, ?, ?)',
-          Number(body.sectionId), Number(body.dramaId), Number(body.sort ?? 0))
-        return send(res, envelope({ ok: true }))
-      }
-      const info = run('INSERT INTO sections (title, sort, enabled) VALUES (?, ?, 1)', body.title ?? '新区块', Number(body.sort ?? 0))
-      return send(res, envelope({ id: Number(info.lastInsertRowid) }))
-    }
-    if (method === 'DELETE') { run('DELETE FROM sections WHERE id = ?', Number(url.searchParams.get('id'))); return send(res, envelope({ ok: true })) }
+    const info = run('INSERT INTO sections (title, sort, enabled) VALUES (?, ?, 1)', body.title ?? '新楼层', Number(body.sort ?? 0))
+    log('ops.section.create', 'section', Number(info.lastInsertRowid), null, body)
+    return send(res, { id: Number(info.lastInsertRowid) })
+  }
+  if (seg[0] === 'sections' && seg[1] && method === 'DELETE') {
+    if (!guard(PERM.sections)) return deny(PERM.sections)
+    run('DELETE FROM sections WHERE id = ?', Number(seg[1]))
+    log('ops.section.delete', 'section', seg[1], null, null, body.reason)
+    return send(res, { deleted: true })
   }
 
-  /* ---------- 榜单 ---------- */
-  if (pathname === '/admin/api/ranks') {
-    if (method === 'GET') {
-      return send(res, envelope({ list: all('SELECT * FROM rank_lists ORDER BY sort').map((list) => ({
+  if (seg[0] === 'ranks' && method === 'GET') {
+    if (!guard(PERM.ranks)) return deny(PERM.ranks)
+    return send(res, {
+      list: all('SELECT * FROM rank_lists ORDER BY sort').map((list) => ({
         ...list,
         items: all('SELECT ri.*, d.title FROM rank_items ri JOIN dramas d ON d.id = ri.drama_id WHERE ri.list_id = ? ORDER BY ri.rank_no', list.id),
-      })) }))
+      })),
+    })
+  }
+  if (seg[0] === 'ranks' && method === 'POST') {
+    if (!guard(PERM.ranks)) return deny(PERM.ranks)
+    if (body.action === 'attach') {
+      run('INSERT INTO rank_items (list_id, drama_id, rank_no) VALUES (?, ?, ?)',
+        Number(body.listId), Number(body.dramaId), Number(body.rankNo ?? 0))
+      log('ops.rank.attach', 'rank', body.listId, null, body)
+      return send(res, { ok: true })
     }
-    if (method === 'POST') {
-      if (body.action === 'attach') {
-        run('INSERT INTO rank_items (list_id, drama_id, rank_no) VALUES (?, ?, ?)',
-          Number(body.listId), Number(body.dramaId), Number(body.rankNo ?? 0))
-        return send(res, envelope({ ok: true }))
-      }
-      const info = run('INSERT INTO rank_lists (name, type, sort) VALUES (?, ?, ?)', body.name ?? '新榜单', body.type ?? 'HOT', Number(body.sort ?? 0))
-      return send(res, envelope({ id: Number(info.lastInsertRowid) }))
-    }
+    const info = run('INSERT INTO rank_lists (name, type, sort) VALUES (?, ?, ?)', body.name ?? '新榜单', body.type ?? 'HOT', Number(body.sort ?? 0))
+    log('ops.rank.create', 'rank', Number(info.lastInsertRowid), null, body)
+    return send(res, { id: Number(info.lastInsertRowid) })
   }
 
   /* ---------- 审核 ---------- */
-  if (pathname === '/admin/api/comments') {
-    const status = url.searchParams.get('status')
-    const list = status
-      ? all('SELECT * FROM comments WHERE status = ? ORDER BY id DESC LIMIT 200', status)
-      : all('SELECT * FROM comments ORDER BY id DESC LIMIT 200')
-    return send(res, envelope({ list }))
+  if (seg[0] === 'danmus' && method === 'GET') {
+    if (!guard(PERM.review)) return deny(PERM.review)
+    return send(res, { list: all(`SELECT dm.*, d.title FROM danmus dm JOIN episodes e ON e.id = dm.episode_id
+      JOIN dramas d ON d.id = e.drama_id WHERE dm.status = ? ORDER BY dm.id DESC LIMIT 100`, url.searchParams.get('status') ?? 'pending') })
   }
-  if (pathname === '/admin/api/danmus') {
-    const status = url.searchParams.get('status')
-    const list = status
-      ? all('SELECT * FROM danmus WHERE status = ? ORDER BY id DESC LIMIT 200', status)
-      : all('SELECT * FROM danmus ORDER BY id DESC LIMIT 200')
-    return send(res, envelope({ list }))
+  if (seg[0] === 'danmus' && seg[1] && method === 'POST') {
+    if (!guard(PERM.review)) return deny(PERM.review)
+    const status = seg[2] === 'approve' ? 'approved' : 'rejected'
+    run('UPDATE danmus SET status = ? WHERE id = ?', status, Number(seg[1]))
+    log('content.danmu.review', 'danmu', seg[1], null, { status })
+    return send(res, { status })
   }
-  const reviewMatch = /^\/admin\/api\/(comments|danmus)\/(\d+)\/(approve|reject)$/.exec(pathname)
-  if (reviewMatch) {
-    const [, table, id, action] = reviewMatch
-    run(`UPDATE ${table} SET status = ? WHERE id = ?`, action === 'approve' ? 'approved' : 'rejected', Number(id))
-    return send(res, envelope({ ok: true }))
+  if (seg[0] === 'comments' && method === 'GET') {
+    if (!guard(PERM.review)) return deny(PERM.review)
+    return send(res, { list: all(`SELECT c.*, d.title FROM comments c JOIN dramas d ON d.id = c.drama_id
+      WHERE c.status = ? ORDER BY c.id DESC LIMIT 100`, url.searchParams.get('status') ?? 'pending') })
+  }
+  if (seg[0] === 'comments' && seg[1] && method === 'POST') {
+    if (!guard(PERM.review)) return deny(PERM.review)
+    const status = seg[2] === 'approve' ? 'approved' : 'rejected'
+    run('UPDATE comments SET status = ? WHERE id = ?', status, Number(seg[1]))
+    log('content.comment.review', 'comment', seg[1], null, { status })
+    return send(res, { status })
   }
 
-  /* ---------- 用户 / 订单 ---------- */
-  if (pathname === '/admin/api/users') {
-    return send(res, envelope({ list: all('SELECT * FROM users ORDER BY id DESC LIMIT 200') }))
+  /* ---------- 用户 / 客服 ---------- */
+  if (pathname === '/admin/api/users' && method === 'GET') {
+    if (!guard(PERM.users)) return deny(PERM.users)
+    return send(res, {
+      list: all(`SELECT u.*,
+        (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS order_count,
+        (SELECT COALESCE(SUM(amount_cny),0) FROM orders o WHERE o.user_id = u.id AND o.status IN ('paid','fulfilled')) AS paid_total,
+        (SELECT datetime(valid_to) FROM subscriptions s WHERE s.user_id = u.id AND s.status = 'active' ORDER BY datetime(valid_to) DESC LIMIT 1) AS vip_until
+        FROM users u ORDER BY u.id DESC LIMIT 200`),
+    })
   }
-  if (pathname === '/admin/api/orders') {
-    if (method === 'POST') {
-      run('INSERT INTO orders (user_id, sku, amount, status) VALUES (?, ?, ?, ?)',
-        Number(body.userId ?? 1), body.sku ?? 'vip-year', Number(body.amount ?? 88), 'pending')
-      return send(res, envelope({ ok: true }))
+  if (seg[0] === 'users' && seg[1] && seg[2] === 'status' && method === 'POST') {
+    if (!guard(PERM.userManage)) return deny(PERM.userManage)
+    run('UPDATE users SET status = ? WHERE id = ?', body.status === 'banned' ? 'banned' : 'active', Number(seg[1]))
+    log('user.status.update', 'user', seg[1], null, { status: body.status }, body.reason)
+    return send(res, { ok: true })
+  }
+  if (pathname === '/admin/api/cs/grant' && method === 'POST') {
+    if (!guard(PERM.cs)) return deny(PERM.cs)
+    const userId = Number(body.userId)
+    if (!userId) return send(res, {}, '0400', 'userId 必填', 400)
+    if (body.kind === 'subscription') {
+      const plan = one('SELECT * FROM plans WHERE id = ?', Number(body.planId))
+      if (!plan) return send(res, {}, '0404', '套餐不存在', 404)
+      const validTo = new Date(Date.now() + Number(body.days ?? plan.duration_days) * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
+      run(`INSERT INTO subscriptions (user_id, plan_id, order_id, scope, valid_to, status) VALUES (?, ?, NULL, ?, ?, 'active')`,
+        userId, plan.id, plan.scope ?? 'all', validTo)
+    } else {
+      run(`INSERT INTO purchases (user_id, drama_id, order_id, kind, status) VALUES (?, ?, NULL, 'single', 'active')`,
+        userId, Number(body.dramaId))
     }
-    const list = all('SELECT o.*, u.nickname FROM orders o LEFT JOIN users u ON u.id = o.user_id ORDER BY o.id DESC LIMIT 200')
-    const revenue = one("SELECT COALESCE(SUM(amount), 0) AS n FROM orders WHERE status = 'paid'").n
-    return send(res, envelope({ list, revenue }))
-  }
-  const payMatch = /^\/admin\/api\/orders\/(\d+)\/pay$/.exec(pathname)
-  if (payMatch) {
-    const id = Number(payMatch[1])
-    const order = one('SELECT * FROM orders WHERE id = ?', id)
-    if (!order) return send(res, fail('0001', '订单不存在'))
-    run("UPDATE orders SET status = 'paid', paid_at = datetime('now') WHERE id = ?", id)
-    if (order.user_id) run("UPDATE users SET is_vip = 1, vip_expire_at = datetime('now', '+365 days') WHERE id = ?", order.user_id)
-    return send(res, envelope({ ok: true }))
+    log('cs.grant.entitlement', 'user', userId, null, body, body.reason)
+    return send(res, { ok: true })
   }
 
-  /* ---------- 直播 ---------- */
-  if (pathname === '/admin/api/live') {
-    if (method === 'POST') {
-      const action = body.action
-      if (action === 'start') return send(res, envelope(startLive()))
-      if (action === 'stop') return send(res, envelope(stopLive()))
-      if (action === 'create') {
-        const stream = ensureStream(body.name ?? '新直播频道', body.key ?? `live${Date.now()}`)
-        return send(res, envelope({ stream, live: liveState() }))
-      }
-      if (action === 'delete') { deleteStream(Number(body.id)); return send(res, envelope({ ok: true })) }
-      return send(res, fail('0400', '未知动作'))
-    }
-    return send(res, envelope(liveState()))
+  /* ---------- RBAC ---------- */
+  if (pathname === '/admin/api/roles' && method === 'GET') {
+    if (!guard(PERM.roles)) return deny(PERM.roles)
+    return send(res, { roles: listRoles(), permissions: listPermissionCatalog() })
+  }
+  if (seg[0] === 'roles' && seg[1] && method === 'PUT') {
+    if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
+    const before = listRoles().find((role) => role.id === Number(seg[1]))
+    const updated = updateRolePermissions(Number(seg[1]), body.permissions ?? [])
+    log('admin.role.update', 'role', seg[1], before, updated)
+    return send(res, updated)
+  }
+  if (pathname === '/admin/api/admins' && method === 'GET') {
+    if (!guard(PERM.roles)) return deny(PERM.roles)
+    return send(res, { list: listAdmins() })
+  }
+  if (seg[0] === 'admins' && seg[1] && seg[2] === 'roles' && method === 'PUT') {
+    if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
+    const updated = setAdminRoles(Number(seg[1]), body.roles ?? [])
+    log('admin.roles.update', 'admin', seg[1], null, body)
+    return send(res, updated)
+  }
+  if (pathname === '/admin/api/audit' && method === 'GET') {
+    if (!guard(PERM.audit)) return deny(PERM.audit)
+    return send(res, { list: listAudit({ limit: Number(url.searchParams.get('limit') ?? 100), action: url.searchParams.get('action') ?? undefined }) })
   }
 
-  return send(res, fail('0404', `未知后台接口 ${method} ${pathname}`), 404)
+  /* ---------- 支付配置 ---------- */
+  if (pathname === '/admin/api/pay-settings' && method === 'GET') {
+    if (!guard(PERM.paySettings)) return deny(PERM.paySettings)
+    const pay = getSetting('pay', {})
+    return send(res, {
+      pay,
+      usdtRate: getSetting('site', {}).usdtRate ?? 7.2,
+    })
+  }
+  if (pathname === '/admin/api/pay-settings' && method === 'PUT') {
+    if (!guard(PERM.paySettings)) return deny(PERM.paySettings)
+    const before = getSetting('pay', {})
+    setSetting('pay', body.pay ?? before)
+    if (body.usdtRate) setSetting('site', { ...getSetting('site', {}), usdtRate: Number(body.usdtRate) })
+    log('admin.pay.settings', 'settings', 'pay', before, body.pay)
+    return send(res, { ok: true })
+  }
+
+  return send(res, {}, '0404', '接口不存在', 404)
 }

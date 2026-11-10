@@ -1,128 +1,85 @@
-# 影巢（mh-clone）· 视频站全栈复刻
+# 影巢（video-rr）· C 端内容付费平台
 
-对标 `https://mh.yichengwlkj.com/pc` 的功能级复刻，**C 端 + 运营后台 + 视频转码 + 直播推流**一整条链，零外部依赖（Node 内置 `http`/`sqlite`/`crypto`，ffmpeg 只做转码）。
+对标 `https://mh.yichengwlkj.com/pc` 的**付费点播**全栈实现：内容 → 权益判定 → 套餐/单片 → 订单支付 → 退款对账 → 后台 RBAC，全部可跑通。**无直播模块**（无直播场景，已整体移除）。
 
 ```
-C 端  public/            /api/*             ← 首页/分类/榜单/搜索/详情/播放/我的/直播
-后台  admin/             /admin/api/*       ← 剧集/分集/上传/转码/运营/榜单/审核/订单/直播
-媒体  上传 → ffmpeg → HLS 720p → /media/hls/<episodeId>/index.m3u8
-直播  OBS/ffmpeg --rtmp--> MediaMTX:1935 --> HLS:8888 --> /live/<key>/index.m3u8（本站反代）
-数据  storage/app.db (SQLite)
+C 端  public/         /api/*            首页/分类/榜单/搜索/详情/播放/购买/我的
+后台  admin/          /admin/api/*      内容/付费策略/套餐/优惠券/订单/退款/对账/权限/审计
+媒体  上传 → ffmpeg → HLS 720p+480p → 签名播放（Cookie secure_link）
+数据  SQLite（WAL）
 ```
 
 ## 启动
 
 ```bash
 cd mh-clone
-node server/index.mjs          # 或 npm start
+npm start                 # node server/index.mjs
+npm test                  # node --test（12 项：权益矩阵/订单幂等/优惠券/双人复核/RBAC/签名）
 ```
 
 | 入口 | 地址 | 账号 |
 |---|---|---|
-| C 端 | <http://127.0.0.1:8787/> | 手机号直接登录（演示，任意 `1xxxxxxxxxx`） |
-| 后台 | <http://127.0.0.1:8787/admin> | `admin` / `admin123` |
-| 数据库 | `storage/app.db` | `npm run reset-db` 可清库重建 |
+| C 端 | <http://127.0.0.1:8787/> | 任意 `1xxxxxxxxxx` 手机号登录 |
+| 后台 | <http://127.0.0.1:8787/admin> | `admin/admin123`（超管）、`ops01`（内容运营）、`fin01`（财务）、`cs01`（客服） |
+| 线上 | <https://hk.hsddns.com/video/> · <https://hk.hsddns.com/video-admin/> | 同上 |
 
-首次启动会用 `data/seed.json`（抓包归一）建库：33 部剧 / 198 集 / 4 个首页楼层 / 4 个榜单。
+## 商业化规则（已实现）
 
-## 已实现
-
-### C 端
-- 首页：Banner + 多楼层海报流 +「换一换」；左侧频道导航；顶部搜索
-- 分类 / 榜单（容器 + 名次）/ 搜索（含热搜词与空态）
-- 详情：评分/年份/地区/演员位/简介/选集（VIP 标记）
-- 播放：**真实 HLS 播放**（hls.js），VIP 集需登录；播放进度写历史
-- 我的：登录后同步观看历史 / 收藏；直播页播放 HLS 直播流
-- 右下 VIP 订阅卡、登录弹窗
-
-### 运营后台
-- 概览：剧集/分集/就绪数、转码队列、待审数量、用户与收入、直播状态
-- 剧集管理：增删改查、封面/简介/收费/上下架
-- 分集与视频：新增分集、**上传视频自动转码**、生成示例视频、进度条、失败原因、删除
-- 首页运营：Banner 增删/启停、楼层增删、往楼层挂剧集
-- 榜单：榜单增删、按名次加条目
-- 内容审核：弹幕/评论 通过/驳回
-- 用户与订单：用户列表（VIP 状态）、新建订单、标记已支付（自动开通 VIP）
-- 直播推流：一键启停 MediaMTX、频道增删、复制推流地址、RTMP/HLS 地址展示
-
-### 视频链路
-- 上传：`POST /admin/api/episodes/:id/upload`（原始二进制，流式落盘）
-- 探测：`ffprobe` 取时长/分辨率 → 写库
-- 转码：`ffmpeg` → H.264 720p + AAC，4 秒切片，`-progress pipe:1` 进度回写数据库
-- 播放：`/media/hls/<id>/index.m3u8`，静态服务带 **Range** 支持
-- 直播：MediaMTX（`storage/tools/mediamtx.exe`）RTMP 入流、HLS 出流，本站 `/live/*` 反代
-
-## 实测记录（本机）
-
-| 项目 | 结果 |
+| 规则 | 实现 |
 |---|---|
-| 示例视频转码 | 20s 源 → `index.m3u8` + 5 个 `.ts`（约 7.6 MB），进度 0→100，耗时 ~15s |
-| 播放 | C 端播放页出画面（hls.js + `<video>`，时间码在走） |
-| 直播 | `ffmpeg -re -f lavfi ... -f flv rtmp://127.0.0.1:1935/live/demo` 推流 → `/live/demo/index.m3u8` HTTP 200 → C 端直播页出画面 |
-| 后台 | 登录 → 概览/剧集/分集/直播页均正常，队列与状态实时刷新 |
+| 免费 1 集 | `content_policies.free_episodes`，默认剧集 1 集、电影可配 |
+| 订阅看全站剧集 | `plans`（月/季/年，scope=all）+ `subscriptions`（有效期、续费顺延） |
+| 高价值单独购买 | `content_policies.access_mode='paid'` + `single_price_cny` + `purchases`（买断/租赁） |
+| 判定顺序 | 单片所有权 > 订阅 > 免费集 > 试看 > 拒绝（`server/entitlements.mjs` 唯一入口） |
+| 播放防盗链 | 播放接口下发 10 分钟签名 Cookie，nginx `secure_link` 校验，直连切片 403 |
+| 订单状态机 | `created → created/paid → fulfilled`；15 分钟未付自动关单；回调按 `channel_txn_id` 幂等 |
+| 支付渠道 | 支付宝（RSA2 验签，需配置商户参数）、USDT（TRC20，确认数 ≥19）、mock（仅演示） |
+| 退款 | 发起 → **双人复核**（发起人不能审批）→ 回收权益 → 订单标记已退款 |
+| 对账 | `/admin/api/reconcile`：补支付、补权益、发现孤儿支付 |
+| 优惠券 | 满减/折扣、门槛、总量、有效期，下单核销并计数 |
+
+## 后台权限（RBAC）
+
+- 6 个角色：超管 / 内容运营 / 财务 / 客服 / 审核员 / 数据分析
+- 权限点 `<域>.<对象>.<动作>`（24 个），**接口层校验是唯一可信层**，菜单按权限渲染
+- 审计：每次写操作记录人、IP、动作、对象、改前/改后、原因、结果；越权尝试记为 `rbac.denied`
+- 敏感操作：删除/退款/禁用/改策略需填原因；退款 ≥ 任意金额都需第二位管理员审批
 
 ## 目录
 
 ```
-mh-clone/
-  server/
-    index.mjs        入口：静态 + 路由 + 上传流 + 媒体 Range + 直播反代
-    db.mjs           SQLite 建表与种子
-    auth.mjs         scrypt 口令 + HMAC token
-    media.mjs        ffprobe / ffmpeg HLS 转码队列
-    live.mjs         MediaMTX 托管与状态
-    api-public.mjs   C 端接口
-    api-admin.mjs    后台接口
-  public/            C 端 SPA
-  admin/             后台 SPA
-  data/seed.json     抓包归一的种子数据
-  storage/           app.db / uploads / hls / tools(mediamtx)
-  docs/API-ADMIN.md  后台接口清单
-  docs/LIVE.md       直播部署与推流说明
+server/
+  index.mjs       入口：静态 + 路由 + 上传流 + 媒体签名校验
+  db.mjs          表结构 + 种子（权限/角色/管理员/内容策略/套餐/优惠券）
+  entitlements.mjs 权益判定 + 播放签名（secure_link 兼容）
+  commerce.mjs    下单/支付回调/发放/退款/对账/关单
+  rbac.mjs        角色权限 + 审计
+  media.mjs       ffprobe / ffmpeg 多码率 HLS 队列
+  api-public.mjs  C 端接口
+  api-admin.mjs   后台接口
+public/ admin/    两个 SPA（原生 ESM，无构建）
+deploy/            HK 部署脚本、nginx 片段、压测、容量评估
+docs/              COMMERCE.md（资金与权益设计）、API-ADMIN.md、REVIEW-paid-product.md（评审）
+test/              node:test 回归
 ```
 
-## 线上部署（HK 已上线）
-
-| 入口 | 地址 |
-|---|---|
-| C 端 | **https://hk.hsddns.com/video/** |
-| 后台 | **https://hk.hsddns.com/video-admin/**（`admin` / `admin123`，**上线后请立刻改密码**） |
-| 代码 | https://github.com/luobobo896/video-rr |
-
-服务器：Debian 13 / 8 核 / 7.8G 内存 / Node v24.21 / nginx 1.26 / ffmpeg 7.1。部署方式：
+## 部署（HK 已验证）
 
 ```bash
 git clone https://github.com/luobobo896/video-rr.git /opt/video-rr
-cd /opt/video-rr && bash deploy/install-hk.sh      # 幂等：服务 + MediaMTX + nginx 子路径 + 并发参数
-bash deploy/verify-hk.sh                            # 验证：子路径、登录、转码、HLS 可达
-node deploy/loadtest.mjs --url https://127.0.0.1/video/media/hls/1/index.m3u8 \
-  --host hk.hsddns.com --insecure --concurrent 1000 --seconds 20
+cd /opt/video-rr && bash deploy/install-hk.sh    # 幂等：服务 + nginx 子路径 + 播放签名密钥
 ```
 
-nginx 侧：`/video/` 静态 + `/video/api/` 反代 Node + `/video/media/hls/` 直接吐切片（sendfile/aio）+ `/video/live/` 反代 MediaMTX；后台同套规则。`worker_connections` 由 768 提到 65535，`worker_rlimit_nofile 100000`（脚本自动改，带备份）。
+nginx：`/video/` 静态、`/video/api/` 反代、`/video/media/hls/` 走 `secure_link`、`/video-admin/*` 后台。
+播放签名密钥在 `.env` 的 `MH_LINK_SECRET`，安装脚本注入 nginx。
 
-**实测 1000 并发**（服务器本机 loopback，480p 切片）：11116 请求 / 0 错误 / 峰值并发 1000 / **1146 Mbps**；3000 并发同样 0 错误。注意：loopback 只证明「软件能扛」，不代表公网出口。
+## 容量
 
-**公网出口实测只有 ≈19 Mbps**（8 路并行仍 2.27 MB/s，上下行对称）→ 单机最多约 **22 人 480p / 8 人 720p**。要做到 1000–5000 人点播，必须「切片上对象存储 + CDN」，或换 ≥1 Gbps 独服；详细换算、成本与改造步骤见 **[deploy/CAPACITY.md](deploy/CAPACITY.md)**。
+实测出口 **19 Mbps**（1000 人 480p 需 850 Mbps），单机约 22 人 480p。软件并发已验证 1000/3000 连接 0 错误。
+要 1000–5000 人必须「切片上对象存储 + CDN」或 ≥1 Gbps 独服，详见 [deploy/CAPACITY.md](deploy/CAPACITY.md)。
 
-小结：**Node 够用**（只做 API/后台/鉴权，视频字节由 nginx 或 CDN 出）；决定并发的是带宽与 CDN，不是 Node。
+## 已知边界
 
-## 上生产还缺什么
-
-素材：原站 CDN（`img.bwcgee.cn`）对 HK 服务器返回 403，且 HTTPS 页面不能加载 http 图片，所以封面/横幅已**镜像到本地** `storage/images/`（`scripts/mirror-images.mjs` + `scripts/rewrite-cover-urls.mjs`），线上走 `/video/media/images/`。缺封面的剧集自动用 `/media/placeholder.svg?t=剧名` 生成占位图。
-
-## 上生产还缺什么
-
-1. **多码率**：现在单档 720p；要 1080p/480p 就用同一份源跑三档 + 生成 master playlist（HLS `EXT-X-STREAM-INF`）。
-2. **鉴权防盗链**：HLS 用短期签名 URL / token 或 AES-128 密钥轮换；VIP 集做服务端解密校验。
-3. **CDN**：切片上对象存储 + CDN，回源鉴权；本地 `/media` 只用于开发。
-4. **队列**：把 `media.mjs` 的串行队列换成 Redis/BullMQ + 多 worker，支持并发、重试、优先级。
-5. **直播**：MediaMTX 用 NSSM/Windows 服务或 systemd 托管；加推流鉴权（`authHTTPAddress`）、录制、转推、低延迟 WebRTC。
-6. **账号体系**：短信验证码、刷新 token、设备管理、风控。
-7. **支付**：接真实渠道（微信/支付宝），订单状态机 + 回调验签 + 对账。
-8. **弹幕**：WebSocket 实时下发 + 分片存储；现在是 HTTP 拉取审核通过的弹幕。
-9. **可观测性**：结构化日志、指标、转码失败告警。
-
-## 与原始抓包的关系
-
-接口形状、字段命名、页面结构来自对原站公开页面的分析（见 `API.md`）；品牌已替换为「影巢」，封面仍指向原站 CDN —— **正式上线必须换成自有或已授权素材**。
+- 支付宝/USDT 为**真实协议实现但未配置商户参数**，线上仍需填 appId/私钥/公钥、收款地址；mock 渠道生产必须关闭。
+- 试看（trial）为前端按秒截断 + 180 秒短签名，属防君子不防小人；要硬防需切片级加密。
+- 素材为原站海报镜像，正式运营前替换为自有版权内容。

@@ -1,61 +1,49 @@
 #!/usr/bin/env bash
-# 部署后验证：子路径可达、后台登录、示例转码、HLS 可播放
+# 线上验收（付费链路 + 权限 + 防盗链）
 set -uo pipefail
 DOMAIN=hk.hsddns.com
 BASE="https://$DOMAIN"
 CURL="curl -sk --resolve $DOMAIN:443:127.0.0.1"
+jq_code() { python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))"; }
 
-echo "=== 1. 子路径可达性 ==="
-for p in /video/ /video-admin/ /video/app.js /video-admin/app.js /video/api/constants; do
-  code=$($CURL -o /dev/null -w '%{http_code}' "$BASE$p")
-  printf '  %-26s %s\n' "$p" "$code"
+echo "=== 1. 子路径 ==="
+for p in /video/ /video-admin/ /video/api/constants; do
+  printf '  %-24s %s\n' "$p" "$($CURL -o /dev/null -w '%{http_code}' "$BASE$p")"
 done
 
-echo "=== 2. 后台登录 ==="
-TOKEN=$($CURL -X POST "$BASE/video-admin/api/login" \
-  -H 'content-type: application/json' \
-  -d '{"username":"admin","password":"admin123"}' \
-  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).data.token)}catch{console.log("")}})')
-if [ -z "$TOKEN" ]; then echo "  登录失败"; exit 1; fi
-echo "  token ${TOKEN:0:16}…"
+echo "=== 2. 未签名切片必须 403 ==="
+printf '  unsigned hls           %s\n' "$($CURL -o /dev/null -w '%{http_code}' "$BASE/video/media/hls/1/index.m3u8")"
 
-echo "=== 3. 概览 ==="
-$CURL "$BASE/video-admin/api/stats" -H "authorization: Bearer $TOKEN" | head -c 400
-echo
+echo "=== 3. 后台登录 + 权限 ==="
+TOKEN=$($CURL -X POST "$BASE/video-admin/api/login" -H 'content-type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' | jq_code data.token)
+echo "  admin token ${TOKEN:0:16}…"
+$CURL "$BASE/video-admin/api/me" -H "authorization: Bearer $TOKEN" | python3 -c \
+  "import sys,json;d=json.load(sys.stdin)['data'];print('  roles',[r['code'] for r in d['roles']],'perms',len(d['permissions']))"
 
-echo "=== 4. 触发示例转码（20s，720p+480p）==="
-EP=$($CURL "$BASE/video-admin/api/dramas/1/episodes" -H "authorization: Bearer $TOKEN" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const list=j.data.list||[];console.log(list[0]?list[0].id:"")})')
-echo "  分集 id=$EP"
-$CURL -X POST "$BASE/video-admin/api/episodes/$EP/sample" \
-  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"seconds":20}' | head -c 300
-echo
+OPS=$($CURL -X POST "$BASE/video-admin/api/login" -H 'content-type: application/json' \
+  -d '{"username":"ops01","password":"admin123"}' | jq_code data.token)
+printf '  内容运营调退款列表       %s（应 403）\n' "$($CURL -o /dev/null -w '%{http_code}' "$BASE/video-admin/api/refunds" -H "authorization: Bearer $OPS")"
 
-echo "=== 5. 等转码完成 ==="
-for i in $(seq 1 40); do
-  sleep 3
-  JOBS=$($CURL "$BASE/video-admin/api/jobs" -H "authorization: Bearer $TOKEN")
-  running=$(echo "$JOBS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(j.data.running?1:0)})')
-  pending=$(echo "$JOBS" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(j.data.pending)})')
-  echo "  t=${i} running=$running pending=$pending"
-  if [ "$running" = "0" ] && [ "$pending" = "0" ]; then break; fi
-done
+echo "=== 4. C 端：登录 → 未授权播放 402 → 下单 → 支付 → 再播放 ==="
+USER=$($CURL -X POST "$BASE/video/api/auth/login" -H 'content-type: application/json' -d '{"phone":"13900000001"}' | jq_code data.token)
+DRAMA=$($CURL "$BASE/video/api/home" | python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(d['sections'][0]['items'][0]['dramaId'])")
+echo "  测试剧集 #$DRAMA"
+printf '  未订阅播放第 5 集        %s（应 402）\n' "$($CURL -o /dev/null -w '%{http_code}' "$BASE/video/api/play/$DRAMA/5" -H "authorization: Bearer $USER")"
+ORDER=$($CURL -X POST "$BASE/video/api/orders" -H "authorization: Bearer $USER" -H 'content-type: application/json' \
+  -d '{"productType":"subscription","planId":1,"channel":"mock"}' | jq_code data.outTradeNo)
+echo "  订单 $ORDER"
+$CURL -X POST "$BASE/video/api/pay/mock" -H 'content-type: application/json' -d "{\"outTradeNo\":\"$ORDER\"}" | python3 -c \
+  "import sys,json;d=json.load(sys.stdin)['data'];print('  支付结果',d['order']['status'],'重复',d['duplicate'])"
+printf '  订阅后播放第 5 集        %s（应 200）\n' "$($CURL -o /dev/null -w '%{http_code}' "$BASE/video/api/play/$DRAMA/5" -H "authorization: Bearer $USER")"
 
-echo "=== 6. 分集状态 ==="
-$CURL "$BASE/video-admin/api/dramas/1/episodes" -H "authorization: Bearer $TOKEN" \
-  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const e=(j.data.list||[])[0]||{};console.log(JSON.stringify({id:e.id,no:e.no,status:e.status,progress:e.progress,hls:e.hls_path,error:e.error}))})'
+echo "=== 5. 播放签名 Cookie 有效 ==="
+$CURL -c /tmp/mh_cookie.txt -o /dev/null "$BASE/video/api/play/$DRAMA/5" -H "authorization: Bearer $USER"
+printf '  带 Cookie 取 m3u8        %s（应 200/404，403 为失败）\n' "$($CURL -b /tmp/mh_cookie.txt -o /dev/null -w '%{http_code}' "$BASE/video/media/hls/1/index.m3u8")"
+rm -f /tmp/mh_cookie.txt
 
-echo "=== 7. HLS 产物 ==="
-ls -ld /opt/video-rr/storage/hls/*/ 2>/dev/null | tail -3
-find /opt/video-rr/storage/hls -name 'index.m3u8' | head -5
+echo "=== 6. 对账 ==="
+$CURL -X POST "$BASE/video-admin/api/reconcile" -H "authorization: Bearer $TOKEN" | python3 -c \
+  "import sys,json;d=json.load(sys.stdin)['data'];print('  缺失支付',d['missingPayment'],'孤儿支付',d['orphanPayment'],'待补发',d['stuckPaid'])"
 
-echo "=== 8. 公网 HLS 可达性（经 nginx）==="
-for p in "/video/media/hls/$EP/index.m3u8" "/video/media/hls/$EP/480p/index.m3u8"; do
-  code=$($CURL -o /dev/null -w '%{http_code}' "$BASE$p")
-  printf '  %-48s %s\n' "$p" "$code"
-done
-
-echo "=== 9. C 端播放接口 ==="
-$CURL "$BASE/video/api/play/1/1" | head -c 300
-echo
 echo "完成"

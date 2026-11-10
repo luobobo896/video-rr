@@ -6,13 +6,20 @@ const view = $('#view')
 const nav = $('#nav')
 
 const NAV = [
-  ['dashboard', '概览'],
-  ['dramas', '剧集管理'],
-  ['ops', '首页运营'],
-  ['ranks', '榜单'],
-  ['review', '内容审核'],
-  ['users', '用户与订单'],
-  ['live', '直播推流'],
+  ['dashboard', '概览', 'dashboard.read'],
+  ['dramas', '剧集管理', 'content.drama.read'],
+  ['policies', '付费策略', 'content.drama.read'],
+  ['plans', '套餐定价', 'commerce.plan.write'],
+  ['coupons', '优惠券', 'commerce.coupon.write'],
+  ['orders', '订单', 'finance.order.read'],
+  ['refunds', '退款审核', 'finance.refund.create'],
+  ['ops', '首页运营', 'ops.banner.write'],
+  ['ranks', '榜单', 'ops.rank.write'],
+  ['review', '内容审核', 'content.review'],
+  ['users', '用户', 'user.read'],
+  ['roles', '角色权限', 'admin.read'],
+  ['audit', '审计日志', 'audit.read'],
+  ['pay', '支付配置', 'admin.write'],
 ]
 
 const state = { token: localStorage.getItem('mh-admin-token') ?? '', page: 'dashboard', params: {}, timers: [] }
@@ -74,14 +81,18 @@ function logout() {
 
 /* ---------------- 路由 ---------------- */
 function renderNav() {
-  nav.innerHTML = NAV.map(([key, label]) => `<a class="nav-item ${state.page === key ? 'active' : ''}" href="#/${key}">${label}</a>`).join('')
+  const perms = new Set(state.me?.permissions ?? [])
+  nav.innerHTML = NAV.filter(([, , perm]) => perms.has(perm))
+    .map(([key, label]) => `<a class="nav-item ${state.page === key ? 'active' : ''}" href="#/${key}">${label}</a>`).join('')
+  const who = $('#whoami')
+  if (who) who.textContent = state.me ? `${state.me.admin.displayName ?? state.me.admin.username} · ${(state.me.roles ?? []).map((role) => role.name).join(' / ')}` : ''
 }
 
 window.addEventListener('hashchange', () => route())
 
 async function boot() {
   try {
-    await api('/admin/api/me')
+    state.me = await api('/admin/api/me')
   } catch { logout(); return }
   $('#login').classList.add('hidden')
   $('#shell').classList.remove('hidden')
@@ -99,11 +110,18 @@ async function route() {
   try {
     if (key === 'dashboard') await pageDashboard()
     else if (key === 'dramas') await pageDramas()
+    else if (key === 'policies') await pagePolicies()
+    else if (key === 'plans') await pagePlans()
+    else if (key === 'coupons') await pageCoupons()
+    else if (key === 'orders') await pageOrders()
+    else if (key === 'refunds') await pageRefunds()
     else if (key === 'ops') await pageOps()
     else if (key === 'ranks') await pageRanks()
     else if (key === 'review') await pageReview()
     else if (key === 'users') await pageUsers()
-    else if (key === 'live') await pageLive()
+    else if (key === 'roles') await pageRoles()
+    else if (key === 'audit') await pageAudit()
+    else if (key === 'pay') await pagePay()
   } catch (error) {
     view.innerHTML = `<div class="panel">加载失败：${esc(error.message)}</div>`
   }
@@ -469,96 +487,289 @@ const reviewButtons = (table, row) => `
   <button class="btn sm" data-review="${table}:${row.id}:approve">通过</button>
   <button class="btn sm danger" data-review="${table}:${row.id}:reject">驳回</button>`
 
-/* ---------------- 用户与订单 ---------------- */
+/* ---------------- 用户 ---------------- */
 async function pageUsers() {
-  const [users, orders] = await Promise.all([api('/admin/api/users'), api('/admin/api/orders')])
-  view.innerHTML = `
-    <div class="panel"><h3>用户 <span class="muted">${users.list.length}</span></h3>
-      <table><thead><tr><th>ID</th><th>手机号</th><th>昵称</th><th>VIP</th><th>到期</th></tr></thead><tbody>
-        ${users.list.map((row) => `<tr><td>${row.id}</td><td class="mono">${esc(row.phone ?? '')}</td><td>${esc(row.nickname)}</td>
-          <td>${row.is_vip ? '<span class="pill warn">VIP</span>' : '<span class="pill">普通</span>'}</td><td class="muted">${esc(row.vip_expire_at ?? '—')}</td></tr>`).join('')}
-      </tbody></table>
-    </div>
-    <div class="panel"><h3>订单 <span class="muted">收入 ¥${fmt(orders.revenue)}</span><span class="spacer"></span>
-        <button class="btn primary" id="new-order">新建订单</button></h3>
-      <table><thead><tr><th>ID</th><th>用户</th><th>SKU</th><th>金额</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody>
-        ${orders.list.map((row) => `<tr><td>${row.id}</td><td>${esc(row.nickname ?? row.user_id)}</td><td>${esc(row.sku)}</td>
-          <td>¥${row.amount}</td><td>${row.status === 'paid' ? '<span class="pill ok">已支付</span>' : '<span class="pill warn">待支付</span>'}</td>
-          <td class="muted">${esc(row.created_at)}</td>
-          <td>${row.status === 'paid' ? '' : `<button class="btn sm" data-pay="${row.id}">标记已支付</button>`}</td></tr>`).join('')}
-      </tbody></table>
-    </div>`
-  $('#new-order').addEventListener('click', async () => {
-    await api('/admin/api/orders', { method: 'POST', body: { userId: 1, sku: 'vip-year', amount: 88 } })
-    await pageUsers()
-  })
-  view.querySelectorAll('[data-pay]').forEach((button) => {
+  const data = await api('/admin/api/users')
+  const rows = data.list.map((row) => `<tr>
+    <td>${row.id}</td>
+    <td class="mono">${esc(row.phone ?? '')}</td>
+    <td>${esc(row.nickname)}</td>
+    <td>${row.status === 'banned' ? '<span class="pill bad">已禁用</span>' : '<span class="pill ok">正常</span>'}</td>
+    <td>${esc(row.vip_until ?? '—')}</td>
+    <td>${row.order_count}</td>
+    <td>¥${Number(row.paid_total).toFixed(2)}</td>
+    <td><button class="btn sm" data-toggle="${row.id}" data-status="${row.status === 'banned' ? 'active' : 'banned'}">${row.status === 'banned' ? '解禁' : '禁用'}</button></td>
+  </tr>`)
+  view.innerHTML = `<div class="panel">
+    <h3>用户<span class="spacer"></span></h3>
+    <table><thead><tr><th>ID</th><th>手机号</th><th>昵称</th><th>状态</th><th>会员到期</th><th>订单数</th><th>累计付费</th><th>操作</th></tr></thead>
+    <tbody>${rows.join('')}</tbody></table>
+    <p class="muted">客服补发权益：POST /admin/api/cs/grant（需 cs.toolkit 权限）。</p>
+  </div>`
+  view.querySelectorAll('[data-toggle]').forEach((button) => {
     button.addEventListener('click', async () => {
-      await api(`/admin/api/orders/${button.dataset.pay}/pay`, { method: 'POST', body: {} })
-      toast('已标记支付并开通 VIP')
+      const reason = prompt('操作原因（必填）')
+      if (!reason) return
+      await api(`/admin/api/users/${button.dataset.toggle}/status`, { method: 'POST', body: { status: button.dataset.status, reason } })
+      toast('已更新用户状态')
       await pageUsers()
     })
   })
 }
 
-/* ---------------- 直播 ---------------- */
-async function pageLive() {
-  const live = await api('/admin/api/live')
-  view.innerHTML = `
-    <div class="panel">
-      <h3>推流服务 <span class="spacer"></span>
-        <button class="btn ${live.running ? 'danger' : 'primary'}" id="toggle-live">${live.running ? '停止 MediaMTX' : '启动 MediaMTX'}</button>
-      </h3>
-      <div class="split">
-        <div>
-          <div class="muted">状态</div>
-          <div style="margin:6px 0 14px">${live.running ? '<span class="pill ok">运行中</span>' : live.installed ? '<span class="pill">已安装未启动</span>' : '<span class="pill bad">未安装</span>'}</div>
-          <div class="muted">RTMP 入流（OBS 推流地址，串流密钥 = key）</div>
-          <div class="mono" style="margin:6px 0 14px">${esc(live.rtmpBase)}/&lt;key&gt;</div>
-          <div class="muted">HLS 出流（播放器/浏览器）</div>
-          <div class="mono" style="margin:6px 0 14px">${esc(live.hlsBase)}/&lt;key&gt;/index.m3u8</div>
-          ${live.lastError ? `<div class="muted" style="color:#ffb4b4">${esc(live.lastError)}</div>` : ''}
-        </div>
-        <div>
-          <div class="muted">用 ffmpeg 模拟一路推流（本机测试）</div>
-          <pre class="mono" style="background:var(--panel-2);padding:10px;border-radius:8px;white-space:pre-wrap">ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 -c:v libx264 -preset veryfast -g 60 -c:a aac -f flv rtmp://127.0.0.1:1935/live/demo</pre>
-          <div class="muted">推上去后，把 <span class="mono">/live/demo/index.m3u8</span> 填进 C 端播放器即可看到画面。</div>
-        </div>
-      </div>
+/* ---------------- 通用小工具 ---------------- */
+function panel(title, body, extra = '') {
+  return `<div class="panel"><h3>${title}<span class="spacer"></span>${extra}</h3>${body}</div>`
+}
+function table(headers, rows) {
+  return `<table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
+}
+const pillOf = (status) => {
+  const map = {
+    fulfilled: ['ok', '已支付'], paid: ['ok', '已支付'], created: ['', '待支付'], pending: ['', '待支付'],
+    closed: ['bad', '已关闭'], refunded: ['bad', '已退款'], refunding: ['', '退款中'],
+    active: ['ok', '启用'], disabled: ['', '停用'], draft: ['', '草稿'], published: ['ok', '已上架'],
+    approved: ['ok', '已通过'], rejected: ['bad', '已驳回'], done: ['ok', '已完成'],
+  }
+  const [cls, label] = map[status] ?? ['', status]
+  return `<span class="pill ${cls}">${esc(label)}</span>`
+}
+
+/* ---------------- 付费策略 ---------------- */
+async function pagePolicies() {
+  const data = await api('/admin/api/dramas')
+  const rows = data.list.map((drama) => {
+    const policy = drama.policy ?? { access_mode: 'subscription', free_episodes: 1, trial_seconds: 0, single_price_cny: 0 }
+    return `<tr data-row="${drama.id}">
+      <td>${drama.id}</td>
+      <td>${esc(drama.title)}</td>
+      <td><select data-f="accessMode">${['free', 'subscription', 'paid'].map((mode) => `<option value="${mode}" ${policy.access_mode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select></td>
+      <td><input data-f="freeEpisodes" type="number" min="0" value="${policy.free_episodes}" style="width:70px" /></td>
+      <td><input data-f="trialSeconds" type="number" min="0" value="${policy.trial_seconds}" style="width:80px" /></td>
+      <td><input data-f="singlePrice" type="number" min="0" step="0.01" value="${policy.single_price_cny}" style="width:80px" /></td>
+      <td><button class="btn sm primary" data-save="${drama.id}">保存</button></td>
+    </tr>`
+  })
+  view.innerHTML = panel('内容付费策略', `
+    <p class="muted">access_mode：free=免费 / subscription=会员 / paid=单片付费；free_episodes=前几集免费；trial_seconds=未授权试看秒数。</p>
+    ${table(['ID', '剧名', '模式', '免费集', '试看(秒)', '单片价', '保存'], rows)}`)
+  view.querySelectorAll('[data-save]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const row = button.closest('tr')
+      const value = (name) => row.querySelector(`[data-f="${name}"]`).value
+      await api(`/admin/api/dramas/${button.dataset.save}/policy`, {
+        method: 'PUT',
+        body: {
+          accessMode: value('accessMode'),
+          freeEpisodes: Number(value('freeEpisodes')),
+          trialSeconds: Number(value('trialSeconds')),
+          singlePrice: Number(value('singlePrice')),
+        },
+      })
+      toast('策略已保存')
+    })
+  })
+}
+
+/* ---------------- 套餐 ---------------- */
+async function pagePlans() {
+  const data = await api('/admin/api/plans')
+  const rows = data.list.map((plan) => `<tr>
+    <td>${plan.id}</td><td class="mono">${esc(plan.code)}</td><td>${esc(plan.name)}</td>
+    <td>¥${Number(plan.price_cny).toFixed(2)}</td><td>${plan.duration_days}</td><td>${esc(plan.scope)}</td>
+    <td>${pillOf(plan.status)}</td>
+    <td><button class="btn sm" data-toggle-plan="${plan.id}" data-status="${plan.status === 'active' ? 'disabled' : 'active'}">${plan.status === 'active' ? '下架' : '上架'}</button></td>
+  </tr>`)
+  view.innerHTML = panel('套餐定价', `
+    <div class="form-row">
+      <input id="plan-name" placeholder="套餐名（月卡会员）" />
+      <input id="plan-days" type="number" placeholder="天数" value="30" style="width:90px" />
+      <input id="plan-price" type="number" step="0.01" placeholder="价格" style="width:100px" />
+      <button class="btn primary" id="plan-add">新增套餐</button>
     </div>
-    <div class="panel">
-      <h3>直播频道<span class="spacer"></span><button class="btn primary" id="add-stream">新增频道</button></h3>
-      <table><thead><tr><th>ID</th><th>名称</th><th>key</th><th>状态</th><th>操作</th></tr></thead><tbody>
-        ${live.streams.map((stream) => `<tr>
-          <td>${stream.id}</td><td>${esc(stream.name)}</td><td class="mono">${esc(stream.stream_key)}</td>
-          <td>${stream.status === 'active' ? '<span class="pill ok">推流中</span>' : '<span class="pill">空闲</span>'}</td>
-          <td class="row-actions">
-            <button class="btn sm" data-copy="${esc(live.rtmpBase)}/${esc(stream.stream_key)}">复制推流地址</button>
-            <button class="btn sm danger" data-del-stream="${stream.id}">删除</button>
-          </td></tr>`).join('')}
-      </tbody></table>
-    </div>`
-  $('#toggle-live').addEventListener('click', async () => {
-    await api('/admin/api/live', { method: 'POST', body: { action: live.running ? 'stop' : 'start' } })
-    await pageLive()
+    ${table(['ID', '编码', '名称', '价格', '天数', '范围', '状态', '操作'], rows)}`)
+  $('#plan-add').addEventListener('click', async () => {
+    const name = $('#plan-name').value.trim()
+    if (!name) return toast('请填套餐名')
+    await api('/admin/api/plans', {
+      method: 'POST',
+      body: { name, days: Number($('#plan-days').value || 30), price: Number($('#plan-price').value || 0), code: `plan-${Date.now()}` },
+    })
+    await pagePlans()
   })
-  $('#add-stream').addEventListener('click', async () => {
-    const name = prompt('频道名称')
-    if (!name) return
-    const key = prompt('推流 key（英文/数字）', `live${Date.now()}`) ?? `live${Date.now()}`
-    await api('/admin/api/live', { method: 'POST', body: { action: 'create', name, key } })
-    await pageLive()
-  })
-  view.querySelectorAll('[data-copy]').forEach((button) => {
+  view.querySelectorAll('[data-toggle-plan]').forEach((button) => {
     button.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(button.dataset.copy); toast('已复制') } catch { toast(button.dataset.copy) }
+      await api(`/admin/api/plans/${button.dataset.togglePlan}`, { method: 'PUT', body: { status: button.dataset.status } })
+      await pagePlans()
     })
   })
-  view.querySelectorAll('[data-del-stream]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      await api('/admin/api/live', { method: 'POST', body: { action: 'delete', id: Number(button.dataset.delStream) } })
-      await pageLive()
+}
+
+/* ---------------- 优惠券 ---------------- */
+async function pageCoupons() {
+  const data = await api('/admin/api/coupons')
+  const rows = data.list.map((coupon) => `<tr>
+    <td>${coupon.id}</td><td class="mono">${esc(coupon.code)}</td><td>${esc(coupon.name)}</td>
+    <td>${coupon.discount_type === 'amount' ? '立减' : '折扣'}</td>
+    <td>${coupon.discount_type === 'amount' ? '¥' + coupon.discount_value : coupon.discount_value + '%'}</td>
+    <td>¥${coupon.min_amount}</td><td>${coupon.used}/${coupon.total || '∞'}</td>
+    <td>${esc(coupon.valid_to ?? '—')}</td><td>${pillOf(coupon.status)}</td>
+    <td><button class="btn sm" data-c-status="${coupon.id}" data-status="${coupon.status === 'active' ? 'disabled' : 'active'}">${coupon.status === 'active' ? '停用' : '启用'}</button></td>
+  </tr>`)
+  view.innerHTML = panel('优惠券', `
+    <div class="form-row">
+      <input id="c-code" placeholder="券码（WELCOME10）" />
+      <input id="c-name" placeholder="名称" />
+      <select id="c-type"><option value="amount">立减</option><option value="percent">折扣(%)</option></select>
+      <input id="c-value" type="number" step="0.01" placeholder="面额/折扣" style="width:110px" />
+      <input id="c-min" type="number" step="0.01" placeholder="门槛" style="width:90px" />
+      <button class="btn primary" id="c-add">新增</button>
+    </div>
+    ${table(['ID', '券码', '名称', '类型', '面额', '门槛', '已用/总量', '有效期', '状态', '操作'], rows)}`)
+  $('#c-add').addEventListener('click', async () => {
+    await api('/admin/api/coupons', {
+      method: 'POST',
+      body: {
+        code: $('#c-code').value.trim(), name: $('#c-name').value.trim(),
+        discountType: $('#c-type').value, discountValue: Number($('#c-value').value || 0),
+        minAmount: Number($('#c-min').value || 0), total: 0, validTo: '2027-12-31',
+      },
     })
+    await pageCoupons()
+  })
+  view.querySelectorAll('[data-c-status]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await api(`/admin/api/coupons/${button.dataset.cStatus}`, { method: 'PUT', body: { status: button.dataset.status } })
+      await pageCoupons()
+    })
+  })
+}
+
+/* ---------------- 订单 ---------------- */
+async function pageOrders() {
+  const data = await api('/admin/api/orders')
+  const total = data.list.filter((order) => ['paid', 'fulfilled'].includes(order.status)).reduce((sum, order) => sum + order.amount_cny, 0)
+  const rows = data.list.map((order) => `<tr>
+    <td class="mono">${esc(order.out_trade_no)}</td>
+    <td>${esc(order.nickname ?? '')}<div class="muted" style="font-size:11px">${esc(order.phone ?? '')}</div></td>
+    <td>${order.product_type === 'subscription' ? '会员 · ' + esc(order.plan_name ?? '') : '单片 · ' + esc(order.drama_title ?? '')}</td>
+    <td>¥${Number(order.amount_cny).toFixed(2)}</td>
+    <td>${esc(order.channel)}</td>
+    <td>${pillOf(order.status)}</td>
+    <td class="muted">${esc(order.paid_at ?? order.created_at)}</td>
+    <td>${['paid', 'fulfilled'].includes(order.status) ? `<button class="btn sm danger" data-refund="${order.id}">发起退款</button>` : '—'}</td>
+  </tr>`)
+  view.innerHTML = panel('订单', `
+    <p class="muted">已支付合计 ¥${total.toFixed(2)}（最近 100 笔）</p>
+    ${table(['单号', '用户', '商品', '金额', '渠道', '状态', '时间', '操作'], rows)}`,
+  '<button class="btn" id="close-expired">关闭超时订单</button>')
+  $('#close-expired').addEventListener('click', async () => {
+    const result = await api('/admin/api/close-expired', { method: 'POST', body: {} })
+    toast(`已关闭 ${result.closed} 笔`)
+    await pageOrders()
+  })
+  view.querySelectorAll('[data-refund]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const reason = prompt('退款原因（必填，≥4 字）')
+      if (!reason) return
+      await api('/admin/api/refunds', { method: 'POST', body: { orderId: Number(button.dataset.refund), reason } })
+      toast('退款单已创建，需另一位管理员审批')
+      await pageOrders()
+    })
+  })
+}
+
+/* ---------------- 退款审核 ---------------- */
+async function pageRefunds() {
+  const data = await api('/admin/api/refunds')
+  const rows = data.list.map((refund) => `<tr>
+    <td>${refund.id}</td><td class="mono">${esc(refund.out_trade_no)}</td><td>${esc(refund.nickname ?? '')}</td>
+    <td>¥${Number(refund.amount).toFixed(2)}</td><td>${esc(refund.reason)}</td>
+    <td>${refund.status === 'pending' ? '<span class="pill">待审批</span>' : pillOf(refund.status)}</td>
+    <td class="row-actions">${refund.status === 'pending' ? `<button class="btn sm primary" data-approve="${refund.id}">通过</button>
+      <button class="btn sm danger" data-reject="${refund.id}">驳回</button>` : '—'}</td>
+  </tr>`)
+  view.innerHTML = panel('退款审核', `
+    <p class="muted">双人复核：发起人不能审批自己的退款单；通过后立即回收权益并标记订单已退款。</p>
+    ${table(['ID', '单号', '用户', '金额', '原因', '状态', '操作'], rows)}`)
+  view.querySelectorAll('[data-approve]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        const result = await api(`/admin/api/refunds/${button.dataset.approve}/approve`, { method: 'POST', body: {} })
+        toast(result.warning ?? '退款完成，权益已回收')
+      } catch (error) { toast(error.message) }
+      await pageRefunds()
+    })
+  })
+  view.querySelectorAll('[data-reject]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const reason = prompt('驳回原因') ?? '未通过审核'
+      await api(`/admin/api/refunds/${button.dataset.reject}/reject`, { method: 'POST', body: { reason } })
+      await pageRefunds()
+    })
+  })
+}
+
+/* ---------------- 角色权限 ---------------- */
+async function pageRoles() {
+  const [roleData, adminData] = await Promise.all([api('/admin/api/roles'), api('/admin/api/admins')])
+  const domains = [...new Set(roleData.permissions.map((perm) => perm.domain))]
+  const roleBlocks = roleData.roles.map((role) => `<div class="panel" style="background:var(--panel-2);margin-bottom:12px">
+    <h3>${esc(role.name)} <span class="muted" style="font-size:12px">${esc(role.code)}</span><span class="spacer"></span>
+      <button class="btn sm primary" data-save-role="${role.id}">保存权限</button></h3>
+    <div class="perm-grid" data-role="${role.id}">
+      ${domains.map((domain) => `<div class="perm-domain"><div class="muted">${esc(domain)}</div>
+        ${roleData.permissions.filter((perm) => perm.domain === domain).map((perm) => `<label class="perm-item">
+          <input type="checkbox" value="${perm.code}" ${role.permissions.includes(perm.code) ? 'checked' : ''} />
+          <span title="${esc(perm.code)}">${esc(perm.name)}</span></label>`).join('')}
+      </div>`).join('')}
+    </div></div>`)
+  const adminRows = adminData.list.map((admin) => `<tr>
+    <td>${admin.id}</td><td class="mono">${esc(admin.username)}</td><td>${esc(admin.display_name ?? '')}</td>
+    <td>${admin.roles.map((role) => esc(role.name)).join(' / ')}</td><td>${pillOf(admin.status)}</td>
+  </tr>`)
+  view.innerHTML = panel('角色权限', `
+    <p class="muted">权限点：&lt;域&gt;.&lt;对象&gt;.&lt;动作&gt;。接口层是唯一可信校验，菜单只是渲染。</p>
+    ${roleBlocks.join('')}
+    <h3>管理员</h3>
+    ${table(['ID', '账号', '姓名', '角色', '状态'], adminRows)}`)
+  view.querySelectorAll('[data-save-role]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const box = view.querySelector(`[data-role="${button.dataset.saveRole}"]`)
+      const permissions = [...box.querySelectorAll('input:checked')].map((input) => input.value)
+      await api(`/admin/api/roles/${button.dataset.saveRole}`, { method: 'PUT', body: { permissions } })
+      toast('权限已保存（权限变更需重新登录生效）')
+    })
+  })
+}
+
+/* ---------------- 审计日志 ---------------- */
+async function pageAudit() {
+  const data = await api('/admin/api/audit?limit=200')
+  const rows = data.list.map((log) => `<tr>
+    <td>${log.id}</td><td class="muted">${esc(log.created_at)}</td>
+    <td>${esc(log.actor_name ?? log.actor_type)}</td><td class="mono">${esc(log.action)}</td>
+    <td class="muted">${esc(log.target_type ?? '')}${log.target_id ? ' #' + esc(log.target_id) : ''}</td>
+    <td class="muted">${esc(log.reason ?? '')}</td>
+    <td>${log.result === 'denied' ? '<span class="pill bad">拒绝</span>' : '<span class="pill ok">成功</span>'}</td>
+    <td class="mono muted">${esc(log.ip ?? '')}</td>
+  </tr>`)
+  view.innerHTML = panel('审计日志', table(['ID', '时间', '操作人', '动作', '对象', '原因', '结果', 'IP'], rows))
+}
+
+/* ---------------- 支付配置 ---------------- */
+async function pagePay() {
+  const data = await api('/admin/api/pay-settings')
+  view.innerHTML = panel('支付配置', `
+    <p class="muted">mock 仅演示用，生产必须关闭；支付宝需 appId + 商户私钥 + 支付宝公钥；USDT 填收款地址与最小确认数。</p>
+    <div class="form-row"><label>USDT 汇率（1 USDT = ? CNY）<input id="usdt-rate" type="number" step="0.01" value="${data.usdtRate}" style="width:110px" /></label></div>
+    <textarea id="pay-json" class="mono" style="width:100%;height:340px;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:12px">${esc(JSON.stringify(data.pay, null, 2))}</textarea>
+    <div style="margin-top:12px"><button class="btn primary" id="pay-save">保存</button></div>`)
+  $('#pay-save').addEventListener('click', async () => {
+    let pay
+    try { pay = JSON.parse($('#pay-json').value) } catch { return toast('JSON 格式错误') }
+    await api('/admin/api/pay-settings', { method: 'PUT', body: { pay, usdtRate: Number($('#usdt-rate').value) } })
+    toast('已保存')
   })
 }
 
