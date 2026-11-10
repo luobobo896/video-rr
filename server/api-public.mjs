@@ -259,8 +259,11 @@ export async function handlePublic(pathname, url, req, res) {
       const channelWhere = []
       const channelParams = []
       if (channel && channel !== 'ALL') {
+        // 频道条件既进主查询（列表/总数），也作为 facets 计数的「当前频道」范围
         channelWhere.push('d.category = ?')
         channelParams.push(channel)
+        where.push('d.category = ?')
+        params.push(channel)
       }
 
       // 地区：前端传标准 code（US/UK/KR/JP/TH/CN/HK/TW/OTHER），按 area 文本映射
