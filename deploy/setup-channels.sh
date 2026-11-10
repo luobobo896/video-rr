@@ -65,7 +65,7 @@ echo "== 3. USDT 收款地址（TRC20）=="
 PC=$("${CURL[@]}" "$API/pay-channels" -H "authorization: Bearer $T")
 PID=$(printf '%s' "$PC" | python3 -c "import sys,json
 rows=json.load(sys.stdin).get('data',{}).get('list',[])
-hit=[c for c in rows if c.get('channelCode')=='usdt']
+hit=[c for c in rows if (c.get('channel_code') or c.get('channelCode'))=='usdt']
 print(hit[0]['id'] if hit else '')")
 [ -n "$PID" ] && ok "找到 USDT 通道" "id=$PID" || bad "找到 USDT 通道" "未找到（先跑一次 install-hk.sh 迁移渠道）"
 if [ -n "$PID" ]; then
@@ -81,9 +81,8 @@ printf '%s' "$SEC" | python3 -c "
 import sys,json
 d=json.load(sys.stdin).get('data',{})
 w=d.get('usdtWatch') or {}
-m=d.get('mail') or {}
 print('  USDT 监听:', json.dumps({'enabled':w.get('enabled'),'address':w.get('address'),'minConfirmations':w.get('minConfirmations')}, ensure_ascii=False))
-print('  邮件可用:', d.get('mailReady'), '| 通道数:', (m.get('channels') if isinstance(m,dict) else None))"
+print('  Redis:', json.dumps(d.get('redis') or {}, ensure_ascii=False))"
 echo
 echo "结果：失败 $FAIL 项"
 [ "$FAIL" -eq 0 ] || exit 1
