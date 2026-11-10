@@ -191,6 +191,9 @@ export function autofillBanners({ limit = 6 } = {}) {
     WHERE cover_url IS NOT NULL AND cover_url <> '' AND status = 'published'
     ORDER BY score DESC, id DESC`)
   const takenTargets = new Set(all('SELECT target_drama_id FROM banners WHERE target_drama_id IS NOT NULL').map((row) => row.target_drama_id))
+  // 同一张横幅图只上一次：同一部片子可能被导入成两条（不同 id、同 slug），
+  // 只看 target_drama_id 会把它排两遍，hero 里出现一模一样的两张图。
+  const takenImages = new Set(all("SELECT image FROM banners WHERE image IS NOT NULL AND image <> ''").map((row) => String(row.image)))
   let created = 0
   let sort = Number(all('SELECT COALESCE(MAX(sort), 0) AS s FROM banners')[0]?.s ?? 0)
   for (const row of rows) {
@@ -199,9 +202,12 @@ export function autofillBanners({ limit = 6 } = {}) {
     const entry = catalogEntryOf(row)
     const slug = String(entry?.slug ?? '').trim()
     if (!slug || !fileOk(bannerPath(slug))) continue
+    const image = `/media/images/banner-${slug}.jpg`
+    if (takenImages.has(image)) continue
     sort += 1
     run(`INSERT INTO banners (name, title, image, target_drama_id, sort, enabled) VALUES (?, ?, ?, ?, ?, 1)`,
-      row.title, row.sub_title ?? '', `/media/images/banner-${slug}.jpg`, row.id, sort)
+      row.title, row.sub_title ?? '', image, row.id, sort)
+    takenImages.add(image)
     created += 1
   }
   return { created, total: existing + created, skipped: false }
