@@ -9,7 +9,7 @@ set -uo pipefail
 APP=/opt/video-rr
 DOMAIN=${DOMAIN:-hk.hsddns.com}
 BASE="https://$DOMAIN"
-CURL="curl -sk --resolve $DOMAIN:443:127.0.0.1"
+CURL="curl -sk -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36' --resolve $DOMAIN:443:127.0.0.1"
 READONLY=${READONLY:-0}
 FAILED=0
 PASSED=0
@@ -73,6 +73,17 @@ ok "admin 登录" "token ${TOKEN:0:12}…"
 MUST=$(printf '%s' "$LOGIN" | json data.mustChangePassword)
 if [ "$MUST" = "True" ] || [ "$MUST" = "true" ]; then
   chk "未改密访问业务接口" 403 "$(code "$BASE/video-admin/api/users" -H "authorization: Bearer $TOKEN")"
+  # 强制改密闸门通过后，脚本自行改成强口令，后续接口才能继续验（原口令随即失效）
+  NEW_PASS="Verify$(date +%s | tail -c 7)Aa9"
+  CHANGED=$($CURL -X POST "$BASE/video-admin/api/password" -H "authorization: Bearer $TOKEN" \
+    -H 'content-type: application/json' -d "{\"oldPassword\":\"$ADMIN_PASSWORD\",\"newPassword\":\"$NEW_PASS\"}")
+  NEW_TOKEN=$(printf '%s' "$CHANGED" | json data.token)
+  if [ -n "$NEW_TOKEN" ]; then
+    TOKEN="$NEW_TOKEN"
+    ok "首次登录强制改密" "新口令 $NEW_PASS（请写入凭据文件）"
+  else
+    bad "首次登录强制改密" "$(printf '%s' "$CHANGED" | json msg)"
+  fi
 else
   chk "业务接口可用" 200 "$(code "$BASE/video-admin/api/users" -H "authorization: Bearer $TOKEN")"
 fi
@@ -182,8 +193,12 @@ fi
 echo "=== 8. 对账与审计 ==="
 $CURL -X POST "$BASE/video-admin/api/reconcile" -H "authorization: Bearer $TOKEN" | python3 -c "
 import sys,json
-d=json.load(sys.stdin)['data']
-print('  缺失支付',d['missingPayment'],'孤儿支付',d['orphanPayment'],'待补发',d['stuckPaid'])"
+raw=json.load(sys.stdin)
+d=raw.get('data') or {}
+if 'missingPayment' not in d:
+    print('  对账接口异常：',json.dumps(raw,ensure_ascii=False)[:200])
+else:
+    print('  缺失支付',d.get('missingPayment'),'孤儿支付',d.get('orphanPayment'),'待补发',d.get('stuckPaid'))"
 $CURL "$BASE/video-admin/api/audit?page=1" -H "authorization: Bearer $TOKEN" | python3 -c "
 import sys,json
 rows=json.load(sys.stdin).get('data',{}).get('list',[])
