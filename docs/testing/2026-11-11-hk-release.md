@@ -98,3 +98,49 @@ systemctl start video-rr
 ```
 
 恢复后用 `READONLY=1 bash deploy/verify-hk.sh` 和线上首页/后台冒烟确认；仅前端回滚时无需恢复数据库。
+
+---
+
+## 23:23 成人菜单发布
+
+### 发布信息
+
+- Git 提交：`91146ea`（`codex/adult-menu`）
+- 时间：2026-11-11 23:23 CST
+- 发布包：`mh-deploy-20261111-232229.tgz`
+- SHA256：`d926f3821ac82be2bd5adf55cdc6412625eb83454a5aa025b1b084d454be4a22`
+- 远端上传：`/tmp/mh-deploy-20261111-232229.tgz`，SHA256 与本地一致。
+- 发布前源码备份：`/opt/video-rr/storage/backup/source-20261111-232255.tgz`
+- 发布前数据库备份：`/opt/video-rr/storage/backup/app.db.20261111-232331`
+
+### 变更
+
+- 新增成人内容标记、独立中英文菜单配置和会话年龄确认。
+- 成人内容从普通首页、分类、搜索、榜单、海报墙、内容榜及相似推荐中排除。
+- 新增 HTTP(S) 视频直链导入，带 SSRF、重定向、大小、总超时和视频探测校验。
+- 同步当前 Vue 前端、内容运营、测试和发布脚本快照。
+
+### 验收结果
+
+- `video-rr`：`active/running`，`NRestarts=0`，启动时间 `2026-11-11 23:23:43 CST`。
+- `/video/`、`/video-admin/`、`/video/api/constants`：200。
+- 未签名 HLS：403。
+- `/video/api/constants` 返回 `adultMenu={enabled:true,labels:{zh:"成人",en:"Adult"}}`。
+- `/video/api/category?audience=adult`：业务码 `0000`，`active.audience=adult`。
+- 数据库已迁移：`dramas.is_adult INTEGER NOT NULL DEFAULT 0`；`settings.adultMenu` 已写入默认配置。
+- 线上 C 端资源为 `index-CkhkyYrj.js`、`index-BpzeNqdW.css`；后台资源为 `index-DQ-v1jXK.js`、`index-G7krLnQr.css`，与本地构建一致。
+- `journalctl -u video-rr --since '10 min ago'`：未发现 error/exception/failed。
+- 磁盘：`76%` 使用，剩余约 12G。
+
+### 回滚
+
+```bash
+cd /opt/video-rr
+tar -xzf storage/backup/source-20261111-232255.tgz
+systemctl stop video-rr
+cp storage/backup/app.db.20261111-232331 storage/app.db
+cp storage/backup/app.db.20261111-232331-wal storage/app.db-wal 2>/dev/null || true
+systemctl start video-rr
+```
+
+回滚后依次检查 `/video/`、`/video-admin/`、`/video/api/constants`、未签名 HLS 403 和日志。
