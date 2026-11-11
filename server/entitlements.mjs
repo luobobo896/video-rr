@@ -13,7 +13,15 @@ const all = (sql, ...args) => db.prepare(sql).all(...args)
 export const ACCESS = { FREE: 'free', SUBSCRIPTION: 'subscription', PAID: 'paid' }
 
 export function policyOf(dramaId) {
-  return one('SELECT * FROM content_policies WHERE drama_id = ?', dramaId)
+  return one(`SELECT p.drama_id, p.policy_group_id, p.updated_at, g.name AS policy_group_name,
+      COALESCE(g.access_mode, p.access_mode) AS access_mode,
+      COALESCE(g.free_episodes, p.free_episodes) AS free_episodes,
+      COALESCE(g.trial_seconds, p.trial_seconds) AS trial_seconds,
+      COALESCE(g.single_price_cny, p.single_price_cny) AS single_price_cny,
+      COALESCE(g.purchase_kind, p.purchase_kind) AS purchase_kind,
+      COALESCE(g.rental_hours, p.rental_hours) AS rental_hours
+    FROM content_policies p LEFT JOIN policy_groups g ON g.id = p.policy_group_id
+    WHERE p.drama_id = ?`, dramaId)
 }
 
 /** 有效的订阅（未过期、覆盖该内容 scope）。 */
@@ -100,6 +108,7 @@ export function priceInfo(drama) {
 export function resolveAccess(userId, dramaId, episodeNo) {
   const drama = one('SELECT * FROM dramas WHERE id = ?', dramaId)
   if (!drama) return { allow: false, reason: 'content_not_found' }
+  if (drama.status !== 'published') return { allow: false, reason: 'content_unavailable' }
   const policy = policyOf(drama.id) ?? { access_mode: 'subscription', free_episodes: 0, trial_seconds: 0, single_price_cny: 0, purchase_kind: 'single' }
 
   // 1) 单片所有权（买断整部：优先于一切规则）
@@ -140,8 +149,8 @@ export function resolveAccess(userId, dramaId, episodeNo) {
     }
   }
 
-  // 3) 订阅（覆盖 scope）；会员「全场畅看」包含单片付费库，单片价格只对非会员生效
-  if (subCovers) {
+  // 3) 订阅（覆盖 scope）；access_mode=paid 的内容不受订阅覆盖，必须单独购买
+  if (subCovers && policy.access_mode !== 'paid') {
     return { allow: true, source: 'subscription', subscription }
   }
 

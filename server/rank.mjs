@@ -1,5 +1,6 @@
 /** 榜单自动刷新：按用户行为（播放 / 收藏 / 成交）重算，locked=1 的人工条目保持不动。 */
 import { db } from './db.mjs'
+import { adultVisibilitySql } from './content-visibility.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const run = (sql, ...args) => db.prepare(sql).run(...args)
@@ -17,7 +18,7 @@ export const RANK_STRATEGIES = {
       FROM dramas d
       LEFT JOIN play_events pe ON pe.drama_id = d.id AND pe.created_at >= datetime('now', '-30 days')
       LEFT JOIN track_events te ON te.drama_id = d.id AND te.type = 'play_end' AND te.created_at >= datetime('now', '-30 days')
-      WHERE d.status = 'published'
+      WHERE d.status = 'published' AND ${adultVisibilitySql()}
       GROUP BY d.id HAVING score > 0 ORDER BY score DESC, d.id ASC`,
   },
   RISE: {
@@ -26,24 +27,31 @@ export const RANK_STRATEGIES = {
     sql: `SELECT d.id AS drama_id,
         (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id AND pe.created_at >= datetime('now', '-7 days')) * 1.0
       - (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id
-          AND pe.created_at >= datetime('now', '-14 days') AND pe.created_at < datetime('now', '-7 days')) * 0.5 AS score
-      FROM dramas d WHERE d.status = 'published'
+        AND pe.created_at >= datetime('now', '-14 days') AND pe.created_at < datetime('now', '-7 days')) * 0.5 AS score
+      FROM dramas d WHERE d.status = 'published' AND ${adultVisibilitySql()}
       GROUP BY d.id HAVING score > 0 ORDER BY score DESC, d.id ASC`,
   },
   SEARCH: {
     label: '搜索榜',
     desc: '近 30 天搜索命中次数',
-    sql: `SELECT te.drama_id AS drama_id, COUNT(*) * 1.0 AS score
-      FROM track_events te JOIN dramas d ON d.id = te.drama_id
-      WHERE te.type = 'search' AND te.created_at >= datetime('now', '-30 days') AND d.status = 'published'
-      GROUP BY te.drama_id HAVING score > 0 ORDER BY score DESC, te.drama_id ASC`,
+    // 搜索埋点通常只记关键词（path），没有 drama_id；先按 drama_id 关联，
+    // 为空时退回关键词匹配标题/副标题，否则热搜榜永远是空的。
+    sql: `SELECT d.id AS drama_id, COUNT(*) * 1.0 AS score
+      FROM track_events te JOIN dramas d
+        ON d.id = te.drama_id
+        OR (te.drama_id IS NULL AND TRIM(COALESCE(te.path, '')) <> ''
+            AND (d.title LIKE '%' || TRIM(te.path) || '%'
+                 OR COALESCE(d.sub_title, '') LIKE '%' || TRIM(te.path) || '%'))
+      WHERE te.type = 'search' AND te.created_at >= datetime('now', '-30 days')
+        AND d.status = 'published' AND ${adultVisibilitySql()}
+      GROUP BY d.id HAVING score > 0 ORDER BY score DESC, d.id ASC`,
   },
   CLASSIC: {
     label: '口碑榜',
     desc: '站内评分 × 收藏量',
     sql: `SELECT d.id AS drama_id,
         COALESCE(d.score, 0) * 10.0 + (SELECT COUNT(*) FROM favorites f WHERE f.drama_id = d.id) * 2.0 AS score
-      FROM dramas d WHERE d.status = 'published' AND COALESCE(d.score, 0) > 0
+      FROM dramas d WHERE d.status = 'published' AND ${adultVisibilitySql()} AND COALESCE(d.score, 0) > 0
       ORDER BY score DESC, d.id ASC`,
   },
   // 以下四种是「抄参考站」补齐的榜：不需要新埋点，全部由现有表算得出来，
@@ -53,14 +61,14 @@ export const RANK_STRATEGIES = {
     desc: '站内评分（≥8.0）优先，同分看收藏',
     sql: `SELECT d.id AS drama_id,
         COALESCE(d.score, 0) * 10.0 + (SELECT COUNT(*) FROM favorites f WHERE f.drama_id = d.id) * 1.0 AS score
-      FROM dramas d WHERE d.status = 'published' AND COALESCE(d.score, 0) >= 8.0
+      FROM dramas d WHERE d.status = 'published' AND ${adultVisibilitySql()} AND COALESCE(d.score, 0) >= 8.0
       ORDER BY COALESCE(d.score, 0) DESC, score DESC, d.id ASC`,
   },
   EXPECT: {
     label: '期待榜',
     desc: '未上架/未完结的片子按上架时间倒序（即将上线）',
     sql: `SELECT d.id AS drama_id, 100.0 - ABS(COALESCE(d.year, 2000) - 2030) AS score
-      FROM dramas d WHERE d.status IN ('published', 'draft')
+      FROM dramas d WHERE d.status IN ('published', 'draft') AND ${adultVisibilitySql()}
       ORDER BY COALESCE(d.year, 2000) DESC, d.id DESC LIMIT 20`,
   },
   QUARTER: {
@@ -69,7 +77,8 @@ export const RANK_STRATEGIES = {
     sql: `SELECT d.id AS drama_id,
         (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id AND pe.created_at >= datetime('now', '-90 days')) * 1.0
       + COALESCE(d.score, 0) AS score
-      FROM dramas d WHERE d.status = 'published' AND d.created_at >= datetime('now', '-90 days')
+      FROM dramas d WHERE d.status = 'published' AND ${adultVisibilitySql()}
+        AND d.created_at >= datetime('now', '-90 days')
       ORDER BY score DESC, d.id ASC`,
   },
   HIDDEN: {
@@ -77,7 +86,7 @@ export const RANK_STRATEGIES = {
     desc: '评分高但播放量低（< 50 次）的内容',
     sql: `SELECT d.id AS drama_id, COALESCE(d.score, 0) * 10.0 AS score
       FROM dramas d
-      WHERE d.status = 'published' AND COALESCE(d.score, 0) >= 7.0
+      WHERE d.status = 'published' AND ${adultVisibilitySql()} AND COALESCE(d.score, 0) >= 7.0
         AND (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id) < 50
       ORDER BY COALESCE(d.score, 0) DESC, d.id ASC`,
   },
@@ -86,7 +95,7 @@ export const RANK_STRATEGIES = {
     desc: '短剧 / 漫剧按播放量',
     sql: `SELECT d.id AS drama_id,
         (SELECT COUNT(*) FROM play_events pe WHERE pe.drama_id = d.id) * 1.0 + COALESCE(d.score, 0) AS score
-      FROM dramas d WHERE d.status = 'published' AND d.category = 'PLAYLET'
+      FROM dramas d WHERE d.status = 'published' AND ${adultVisibilitySql()} AND d.category = 'PLAYLET'
       ORDER BY score DESC, d.id ASC`,
   },
 }

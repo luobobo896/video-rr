@@ -13,6 +13,12 @@ import { currentKeyVersion, maskConfig, sealSecret } from './secretbox.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const ROOT = join(HERE, '..')
 const DB_PATH = process.env.MH_DB ?? join(ROOT, 'storage', 'app.db')
+export const contentTypeOfCategory = (category) => {
+  const value = String(category ?? '').toUpperCase()
+  if (value === 'MOVIE') return 'movie'
+  if (value === 'ANIME') return 'comic_drama'
+  return 'series'
+}
 
 mkdirSync(dirname(DB_PATH), { recursive: true })
 export const db = new DatabaseSync(DB_PATH)
@@ -139,6 +145,7 @@ CREATE TABLE IF NOT EXISTS dramas (
   year INTEGER,
   area TEXT,
   category TEXT,
+  is_adult INTEGER NOT NULL DEFAULT 0,
   score REAL,
   status TEXT NOT NULL DEFAULT 'published',
   sort INTEGER NOT NULL DEFAULT 0,
@@ -158,6 +165,30 @@ CREATE TABLE IF NOT EXISTS episodes (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (drama_id, no)
 );
+CREATE TABLE IF NOT EXISTS episode_tracks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('audio', 'subtitle')),
+  language TEXT NOT NULL,
+  edition TEXT NOT NULL DEFAULT 'original',
+  label TEXT NOT NULL,
+  source TEXT,
+  uri TEXT NOT NULL,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ready',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (episode_id, kind, language, edition)
+);
+CREATE TABLE IF NOT EXISTS user_track_preferences (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  drama_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('audio', 'subtitle')),
+  language TEXT NOT NULL DEFAULT '',
+  edition TEXT NOT NULL DEFAULT '',
+  off INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, drama_id, kind)
+);
 -- 内容级付费策略（免费集数 / 试看秒数 / 单片价格）
 CREATE TABLE IF NOT EXISTS content_policies (
   drama_id INTEGER PRIMARY KEY REFERENCES dramas(id) ON DELETE CASCADE,
@@ -167,6 +198,21 @@ CREATE TABLE IF NOT EXISTS content_policies (
   single_price_cny REAL NOT NULL DEFAULT 0,
   purchase_kind TEXT NOT NULL DEFAULT 'single',        -- single | rental
   rental_hours INTEGER NOT NULL DEFAULT 72,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 可复用付费策略组：剧集只保存 group_id，策略字段由组统一驱动
+CREATE TABLE IF NOT EXISTS policy_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  access_mode TEXT NOT NULL DEFAULT 'subscription',
+  free_episodes INTEGER NOT NULL DEFAULT 0,
+  trial_seconds INTEGER NOT NULL DEFAULT 0,
+  single_price_cny REAL NOT NULL DEFAULT 0,
+  purchase_kind TEXT NOT NULL DEFAULT 'single',
+  rental_hours INTEGER NOT NULL DEFAULT 72,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -199,6 +245,7 @@ CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   out_trade_no TEXT UNIQUE NOT NULL,
   user_id INTEGER NOT NULL REFERENCES users(id),
+  visitor_id TEXT,
   product_type TEXT NOT NULL,                           -- subscription | single
   plan_id INTEGER,
   drama_id INTEGER,
@@ -337,6 +384,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS play_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
+  visitor_id TEXT,
   drama_id INTEGER NOT NULL,
   episode_id INTEGER,
   episode_no INTEGER,
@@ -353,6 +401,7 @@ CREATE TABLE IF NOT EXISTS track_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   type TEXT NOT NULL,                        -- impression|detail_view|paywall_view|paywall_click|play_end|search|share
   user_id INTEGER,
+  visitor_id TEXT,
   drama_id INTEGER,
   episode_id INTEGER,
   path TEXT,
@@ -367,6 +416,19 @@ CREATE TABLE IF NOT EXISTS track_events (
 CREATE INDEX IF NOT EXISTS idx_track_events_time ON track_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_track_events_type ON track_events(type, created_at);
 CREATE INDEX IF NOT EXISTS idx_track_events_drama ON track_events(drama_id);
+
+-- 匿名访客身份：不污染注册用户表；登录后回填 user_id，便于匿名 → 注册归因
+CREATE TABLE IF NOT EXISTS visitors (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER,
+  first_path TEXT,
+  first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+  ip TEXT,
+  ua TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_visitors_last_seen ON visitors(last_seen);
+CREATE INDEX IF NOT EXISTS idx_visitors_user ON visitors(user_id);
 
 -- ===== 标签（C 端筛选 / B 端管理）=====
 CREATE TABLE IF NOT EXISTS tags (
@@ -430,6 +492,36 @@ CREATE TABLE IF NOT EXISTS pay_channels (
 CREATE INDEX IF NOT EXISTS idx_pay_default ON pay_channels(scene, status, is_default);
 `)
 
+// 高频列表/权益/后台聚合的覆盖索引。老库启动时幂等补齐，避免数据量上来后全表扫描。
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_dramas_status_category ON dramas(status, category);
+CREATE INDEX IF NOT EXISTS idx_dramas_status_score ON dramas(status, score DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id, status, valid_to DESC);
+CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id, status, drama_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(order_id);
+CREATE INDEX IF NOT EXISTS idx_refunds_status ON refunds(status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_section_items_section ON section_items(section_id, sort);
+CREATE INDEX IF NOT EXISTS idx_rank_items_list ON rank_items(list_id, rank_no);
+CREATE INDEX IF NOT EXISTS idx_comments_drama_status ON comments(drama_id, status);
+CREATE INDEX IF NOT EXISTS idx_danmus_episode_status ON danmus(episode_id, status);
+CREATE INDEX IF NOT EXISTS idx_episode_tracks_episode ON episode_tracks(episode_id, kind, is_default);
+CREATE TABLE IF NOT EXISTS guest_trials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  visitor_id TEXT NOT NULL,
+  drama_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  episode_no INTEGER NOT NULL,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  ip TEXT,
+  ua TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_guest_trials_lookup ON guest_trials(visitor_id, drama_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_play_events_drama_time ON play_events(drama_id, created_at DESC);
+`)
+
 const count = (table) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n
 
 /** 权限点目录（`<域>.<对象>.<动作>`）。 */
@@ -481,20 +573,33 @@ export const MENU_TREE = [
   { code: 'ops.rank.write', name: '管理榜单', type: 'button', parent: 'ops.rank', sort: 10 },
   { code: 'ops.events', name: '埋点数据', type: 'menu', parent: 'dir:ops', sort: 40, path: '/events', icon: '📡' },
   { code: 'ops.events.read', name: '查看埋点明细', type: 'button', parent: 'ops.events', sort: 10 },
+  { code: 'ops.channel', name: '渠道分析', type: 'menu', parent: 'dir:ops', sort: 50, path: '/channels', icon: '🔗' },
+  { code: 'growth.channel.read', name: '查看渠道分析', type: 'button', parent: 'ops.channel', sort: 10 },
+  { code: 'growth.channel.write', name: '维护渠道与推广码', type: 'button', parent: 'ops.channel', sort: 20 },
+  { code: 'ops.content-stats', name: '内容统计', type: 'menu', parent: 'dir:ops', sort: 60, path: '/content-stats', icon: '📈' },
+  { code: 'growth.content.read', name: '查看内容统计与榜单', type: 'button', parent: 'ops.content-stats', sort: 10 },
+  { code: 'growth.content.write', name: '重算内容统计与榜单', type: 'button', parent: 'ops.content-stats', sort: 20 },
+  { code: 'ops.distribution', name: '分销分析', type: 'menu', parent: 'dir:ops', sort: 70, path: '/distribution', icon: '🧩' },
+  { code: 'growth.distribution.read', name: '查看分销数据', type: 'button', parent: 'ops.distribution', sort: 10 },
+  { code: 'growth.distribution.write', name: '维护分销配置与规则', type: 'button', parent: 'ops.distribution', sort: 20 },
+  { code: 'growth.distribution.settle', name: '创建/复核分销结算', type: 'button', parent: 'ops.distribution', sort: 30 },
+  { code: 'growth.distribution.risk', name: '处理分销风险', type: 'button', parent: 'ops.distribution', sort: 40 },
+  { code: 'ops.distribution-config', name: '分销配置', type: 'menu', parent: 'dir:ops', sort: 80, path: '/distribution-config', icon: '⚙️' },
 
   { code: 'dir:user', name: '用户中心', type: 'dir', parent: null, sort: 50, path: '/user', icon: '👤' },
   { code: 'user.list', name: '用户管理', type: 'menu', parent: 'dir:user', sort: 10, path: '/users', icon: '👥' },
   { code: 'user.read', name: '查看用户', type: 'button', parent: 'user.list', sort: 10 },
   { code: 'user.manage', name: '禁用/解禁用户', type: 'button', parent: 'user.list', sort: 20 },
+  { code: 'user.password', name: '修改/重置用户密码', type: 'button', parent: 'user.list', sort: 25 },
   { code: 'user.login.assist', name: '代发登录验证码', type: 'button', parent: 'user.list', sort: 30 },
   { code: 'cs.toolkit', name: '客服工具', type: 'menu', parent: 'dir:user', sort: 20, path: '/cs', icon: '🎧' },
   { code: 'cs.toolkit.grant', name: '补发权益', type: 'button', parent: 'cs.toolkit', sort: 10 },
 
   { code: 'dir:system', name: '系统管理', type: 'dir', parent: null, sort: 60, path: '/system', icon: '⚙️' },
-  { code: 'system.admin', name: '管理员账号', type: 'menu', parent: 'dir:system', sort: 5, path: '/admins', icon: '🧑‍💼' },
+  { code: 'system.admin', name: '用户管理', type: 'menu', parent: 'dir:system', sort: 5, path: '/admins', icon: '🧑‍💼' },
   { code: 'system.menu', name: '菜单管理', type: 'menu', parent: 'dir:system', sort: 8, path: '/menus', icon: '🗂️' },
   { code: 'system.menu.write', name: '维护后台菜单', type: 'button', parent: 'system.menu', sort: 10 },
-  { code: 'system.role', name: '角色权限', type: 'menu', parent: 'dir:system', sort: 10, path: '/roles', icon: '🔐' },
+  { code: 'system.role', name: '角色管理', type: 'menu', parent: 'dir:system', sort: 10, path: '/roles', icon: '🔐' },
   { code: 'admin.read', name: '查看角色/管理员', type: 'button', parent: 'system.role', sort: 10 },
   { code: 'admin.write', name: '管理角色/管理员', type: 'button', parent: 'system.role', sort: 20 },
   { code: 'system.audit', name: '审计日志', type: 'menu', parent: 'dir:system', sort: 20, path: '/audit', icon: '📜' },
@@ -520,11 +625,14 @@ export const ROLES = [
     'dashboard', 'content.drama', 'content.drama.read', 'content.drama.write', 'content.drama.publish',
     'content.episode', 'content.episode.write', 'content.policy', 'content.policy.write',
     'content.review', 'content.review.write', 'content.tag', 'tag.read', 'tag.write',
+    'ops.content-stats', 'growth.content.read', 'growth.content.write',
   ]],
   ['finance', '财务', '订单、退款、对账、经营数据', [
     'dashboard', 'commerce.order', 'finance.order.read', 'commerce.refund',
     'finance.refund.create', 'finance.refund.approve', 'commerce.reconcile', 'finance.reconcile.run',
-    'system.analytics', 'analytics.read',
+    'system.analytics', 'analytics.read', 'ops.channel', 'growth.channel.read',
+    'ops.distribution', 'growth.distribution.read', 'growth.distribution.write',
+    'growth.distribution.settle', 'ops.distribution-config',
   ]],
   ['cs', '客服', '查单、补发权益、用户查看', [
     'dashboard', 'commerce.order', 'finance.order.read', 'user.list', 'user.read', 'user.login.assist', 'cs.toolkit', 'cs.toolkit.grant',
@@ -534,7 +642,8 @@ export const ROLES = [
   ]],
   ['analyst', '数据分析', '只读经营数据', [
     'dashboard', 'system.analytics', 'analytics.read', 'commerce.order', 'finance.order.read',
-    'ops.events', 'ops.events.read',
+    'ops.events', 'ops.events.read', 'ops.channel', 'growth.channel.read',
+    'ops.content-stats', 'growth.content.read', 'ops.distribution', 'growth.distribution.read',
   ]]
 ]
 
@@ -550,28 +659,33 @@ export const DEFAULT_ADMIN_MENUS = [
     ['概览', '/dashboard', 'dashboard.read', '📊'],
     ['经营数据', '/analytics', 'analytics.read', '📈'],
     ['埋点数据', '/events', 'ops.events.read', '📡'],
+    ['渠道分析', '/channels', 'growth.channel.read', '🔗'],
   ]],
   ['content', '内容运营', 20, [
     ['剧集管理', '/dramas', 'content.drama.read', '📺'],
-    ['付费策略', '/policies', 'content.drama.read', '💳'],
+    ['成人菜单', '/adult-settings', 'content.drama.write', null],
+    ['付费策略', '/policies', 'content.policy.write', '💳'],
     ['标签管理', '/tags', 'tag.read', '🏷️'],
-    ['首页运营', '/ops', 'ops.banner.write', '🖼️'],
+    ['首页运营', '/ops', 'ops.banner.write&ops.section.write', '🖼️'],
     ['榜单', '/ranks', 'ops.rank.write', '🏆'],
+    ['内容统计', '/content-stats', 'growth.content.read', '📈'],
     ['内容审核', '/review', 'content.review', '🛡️'],
   ]],
   ['commerce', '交易与财务', 30, [
     ['套餐定价', '/plans', 'commerce.plan.write', '🏷️'],
     ['优惠券', '/coupons', 'commerce.coupon.write', '🎟️'],
     ['订单', '/orders', 'finance.order.read', '🧾'],
-    ['退款审核', '/refunds', 'finance.refund.create', '↩️'],
+    ['退款审核', '/refunds', 'finance.order.read', '↩️'],
+    ['分销分析', '/distribution', 'growth.distribution.read', '🧩'],
+    ['分销配置', '/distribution-config', 'growth.distribution.write', '⚙️'],
   ]],
   ['users', '用户', 40, [
     ['C 端用户', '/users', 'user.read', '👥'],
   ]],
   ['system', '系统设置', 50, [
     ['菜单管理', '/menus', 'system.menu', '🗂️'],
-    ['角色权限', '/roles', 'admin.read', '🔐'],
-    ['管理员账号', '/admins', 'system.admin', '🧑‍💼'],
+    ['角色管理', '/roles', 'admin.read', '🔐'],
+    ['用户管理', '/admins', 'system.admin', '🧑‍💼'],
     ['审计日志', '/audit', 'audit.read', '📜'],
     ['支付渠道', '/pay', 'payment.channel.read', '💳'],
     ['邮件设置', '/email', 'email.read', '✉️'],
@@ -649,6 +763,12 @@ export function ensureOpsSchema() {
   const has = (table) => Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
   const cols = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name)
 
+  if (has('dramas')) {
+    const columns = cols('dramas')
+    if (!columns.includes('is_adult')) db.exec('ALTER TABLE dramas ADD COLUMN is_adult INTEGER NOT NULL DEFAULT 0')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_dramas_adult_status ON dramas(is_adult, status, id DESC)')
+  }
+
   if (has('tags')) {
     const columns = cols('tags')
     if (!columns.includes('parent_id')) db.exec('ALTER TABLE tags ADD COLUMN parent_id INTEGER REFERENCES tags(id) ON DELETE SET NULL')
@@ -666,6 +786,35 @@ export function ensureOpsSchema() {
     if (!columns.includes('locked')) db.exec('ALTER TABLE rank_items ADD COLUMN locked INTEGER NOT NULL DEFAULT 0')
     if (!columns.includes('score')) db.exec('ALTER TABLE rank_items ADD COLUMN score REAL NOT NULL DEFAULT 0')
   }
+
+  // 匿名访客标识与事件归因（老库幂等补列）
+  for (const table of ['track_events', 'play_events', 'orders']) {
+    if (!has(table)) continue
+    const columns = cols(table)
+    if (!columns.includes('visitor_id')) db.exec(`ALTER TABLE ${table} ADD COLUMN visitor_id TEXT`)
+  }
+  if (has('content_policies')) {
+    const columns = cols('content_policies')
+    if (!columns.includes('policy_group_id')) {
+      db.exec('ALTER TABLE content_policies ADD COLUMN policy_group_id INTEGER REFERENCES policy_groups(id) ON DELETE SET NULL')
+    }
+  }
+  db.exec(`
+CREATE TABLE IF NOT EXISTS visitors (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER,
+  first_path TEXT,
+  first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+  ip TEXT,
+  ua TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_play_events_visitor ON play_events(visitor_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_track_events_visitor ON track_events(visitor_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_visitor ON orders(visitor_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_visitors_last_seen ON visitors(last_seen);
+CREATE INDEX IF NOT EXISTS idx_visitors_user ON visitors(user_id);
+`)
 
   for (const table of ['plans', 'coupons']) {
     if (!has(table)) continue
@@ -688,6 +837,16 @@ CREATE TABLE IF NOT EXISTS episode_price_rules (
 );
 CREATE INDEX IF NOT EXISTS idx_episode_rules_drama ON episode_price_rules(drama_id, from_no);
 `)
+
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_content_policies_group ON content_policies(policy_group_id)`)
+  if (!db.prepare('SELECT COUNT(*) AS n FROM policy_groups').get().n) {
+    const insertGroup = db.prepare(`INSERT INTO policy_groups
+      (name, description, access_mode, free_episodes, trial_seconds, single_price_cny)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+    insertGroup.run('免费公开', '全部剧集免费观看', 'free', 0, 0, 0)
+    insertGroup.run('会员免费', '会员可看，首集免费', 'subscription', 1, 0, 0)
+    insertGroup.run('单片付费', '首集免费，其余按单片价格解锁', 'paid', 1, 0, 3)
+  }
 
   db.exec(`
 CREATE TABLE IF NOT EXISTS scrape_cache (
@@ -723,6 +882,28 @@ CREATE TABLE IF NOT EXISTS admin_menus (
       items.forEach(([label, route, permCode, icon], index) => {
         insert.run(groupKey, groupLabel, groupSort, label, route, icon ?? null, permCode, (index + 1) * 10)
       })
+    }
+  }
+  // 历史菜单名迁移：后台用户管理不再叫「管理员账号」。
+  db.prepare("UPDATE admin_menus SET label = '用户管理', updated_at = datetime('now') WHERE route = '/admins' AND label = '管理员账号'").run()
+  db.prepare("UPDATE admin_menus SET label = '角色管理', updated_at = datetime('now') WHERE route = '/roles' AND label = '角色权限'").run()
+  // 权限在角色弹窗内分配，不再保留独立菜单和权限点。
+  db.prepare("DELETE FROM admin_menus WHERE route = '/permissions'").run()
+  db.prepare("DELETE FROM role_permissions WHERE permission_code = 'system.permission'").run()
+  db.prepare("DELETE FROM permissions WHERE code = 'system.permission'").run()
+
+  // 首页 banner 指向已删除/重建的剧集时，按 banner-<slug> 反查新剧集 ID，避免「查看详情 404」。
+  if (has('banners') && has('dramas')) {
+    const broken = db.prepare(`SELECT b.id, b.image FROM banners b
+      LEFT JOIN dramas d ON d.id = b.target_drama_id
+      WHERE b.target_drama_id IS NOT NULL AND d.id IS NULL`).all()
+    const update = db.prepare('UPDATE banners SET target_drama_id = ? WHERE id = ?')
+    for (const row of broken) {
+      const slug = /\/banner-([^/?.]+)\.jpg/i.exec(String(row.image ?? ''))?.[1]
+      if (!slug) continue
+      const drama = db.prepare(`SELECT id FROM dramas WHERE cover_url LIKE ?
+        ORDER BY CASE WHEN status = 'published' THEN 0 ELSE 1 END, id LIMIT 1`).get(`%/cover-${slug}.jpg%`)
+      if (drama?.id) update.run(drama.id, row.id)
     }
   }
 }
@@ -847,14 +1028,17 @@ export function seedIfEmpty() {
 
   // 种子内容
   const seed = JSON.parse(readFileSync(join(ROOT, 'data', 'seed.json'), 'utf8'))
-  const insertDrama = db.prepare(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, score, status, sort)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'published', ?)`)
+  const insertDrama = db.prepare(`INSERT INTO dramas
+    (title, sub_title, cover_url, description, year, area, category, score, status, sort, content_type, published_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, datetime('now'))`)
   const ids = new Map()
   const addDrama = (item, sort) => {
     const key = String(item.dramaId ?? item.title)
     if (ids.has(key)) return ids.get(key)
+    const category = item.dramaType ?? 'TV'
     const info = insertDrama.run(item.title ?? '未命名', item.subTitle ?? '', item.coverUrl ?? '',
-      item.description ?? '', 2026, item.area ?? '韩国', item.dramaType ?? 'TV', item.score ?? 8.5, sort)
+      item.description ?? '', 2026, item.area ?? '韩国', category, item.score ?? 8.5, sort,
+      contentTypeOfCategory(category))
     const id = Number(info.lastInsertRowid)
     ids.set(key, id)
     return id
@@ -1014,6 +1198,60 @@ export function syncMenuCatalog() {
     const codes = current.all(role.id).map((row) => row.permission_code)
     for (const code of expandWithAncestors(codes)) insertRolePerm.run(role.id, code)
   }
+
+  // 老库已有 admin_menus 时，补齐后续版本新增的菜单入口；按 route 判断，
+  // 不覆盖运营已经改过的菜单名称、排序和可见性。
+  const insertMenu = db.prepare(`INSERT INTO admin_menus
+    (group_key, group_label, group_sort, label, route, icon, perm_code, sort, visible, is_system)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, 1, 1
+    WHERE NOT EXISTS (SELECT 1 FROM admin_menus WHERE route = ?)`)
+  for (const [groupKey, groupLabel, groupSort, items] of DEFAULT_ADMIN_MENUS) {
+    items.forEach(([label, route, permCode, icon], index) => {
+      insertMenu.run(groupKey, groupLabel, groupSort, label, route, icon ?? null, permCode, (index + 1) * 10, route)
+    })
+  }
+  // 修正历史出厂菜单权限：只改仍保留旧值的系统菜单，不覆盖运营自定义授权。
+  for (const [route, oldPerm, newPerm] of [
+    ['/policies', 'content.drama.read', 'content.policy.write'],
+    ['/ops', 'ops.banner.write', 'ops.banner.write&ops.section.write'],
+    ['/refunds', 'finance.refund.create', 'finance.order.read'],
+  ]) {
+    db.prepare(`UPDATE admin_menus SET perm_code = ?, updated_at = datetime('now')
+      WHERE route = ? AND perm_code = ? AND is_system = 1`).run(newPerm, route, oldPerm)
+  }
+  db.prepare("UPDATE admin_menus SET label = '分销分析', updated_at = datetime('now') WHERE route = '/distribution' AND label = '分销佣金'").run()
+
+  // 增长域上线时给系统默认角色补一次菜单权限；之后不再强行覆盖运营的自定义授权。
+  const growthRoleSync = db.prepare("SELECT value FROM settings WHERE key = 'growth.roleSyncVersion'").get()
+  const growthRoleVersion = Number(String(growthRoleSync?.value ?? '0').replaceAll('"', '')) || 0
+  if (growthRoleVersion < 2) {
+    const grants = {
+      content_ops: ['ops.content-stats', 'growth.content.read'],
+      finance: [
+        'ops.channel', 'growth.channel.read', 'ops.distribution', 'growth.distribution.read',
+        'growth.distribution.write', 'growth.distribution.settle', 'ops.distribution-config',
+      ],
+      analyst: [
+        'ops.channel', 'growth.channel.read', 'ops.content-stats', 'growth.content.read',
+        'ops.distribution', 'growth.distribution.read',
+      ],
+    }
+    for (const [roleCode, codes] of Object.entries(grants)) {
+      const role = roles.find((row) => row.code === roleCode)
+      if (!role) continue
+      for (const code of expandWithAncestors(codes)) insertRolePerm.run(role.id, code)
+    }
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('growth.roleSyncVersion', '2')").run()
+  }
+  const contentRoleSync = db.prepare("SELECT value FROM settings WHERE key = 'growth.contentRoleSyncVersion'").get()
+  const contentRoleVersion = Number(String(contentRoleSync?.value ?? '0').replaceAll('"', '')) || 0
+  if (contentRoleVersion < 1) {
+    const contentRole = roles.find((row) => row.code === 'content_ops')
+    if (contentRole) {
+      for (const code of expandWithAncestors(['growth.content.write'])) insertRolePerm.run(contentRole.id, code)
+    }
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('growth.contentRoleSyncVersion', '1')").run()
+  }
 }
 
 /**
@@ -1116,10 +1354,583 @@ export function ensurePaySafety() {
   return { allowSim, disabledMock: Boolean(mockRow && !allowSim) }
 }
 
+/**
+ * 增长域增量表：渠道归因 / 内容统计 / 多级分销。
+ * 逐列判断后 ALTER，重复执行安全；旧库订单和内容会补可解释的兼容快照。
+ */
+export function ensureGrowthSchema() {
+  const has = (table) => Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
+  const cols = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name)
+
+  db.exec(`
+CREATE TABLE IF NOT EXISTS channels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_code TEXT NOT NULL UNIQUE,
+  channel_name TEXT NOT NULL,
+  channel_type TEXT NOT NULL DEFAULT 'paid_ad',
+  status TEXT NOT NULL DEFAULT 'active',
+  owner_name TEXT,
+  valid_from TEXT,
+  valid_to TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS channel_campaigns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  campaign_code TEXT NOT NULL,
+  campaign_name TEXT NOT NULL,
+  external_campaign_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  start_at TEXT,
+  end_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT,
+  UNIQUE (channel_id, campaign_code)
+);
+CREATE TABLE IF NOT EXISTS channel_domains (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  campaign_id INTEGER REFERENCES channel_campaigns(id) ON DELETE SET NULL,
+  host TEXT NOT NULL,
+  path_prefix TEXT NOT NULL DEFAULT '/',
+  status TEXT NOT NULL DEFAULT 'active',
+  valid_from TEXT,
+  valid_to TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (host, path_prefix)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_domains_lookup ON channel_domains(host, status);
+CREATE TABLE IF NOT EXISTS promo_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  campaign_id INTEGER REFERENCES channel_campaigns(id) ON DELETE SET NULL,
+  purpose TEXT NOT NULL DEFAULT 'acquisition',
+  distributor_user_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'active',
+  valid_from TEXT,
+  valid_to TEXT,
+  max_uses INTEGER NOT NULL DEFAULT 0,
+  used_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_promo_codes_lookup ON promo_codes(code, purpose, status);
+CREATE TABLE IF NOT EXISTS channel_touches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  visitor_id TEXT,
+  user_id INTEGER,
+  channel_id INTEGER NOT NULL REFERENCES channels(id),
+  campaign_id INTEGER REFERENCES channel_campaigns(id) ON DELETE SET NULL,
+  promo_code TEXT,
+  channel_type TEXT NOT NULL,
+  domain_source TEXT,
+  landing_url TEXT,
+  referrer_url TEXT,
+  utm_source TEXT,
+  utm_medium TEXT,
+  utm_campaign TEXT,
+  utm_content TEXT,
+  utm_term TEXT,
+  match_rule TEXT NOT NULL DEFAULT 'direct',
+  is_valid INTEGER NOT NULL DEFAULT 1,
+  reject_reason TEXT,
+  occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_channel_touches_visitor ON channel_touches(visitor_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_touches_channel ON channel_touches(channel_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_touches_campaign ON channel_touches(campaign_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_touches_promo ON channel_touches(promo_code, occurred_at DESC);
+CREATE TABLE IF NOT EXISTS channel_daily_spend (
+  stat_date TEXT NOT NULL,
+  channel_id INTEGER NOT NULL REFERENCES channels(id),
+  campaign_id INTEGER REFERENCES channel_campaigns(id) ON DELETE SET NULL,
+  spend_fen INTEGER NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL DEFAULT 'CNY',
+  source TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (stat_date, channel_id, campaign_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_acquisitions (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  first_channel_id INTEGER NOT NULL REFERENCES channels(id),
+  first_campaign_id INTEGER REFERENCES channel_campaigns(id) ON DELETE SET NULL,
+  first_promo_code TEXT,
+  first_domain_source TEXT,
+  first_enter_at TEXT NOT NULL,
+  attributed_at TEXT NOT NULL,
+  attribution_model TEXT NOT NULL DEFAULT 'first_touch',
+  attribution_touch_id INTEGER REFERENCES channel_touches(id) ON DELETE SET NULL,
+  last_channel_id INTEGER REFERENCES channels(id) ON DELETE SET NULL,
+  last_touch_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_user_acquisitions_channel ON user_acquisitions(first_channel_id, attributed_at DESC);
+
+CREATE TABLE IF NOT EXISTS content_click_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedup_key TEXT NOT NULL UNIQUE,
+  viewer_key TEXT NOT NULL,
+  user_id INTEGER,
+  visitor_id TEXT,
+  content_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  episode_id INTEGER,
+  entry_page TEXT,
+  source_module TEXT,
+  position INTEGER,
+  occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+  client_ts TEXT,
+  ip_hash TEXT,
+  ua_hash TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_content_clicks_content ON content_click_events(content_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_content_clicks_viewer ON content_click_events(viewer_key, content_id, occurred_at DESC);
+CREATE TABLE IF NOT EXISTS content_view_sessions (
+  id TEXT PRIMARY KEY,
+  viewer_key TEXT NOT NULL,
+  user_id INTEGER,
+  visitor_id TEXT,
+  content_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  episode_id INTEGER,
+  content_type TEXT,
+  source TEXT NOT NULL DEFAULT 'play',
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_heartbeat_at TEXT NOT NULL DEFAULT (datetime('now')),
+  ended_at TEXT,
+  duration_seconds REAL,
+  effective_seconds REAL NOT NULL DEFAULT 0,
+  max_position_seconds REAL NOT NULL DEFAULT 0,
+  playback_rate REAL NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'active',
+  is_valid INTEGER NOT NULL DEFAULT 0,
+  completed INTEGER NOT NULL DEFAULT 0,
+  valid_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_content_sessions_content ON content_view_sessions(content_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_content_sessions_viewer ON content_view_sessions(viewer_key, content_id, episode_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_content_sessions_valid ON content_view_sessions(is_valid, content_id, started_at DESC);
+CREATE TABLE IF NOT EXISTS content_favorite_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedup_key TEXT NOT NULL UNIQUE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  from_state INTEGER NOT NULL DEFAULT 0,
+  to_state INTEGER NOT NULL DEFAULT 1,
+  is_migration INTEGER NOT NULL DEFAULT 0,
+  occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_content_favorites_content ON content_favorite_events(content_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_content_favorites_user ON content_favorite_events(user_id, content_id, occurred_at DESC);
+CREATE TABLE IF NOT EXISTS content_stats_daily (
+  stat_date TEXT NOT NULL,
+  content_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  content_type TEXT,
+  click_count INTEGER NOT NULL DEFAULT 0,
+  click_uv INTEGER NOT NULL DEFAULT 0,
+  play_request_count INTEGER NOT NULL DEFAULT 0,
+  view_count INTEGER NOT NULL DEFAULT 0,
+  viewer_count INTEGER NOT NULL DEFAULT 0,
+  completion_count INTEGER NOT NULL DEFAULT 0,
+  completion_rate REAL NOT NULL DEFAULT 0,
+  favorite_add_count INTEGER NOT NULL DEFAULT 0,
+  favorite_remove_count INTEGER NOT NULL DEFAULT 0,
+  favorite_add_uv INTEGER NOT NULL DEFAULT 0,
+  avg_watch_seconds REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (stat_date, content_id)
+);
+CREATE INDEX IF NOT EXISTS idx_content_stats_date ON content_stats_daily(stat_date, content_type);
+CREATE TABLE IF NOT EXISTS content_stats_total (
+  content_id INTEGER PRIMARY KEY REFERENCES dramas(id) ON DELETE CASCADE,
+  lifetime_click_count INTEGER NOT NULL DEFAULT 0,
+  lifetime_view_count INTEGER NOT NULL DEFAULT 0,
+  lifetime_viewer_count INTEGER NOT NULL DEFAULT 0,
+  current_favorite_count INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS content_rank_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rank_type TEXT NOT NULL,
+  dimension_type TEXT NOT NULL DEFAULT 'all',
+  dimension_value TEXT,
+  window_start TEXT,
+  window_end TEXT,
+  strategy_version TEXT NOT NULL DEFAULT 'v1',
+  status TEXT NOT NULL DEFAULT 'running',
+  generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  error_message TEXT
+);
+CREATE TABLE IF NOT EXISTS content_rank_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES content_rank_runs(id) ON DELETE CASCADE,
+  content_id INTEGER NOT NULL REFERENCES dramas(id) ON DELETE CASCADE,
+  rank_no INTEGER NOT NULL,
+  score REAL NOT NULL DEFAULT 0,
+  metrics_json TEXT,
+  generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (run_id, content_id),
+  UNIQUE (run_id, rank_no)
+);
+CREATE INDEX IF NOT EXISTS idx_content_rank_snapshots_run ON content_rank_snapshots(run_id, rank_no);
+
+CREATE TABLE IF NOT EXISTS distribution_config (
+  site_code TEXT PRIMARY KEY,
+  max_enabled_level INTEGER NOT NULL DEFAULT 3,
+  hard_max_level INTEGER NOT NULL DEFAULT 5,
+  max_total_rate_bp INTEGER NOT NULL DEFAULT 1800,
+  auto_approve INTEGER NOT NULL DEFAULT 1,
+  attribution_window_days INTEGER NOT NULL DEFAULT 30,
+  freeze_days INTEGER NOT NULL DEFAULT 7,
+  min_settlement_fen INTEGER NOT NULL DEFAULT 10000,
+  status TEXT NOT NULL DEFAULT 'active',
+  updated_by INTEGER,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS distributor_profiles (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  available_balance_fen INTEGER NOT NULL DEFAULT 0,
+  frozen_balance_fen INTEGER NOT NULL DEFAULT 0,
+  settled_total_fen INTEGER NOT NULL DEFAULT 0,
+  debt_fen INTEGER NOT NULL DEFAULT 0,
+  debt_offset_fen INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS referral_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  distributor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_type TEXT NOT NULL DEFAULT 'link',
+  status TEXT NOT NULL DEFAULT 'active',
+  valid_from TEXT,
+  valid_to TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_referral_codes_distributor ON referral_codes(distributor_user_id, status);
+CREATE TABLE IF NOT EXISTS distribution_clicks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL,
+  distributor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  visitor_id TEXT,
+  user_id INTEGER,
+  ip_hash TEXT,
+  ua_hash TEXT,
+  referrer_url TEXT,
+  occurred_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_distribution_clicks_code ON distribution_clicks(code, occurred_at DESC);
+CREATE TABLE IF NOT EXISTS distribution_relations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  inviter_user_id INTEGER NOT NULL REFERENCES users(id),
+  invitee_user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
+  relation_level INTEGER NOT NULL DEFAULT 1,
+  source_code TEXT,
+  source_click_id INTEGER REFERENCES distribution_clicks(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  risk_status TEXT NOT NULL DEFAULT 'normal',
+  bound_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_distribution_relations_inviter ON distribution_relations(inviter_user_id, bound_at DESC);
+CREATE TABLE IF NOT EXISTS distribution_tree_closure (
+  ancestor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  descendant_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  depth INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (ancestor_user_id, descendant_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_distribution_closure_ancestor ON distribution_tree_closure(ancestor_user_id, depth);
+CREATE INDEX IF NOT EXISTS idx_distribution_closure_descendant ON distribution_tree_closure(descendant_user_id, depth);
+CREATE TABLE IF NOT EXISTS commission_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_code TEXT NOT NULL UNIQUE,
+  scope_type TEXT NOT NULL DEFAULT 'global',
+  scope_value TEXT,
+  relation_level INTEGER NOT NULL DEFAULT 1,
+  rate_bp INTEGER NOT NULL DEFAULT 0,
+  min_order_fen INTEGER NOT NULL DEFAULT 0,
+  max_commission_fen INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  valid_from TEXT,
+  valid_to TEXT,
+  priority INTEGER NOT NULL DEFAULT 100,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_commission_rules_match ON commission_rules(scope_type, relation_level, status, priority);
+CREATE TABLE IF NOT EXISTS commission_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  distributor_user_id INTEGER NOT NULL REFERENCES users(id),
+  invitee_user_id INTEGER NOT NULL REFERENCES users(id),
+  source_relation_id INTEGER REFERENCES distribution_relations(id) ON DELETE SET NULL,
+  commission_level INTEGER NOT NULL,
+  order_amount_fen INTEGER NOT NULL,
+  base_amount_fen INTEGER NOT NULL,
+  rule_code TEXT,
+  rate_bp INTEGER NOT NULL DEFAULT 0,
+  rule_snapshot_json TEXT,
+  commission_amount_fen INTEGER NOT NULL DEFAULT 0,
+  reversed_fen INTEGER NOT NULL DEFAULT 0,
+  settled_fen INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'frozen',
+  available_at TEXT,
+  settlement_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT,
+  UNIQUE (order_id, distributor_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_commission_records_distributor ON commission_records(distributor_user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_commission_records_order ON commission_records(order_id, commission_level);
+CREATE TABLE IF NOT EXISTS commission_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  commission_id INTEGER NOT NULL REFERENCES commission_records(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL,
+  amount_fen INTEGER NOT NULL DEFAULT 0,
+  reason TEXT,
+  operator_id INTEGER,
+  reference_type TEXT,
+  reference_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_commission_events_commission ON commission_events(commission_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS commission_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  next_retry_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_commission_outbox_retry ON commission_outbox(status, next_retry_at);
+CREATE TABLE IF NOT EXISTS commission_reversal_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  refund_id INTEGER NOT NULL UNIQUE REFERENCES refunds(id) ON DELETE CASCADE,
+  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  total_refunded_amount REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  next_retry_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_commission_reversal_outbox_retry
+  ON commission_reversal_outbox(status, next_retry_at);
+CREATE TABLE IF NOT EXISTS commission_settlements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  distributor_user_id INTEGER NOT NULL REFERENCES users(id),
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  amount_fen INTEGER NOT NULL DEFAULT 0,
+  debt_offset_fen INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending_review',
+  created_by INTEGER,
+  reviewed_by INTEGER,
+  payout_ref TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  paid_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_commission_settlements_distributor ON commission_settlements(distributor_user_id, status, period_start);
+CREATE TABLE IF NOT EXISTS commission_settlement_items (
+  settlement_id INTEGER NOT NULL REFERENCES commission_settlements(id) ON DELETE CASCADE,
+  commission_id INTEGER NOT NULL REFERENCES commission_records(id) ON DELETE CASCADE,
+  amount_fen INTEGER NOT NULL,
+  PRIMARY KEY (settlement_id, commission_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settlement_item_commission ON commission_settlement_items(commission_id);
+
+CREATE TABLE IF NOT EXISTS currencies (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  rate_to_cny REAL NOT NULL DEFAULT 1,
+  decimals INTEGER NOT NULL DEFAULT 2,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  is_payout INTEGER NOT NULL DEFAULT 1,
+  sort INTEGER NOT NULL DEFAULT 100
+);
+CREATE TABLE IF NOT EXISTS payout_methods (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  currency_code TEXT NOT NULL REFERENCES currencies(code),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  min_amount_minor INTEGER NOT NULL DEFAULT 0,
+  fee_bp INTEGER NOT NULL DEFAULT 0,
+  fixed_fee_minor INTEGER NOT NULL DEFAULT 0,
+  account_fields_json TEXT NOT NULL DEFAULT '[]',
+  instructions TEXT,
+  sort INTEGER NOT NULL DEFAULT 100,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_payout_methods_currency ON payout_methods(currency_code, enabled, sort);
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  distributor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount_minor INTEGER NOT NULL,
+  fee_minor INTEGER NOT NULL DEFAULT 0,
+  net_amount_minor INTEGER NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL REFERENCES currencies(code),
+  base_cny_fen INTEGER NOT NULL,
+  exchange_rate REAL NOT NULL,
+  method_code TEXT NOT NULL REFERENCES payout_methods(code),
+  account_cipher TEXT NOT NULL,
+  account_preview TEXT NOT NULL,
+  commission_applied INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending_review',
+  reviewer_id INTEGER,
+  payout_ref TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  reviewed_at TEXT,
+  paid_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_distributor ON withdrawal_requests(distributor_user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_status ON withdrawal_requests(status, created_at DESC);
+`)
+
+  const addColumn = (table, column, definition) => {
+    if (!has(table)) return
+    if (!cols(table).includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+  }
+
+  for (const [column, definition] of [
+    ['first_channel_id', 'INTEGER'],
+    ['first_campaign_id', 'INTEGER'],
+    ['first_promo_code', 'TEXT'],
+    ['first_domain_source', 'TEXT'],
+    ['first_enter_at', 'TEXT'],
+    ['attributed_at', 'TEXT'],
+    ['attribution_model', 'TEXT'],
+    ['first_channel_touch_id', 'INTEGER'],
+    ['last_channel_id', 'INTEGER'],
+    ['last_touch_at', 'TEXT'],
+  ]) addColumn('visitors', column, definition)
+
+  for (const [column, definition] of [
+    ['acquisition_channel_id', 'INTEGER'],
+    ['acquisition_channel_type', 'TEXT'],
+    ['acquisition_campaign_id', 'INTEGER'],
+    ['promo_code', 'TEXT'],
+    ['domain_source', 'TEXT'],
+    ['first_enter_at', 'TEXT'],
+    ['attributed_at', 'TEXT'],
+    ['attribution_model', 'TEXT'],
+    ['attribution_touch_id', 'INTEGER'],
+    ['attribution_snapshot_json', 'TEXT'],
+    ['attribution_status', "TEXT DEFAULT 'ok'"],
+    ['distributor_user_id', 'INTEGER'],
+    ['distribution_code', 'TEXT'],
+    ['distribution_relation_id', 'INTEGER'],
+    ['commission_base_fen', 'INTEGER'],
+    ['commission_total_fen', 'INTEGER'],
+    ['commission_record_count', 'INTEGER'],
+    ['commission_rule_snapshot_json', 'TEXT'],
+  ]) addColumn('orders', column, definition)
+
+  addColumn('dramas', 'content_type', 'TEXT')
+  addColumn('dramas', 'published_at', 'TEXT')
+  addColumn('distributor_profiles', 'debt_fen', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('distributor_profiles', 'debt_offset_fen', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('commission_settlements', 'debt_offset_fen', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('withdrawal_requests', 'fee_minor', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('withdrawal_requests', 'net_amount_minor', 'INTEGER NOT NULL DEFAULT 0')
+  addColumn('withdrawal_requests', 'commission_applied', 'INTEGER NOT NULL DEFAULT 0')
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_orders_acquisition_channel ON orders(acquisition_channel_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_acquisition_paid ON orders(acquisition_channel_id, paid_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_distributor ON orders(distributor_user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_attribution_status ON orders(attribution_status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_dramas_content_type ON dramas(content_type, status, published_at DESC);
+  `)
+
+  const insertChannel = db.prepare(`INSERT OR IGNORE INTO channels
+    (channel_code, channel_name, channel_type, status) VALUES (?, ?, ?, 'active')`)
+  insertChannel.run('direct', '直接访问', 'direct')
+  insertChannel.run('legacy_unattributed', '历史未归因', 'legacy_unattributed')
+  insertChannel.run('distribution', '分销邀请', 'distribution')
+  db.prepare(`INSERT OR IGNORE INTO distribution_config (site_code) VALUES ('default')`).run()
+  const seedCurrency = db.prepare(`INSERT OR IGNORE INTO currencies
+    (code, name, symbol, rate_to_cny, decimals, enabled, is_payout, sort) VALUES (?, ?, ?, ?, 2, 1, 1, ?)`)
+  seedCurrency.run('CNY', '人民币', '¥', 1, 10)
+  seedCurrency.run('USD', '美元', '$', 7.2, 20)
+  seedCurrency.run('USDT', 'USDT', '₮', 7.2, 30)
+  const seedMethod = db.prepare(`INSERT OR IGNORE INTO payout_methods
+    (code, name, currency_code, enabled, min_amount_minor, fee_bp, fixed_fee_minor, account_fields_json, instructions, sort)
+    VALUES (?, ?, ?, 1, ?, 0, 0, ?, ?, ?)`)
+  seedMethod.run('cny_bank', '人民币银行卡', 'CNY', 1000,
+    JSON.stringify([{ key: 'accountName', label: '收款人' }, { key: 'bankName', label: '开户行' }, { key: 'accountNo', label: '银行卡号' }]),
+    '人民币提现由财务复核后打款', 10)
+  seedMethod.run('usd_bank', '美元银行账户', 'USD', 1000,
+    JSON.stringify([{ key: 'accountName', label: 'Account holder' }, { key: 'bankName', label: 'Bank name' }, { key: 'accountNo', label: 'Account number' }, { key: 'swift', label: 'SWIFT / BIC' }]),
+    'USD payouts are reviewed and settled manually', 20)
+  seedMethod.run('usdt_trc20', 'USDT TRC20', 'USDT', 1000,
+    JSON.stringify([{ key: 'address', label: 'TRC20 地址' }]),
+    '请确认 TRC20 地址，链上转账不可撤销', 30)
+
+  db.exec(`
+    UPDATE dramas SET content_type = CASE
+      WHEN category = 'MOVIE' THEN 'movie'
+      WHEN category = 'ANIME' THEN 'comic_drama'
+      WHEN category IN ('TV', 'PLAYLET', 'DOCUMENTARY') THEN 'series'
+      ELSE 'series'
+    END
+    WHERE content_type IS NULL OR content_type = '';
+    UPDATE dramas SET published_at = created_at
+    WHERE published_at IS NULL AND status = 'published';
+  `)
+
+  const legacy = db.prepare("SELECT id FROM channels WHERE channel_code = 'legacy_unattributed'").get()
+  if (legacy?.id) {
+    db.prepare(`UPDATE orders SET acquisition_channel_id = ?, acquisition_channel_type = 'legacy_unattributed',
+      attribution_model = 'legacy_unattributed', attributed_at = COALESCE(attributed_at, created_at),
+      attribution_status = 'legacy'
+      WHERE acquisition_channel_id IS NULL`).run(legacy.id)
+    const cutover = db.prepare("SELECT 1 AS x FROM settings WHERE key = 'growth.userAttributionCutover'").get()
+    if (!cutover) {
+      const users = db.prepare('SELECT id, created_at FROM users').all()
+      const insertAcquisition = db.prepare(`INSERT OR IGNORE INTO user_acquisitions
+        (user_id, first_channel_id, first_enter_at, attributed_at, attribution_model, last_channel_id, last_touch_at)
+        VALUES (?, ?, COALESCE(?, datetime('now')), datetime('now'), 'legacy_unattributed', ?, datetime('now'))`)
+      for (const user of users) insertAcquisition.run(user.id, legacy.id, user.created_at, legacy.id)
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('growth.userAttributionCutover', ?)")
+        .run(JSON.stringify(new Date().toISOString()))
+    }
+  }
+
+  // Existing favorites become current state only; synthetic events are marked as migration and excluded from windows.
+  const hasFavoriteMigration = db.prepare("SELECT 1 AS x FROM settings WHERE key = 'growth.favoriteMigration'").get()
+  if (!hasFavoriteMigration) {
+    const rows = db.prepare('SELECT user_id, drama_id, created_at FROM favorites').all()
+    const insert = db.prepare(`INSERT OR IGNORE INTO content_favorite_events
+      (dedup_key, user_id, content_id, action, from_state, to_state, is_migration, occurred_at)
+      VALUES (?, ?, ?, 'add', 0, 1, 1, ?)`)
+    for (const row of rows) insert.run(`migration:${row.user_id}:${row.drama_id}`, row.user_id, row.drama_id, row.created_at)
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('growth.favoriteMigration', 'true')").run()
+  }
+}
+
 /** 补齐缺失的默认设置行（老库升级用）。 */
 export function ensureSettings() {
   const defaults = {
     smtp: { enabled: false, host: '', port: 465, secure: true, user: '', pass: '', from: '', fromName: '影巢' },
+    attribution: { model: 'first_touch', windowDays: 30 },
+    adultMenu: { enabled: true, labelZh: '成人', labelEn: 'Adult' },
   }
   for (const [key, value] of Object.entries(defaults)) {
     const row = db.prepare('SELECT 1 AS x FROM settings WHERE key = ?').get(key)
@@ -1130,6 +1941,7 @@ export function ensureSettings() {
 // 模块加载即补齐运营侧增量表（幂等）：标签层级 / 按集定价 / 榜单自动分 / 搜刮缓存 / 后台菜单。
 // 放在这里而不是只在 index.mjs 调，是为了测试与脚本（导入、探针）导入 db 时也有一致的表结构。
 ensureOpsSchema()
+ensureGrowthSchema()
 // 新增的权限节点（如 system.menu）也要在脚本/测试场景下补齐，否则角色授权页看不到
 syncMenuCatalog()
 

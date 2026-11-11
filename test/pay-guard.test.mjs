@@ -18,7 +18,7 @@ process.env.MH_SECRET = 'test-secret'
 process.env.MH_CONFIG_KEYS = `1:${Buffer.alloc(32, 11).toString('base64')}`
 process.env.MH_CONFIG_KEY_VERSION = '1'
 
-let db, commerce, analytics
+let db, commerce, analytics, entitlements
 
 const TRON = 'TQqJV8HW8tUHDPXbqu43NsrmJvHZ19Fn9Z'
 
@@ -29,6 +29,7 @@ before(async () => {
   dbModule.migratePayChannels()
   commerce = await import('../server/commerce.mjs')
   analytics = await import('../server/analytics.mjs')
+  entitlements = await import('../server/entitlements.mjs')
 })
 
 after(() => { try { db.close() } catch { /* ignore */ } })
@@ -107,6 +108,9 @@ test('行为埋点只收白名单类型，并能汇总到训练漏斗', () => {
   // 非白名单类型（例如想借埋点接口写任意表）直接拒绝
   assert.equal(analytics.recordEvent({ type: 'orders', userId: uid }), false)
   assert.equal(analytics.recordEvent({ type: '', userId: uid }), false)
+  assert.equal(analytics.isClientTrackType('payment_success'), false)
+  assert.equal(analytics.isClientTrackType('order_created'), false)
+  assert.equal(analytics.isClientTrackType('detail_view'), true)
 
   const report = analytics.analyticsReport({ days: 7 })
   assert.equal(report.tracking.upstream.detailViews, 2)
@@ -116,4 +120,82 @@ test('行为埋点只收白名单类型，并能汇总到训练漏斗', () => {
   assert.ok(report.tracking.completion.avgRate > 0.9)
   const byType = Object.fromEntries(report.tracking.byType.map((row) => [row.type, row.n]))
   assert.equal(byType.detail_view, 2)
+})
+
+test('匿名访客：生成 visitor_id、关联 user_id，并进入分析漏斗', () => {
+  const uid = newUser()
+  const visitorId = `anon-${Date.now()}`
+  assert.equal(analytics.recordEvent({ type: 'page_view', visitorId, path: '#/home' }), true)
+  assert.equal(analytics.recordEvent({ type: 'impression', visitorId, userId: uid, dramaId: 1 }), true)
+  const visitor = db.prepare('SELECT * FROM visitors WHERE id = ?').get(visitorId)
+  assert.ok(visitor)
+  assert.equal(visitor.user_id, uid)
+  const report = analytics.analyticsReport({ days: 7 })
+  assert.ok(report.visitors.total >= 1)
+  assert.ok(report.tracking.upstream.pageViews >= 1)
+  assert.ok(report.conversion.some((stage) => stage.key === 'visitors' && stage.value >= 1))
+})
+
+test('转化漏斗按访客逐级去重，订单与支付继承 visitor_id', () => {
+  const previousSimPay = process.env.MH_ALLOW_SIM_PAY
+  process.env.MH_ALLOW_SIM_PAY = '1'
+  try {
+    upsert('mock', {}, { isDefault: true, priority: 1 })
+    const uid = newUser()
+    const visitorId = `funnel-${Date.now()}`
+    assert.equal(analytics.recordEvent({ type: 'page_view', visitorId, path: '#/home' }), true)
+    assert.equal(analytics.recordEvent({ type: 'login_open', visitorId }), true)
+    assert.equal(analytics.recordEvent({ type: 'login_success', visitorId, userId: uid, meta: { method: 'code' } }), true)
+    assert.equal(analytics.recordEvent({ type: 'detail_view', visitorId, userId: uid, dramaId: 1 }), true)
+    assert.doesNotThrow(() => analytics.recordPlay({ userId: uid, visitorId, dramaId: 1, episodeId: 1, episodeNo: 1 }))
+    assert.equal(analytics.recordEvent({ type: 'paywall_view', visitorId, userId: uid, dramaId: 1 }), true)
+
+    const created = commerce.createOrder({ userId: uid, visitorId, productType: 'subscription', planId: 1, channel: 'mock' })
+    assert.equal(created.order.visitor_id, visitorId)
+    const paid = commerce.markPaid({
+      orderId: created.order.id, channel: 'mock', channelTxnId: `FUNNEL-${Date.now()}`,
+    })
+    assert.equal(paid.order.status, 'fulfilled')
+
+    const report = analytics.analyticsReport({ days: 7 })
+    const stages = Object.fromEntries(report.conversion.map((stage) => [stage.key, stage.value]))
+    assert.ok(stages.visitors >= 1)
+    assert.ok(stages.detailViews >= 1)
+    assert.ok(stages.plays >= 1)
+    assert.ok(stages.paywallViews >= 1)
+    assert.ok(stages.orders >= 1)
+    assert.ok(stages.paid >= 1)
+    for (let index = 1; index < report.conversion.length; index += 1) {
+      assert.ok(report.conversion[index].value <= report.conversion[index - 1].value)
+      assert.ok(report.conversion[index].rate <= 100)
+    }
+    const byType = Object.fromEntries(report.tracking.byType.map((row) => [row.type, row.n]))
+    assert.ok(byType.order_created >= 1)
+    assert.ok(byType.payment_success >= 1)
+  } finally {
+    if (previousSimPay === undefined) delete process.env.MH_ALLOW_SIM_PAY
+    else process.env.MH_ALLOW_SIM_PAY = previousSimPay
+  }
+})
+
+test('策略组覆盖单剧策略，改组后已分配剧集实时生效', () => {
+  const groupId = Number(db.prepare(`INSERT INTO policy_groups
+    (name, description, access_mode, free_episodes, trial_seconds, single_price_cny)
+    VALUES ('测试策略组', '', 'paid', 2, 30, 9.9)`).run().lastInsertRowid)
+  db.prepare(`INSERT INTO content_policies
+    (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny)
+    VALUES (1, ?, 'subscription', 0, 0, 0)
+    ON CONFLICT(drama_id) DO UPDATE SET policy_group_id = excluded.policy_group_id,
+      access_mode = excluded.access_mode, free_episodes = excluded.free_episodes,
+      trial_seconds = excluded.trial_seconds, single_price_cny = excluded.single_price_cny`)
+    .run(groupId)
+  let policy = entitlements.policyOf(1)
+  assert.equal(policy.policy_group_id, groupId)
+  assert.equal(policy.access_mode, 'paid')
+  assert.equal(policy.free_episodes, 2)
+  assert.equal(policy.single_price_cny, 9.9)
+  db.prepare("UPDATE policy_groups SET access_mode = 'free', single_price_cny = 0 WHERE id = ?").run(groupId)
+  policy = entitlements.policyOf(1)
+  assert.equal(policy.access_mode, 'free')
+  assert.equal(policy.single_price_cny, 0)
 })

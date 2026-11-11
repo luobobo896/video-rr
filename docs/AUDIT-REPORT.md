@@ -1,5 +1,9 @@
 # 影巢系统验收报告（C 端 / B 端）
 
+> 历史记录说明：本文引用的 `outputs/mh-recon/verify-system.mjs`、`check-perms.mjs` 等脚本不在当前仓库，
+> 因此文中的 75/78/79 项断言不能按原命令复跑。当前可执行回归为 `npm test`（92/92），
+> 移动端/后台布局与性能复测见 `AUDIT-2026-11-10-UI-PERF.md`。
+
 - 验收时间：2026-11-10
 - 验收方式：`node outputs/mh-recon/verify-system.mjs <BASE>`（75 项断言，可重复执行）
   - 本地全量：**75/75 通过**（含下单、支付、订阅、单片、USDT 确认、标签、风控触发）

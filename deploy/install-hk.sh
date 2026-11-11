@@ -4,11 +4,13 @@
 set -euo pipefail
 
 APP=/opt/video-rr
+cd "$APP"
 DOMAIN=hk.hsddns.com
 SITE=/etc/nginx/sites-enabled/whatsapp-ai-hk
 SNIPPET=/etc/nginx/snippets/video-rr.conf
 HTTPCONF=/etc/nginx/conf.d/10-video-rr-http.conf
 APP_PORT=8787
+BROWSER_UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36'
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
@@ -22,11 +24,23 @@ if [ -f "$APP/storage/app.db" ]; then
   ls -1t "$APP"/storage/backup/app.db.* 2>/dev/null | tail -n +11 | xargs -r rm -f
 fi
 
-log "1/7 依赖检查"
+log "1/7 依赖检查与前端构建"
 mkdir -p "$APP/storage/hls" "$APP/storage/uploads" "$APP/storage/images"
 command -v ffmpeg >/dev/null || { echo "缺少 ffmpeg"; exit 1; }
 command -v node >/dev/null || { echo "缺少 node >=22.5（需要 node:sqlite）"; exit 1; }
+command -v npm >/dev/null || { echo "缺少 npm（构建 Vue + Vite 前端需要）"; exit 1; }
 node -e "require('node:sqlite')" 2>/dev/null || { echo "node 版本过低：$(node -v)"; exit 1; }
+
+# 每次都从当前源码重建，避免部署包里的旧 dist 或漏构建让线上继续跑旧前端。
+if [ -f package-lock.json ]; then
+  npm ci --include=dev --no-audit --no-fund
+else
+  echo "缺少 package-lock.json：旧部署包或源码不完整"
+  exit 1
+fi
+npm run build
+[ -s dist/client/index.html ] || { echo "C 端构建产物缺失"; exit 1; }
+[ -s dist/admin/index.html ] || { echo "后台构建产物缺失"; exit 1; }
 
 # Redis：限流滑动窗口。未安装则装上并只监听回环；装不上也不阻塞（服务自动降级为进程内内存）
 if command -v redis-server >/dev/null; then
@@ -112,8 +126,9 @@ systemctl daemon-reload
 systemctl enable video-rr.service >/dev/null 2>&1
 systemctl restart video-rr.service
 sleep 2
-curl -fsS "http://127.0.0.1:$APP_PORT/api/constants" >/dev/null && echo "API 正常" || { echo "API 启动失败，看 /var/log/video-rr.err.log"; exit 1; }
+curl -fsS -A "$BROWSER_UA" "http://127.0.0.1:$APP_PORT/api/constants" >/dev/null && echo "API 正常" || { echo "API 启动失败，看 /var/log/video-rr.err.log"; exit 1; }
 node scripts/rewrite-cover-urls.mjs || true
+node scripts/build-poster-wall.mjs || echo "警告：海报墙变体生成失败（不阻断主站）"
 
 log "5/7 nginx 片段"
 # 播放签名由 Node 校验（auth_request → /media-auth），片段里不再有密钥占位符
@@ -149,10 +164,12 @@ systemctl reload nginx
 
 log "7/7 健康检查"
 for path in /video/ /video-admin/ /video/api/constants; do
-  code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN$path")
+  code=$(curl -sk -A "$BROWSER_UA" -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN$path")
   printf '  %-24s %s\n' "$path" "$code"
 done
-unsigned=$(curl -sk -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/video/media/hls/1/index.m3u8")
+curl -fsS -A "$BROWSER_UA" "http://127.0.0.1:$APP_PORT/" | grep -q 'id="vue-root"' || { echo "C 端未加载 Vue 构建产物"; exit 1; }
+curl -fsS -A "$BROWSER_UA" "http://127.0.0.1:$APP_PORT/admin/" | grep -q 'id="vue-root"' || { echo "后台未加载 Vue 构建产物"; exit 1; }
+unsigned=$(curl -sk -A "$BROWSER_UA" -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/video/media/hls/1/index.m3u8")
 printf '  %-24s %s（应为 403）\n' 'unsigned hls' "$unsigned"
 echo
 echo "完成：C 端 https://$DOMAIN/video/   后台 https://$DOMAIN/video-admin/"

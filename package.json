@@ -3,15 +3,38 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "影巢：视频站全栈复刻（C 端 + 后台 + 转码 + 直播），零外部依赖",
+  "description": "影巢：视频站全栈复刻（C 端 + 后台 + 转码），Vue 3 + Rolldown-Vite 前端",
   "scripts": {
-    "start": "node server/index.mjs",
-    "dev": "node --watch server/index.mjs",
+    "start": "npm run build && node server/index.mjs",
+    "start:server": "node server/index.mjs",
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\" \"npm:dev:admin\"",
+    "dev:server": "node --watch server/index.mjs",
+    "dev:client": "vite --config vite.client.config.mjs",
+    "dev:admin": "vite --config vite.admin.config.mjs",
+    "build": "npm run build:client && npm run build:admin && node scripts/copy-frontend-assets.mjs",
+    "build:client": "vite --config vite.client.config.mjs build",
+    "build:admin": "vite --config vite.admin.config.mjs build",
+    "pack:deploy": "node scripts/package-deploy.mjs",
     "reset-db": "node scripts/reset-db.mjs",
-    "test": "node --test",
+    "previews": "node scripts/generate-previews.mjs",
+    "posters": "node scripts/build-poster-wall.mjs",
+    "check:tokens": "node scripts/sync-tokens.mjs --check",
+    "check:frontend": "node --check public/base.js && node --check public/main.js && node --check public/app.js && node --check public/i18n.js && node --check public/track-match.js && node --check public/poster-wall-view.js && node --check public/qr-code.js && node --check admin/base.js && node --check admin/main.js && node --check admin/app.js && node scripts/check-frontend.mjs",
+    "check": "npm run check:tokens && npm run check:frontend",
+    "test": "npm run check:tokens && node --test \"test/*.test.mjs\"",
     "seed": "node server/index.mjs"
   },
   "engines": {
     "node": ">=22.5"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "element-plus": "^2.14.8",
+    "vue": "^3.5.45"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "concurrently": "^9.2.1",
+    "vite": "npm:rolldown-vite@^7.3.1"
   }
 }

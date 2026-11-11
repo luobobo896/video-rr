@@ -132,3 +132,18 @@ t:{t}
 | `/m-station/behavior/add` | `POST /api/me/favorite` | 内存 |
 
 上线时把 `server.mjs` 的 `/api/*` 换成真实实现，并恢复「AES 加密响应 + x-ca-sign 校验」，前端 `public/app.js` 只需改 `api()` 一处解密逻辑。
+
+## 6. 增长域接口（实现版）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/attribution/touch` | `{visitorId,promoCode,referralCode,landingPath,referrer,utm}`；按推广码 → 域名 → direct 记录触达和归因快照 |
+| POST | `/api/content/click` | `{contentId,episodeId,entryPage,sourceModule,position,requestId}`；30 分钟桶去重 |
+| GET | `/api/content/rank?type=hot|favorite|completion|new|recommend&contentType=` | 内容统计榜快照 |
+| GET | `/api/play/:id/:no` | 播放成功时增加 `viewSessionId`、心跳间隔和有效观看阈值 |
+| POST | `/api/play/session/:id/heartbeat` | `{positionSeconds,durationSeconds,playing,visible,playbackRate}`；累计有效观看 |
+| GET | `/api/distribution/me` | 登录用户查看推广码、推广数据、分层佣金；C 端文案为“佣金推广” |
+| POST | `/api/distribution/apply` | 申请开通佣金推广；默认站点自动通过，写入 `distributor_profiles` |
+| GET | `/i/:code` | 推广落地页，记录点击、写 `mh_ref` Cookie 并跳转 `/?ref=CODE` |
+
+渠道归因字段落在 `orders` 的 `acquisition_*`、`promo_code`、`domain_source`、`first_enter_at`、`attributed_at` 等列；内容统计落在 `content_*` 表；分销落在 `distribution_*`、`commission_*` 表。完整 Schema 见 `docs/database/GROWTH-SCHEMA.sql`。

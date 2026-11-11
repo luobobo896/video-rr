@@ -7,6 +7,10 @@ import { db, getSetting } from './db.mjs'
 import { grantPurchase, grantSubscription, revokeByOrder, policyOf } from './entitlements.mjs'
 import { currentKeyVersion, maskConfig, openSecret, sealSecret } from './secretbox.mjs'
 import * as alipay from './payments/alipay.mjs'
+import { recordEvent } from './analytics.mjs'
+import { getOrderAttribution } from './attribution.mjs'
+import { createCommissionsForOrder, getDistributionSnapshot, reverseCommissionsForRefund } from './distribution.mjs'
+import { logWarn } from './logger.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -163,12 +167,15 @@ export function basePriceOf({ productType, planId, dramaId }) {
   return { price: policy.single_price_cny, policy }
 }
 
-export function createOrder({ userId, productType, planId, dramaId, channel, couponCode }) {
+export function createOrder({ userId, visitorId, productType, planId, dramaId, channel, couponCode, ip, ua }) {
   if (!userId) throw new CommerceError('unauthorized', '请先登录', 401)
   const { price, plan, policy } = basePriceOf({ productType, planId, dramaId })
   const couponResult = validateCoupon(couponCode, price)
   if (!couponResult.ok) throw new CommerceError('coupon_invalid', couponResult.message)
   const amount = Math.max(0.01, Math.round((price - couponResult.discount) * 100) / 100)
+  const attribution = getOrderAttribution({ userId, visitorId })
+  const distribution = getDistributionSnapshot(userId)
+  const attributionSnapshot = JSON.stringify(attribution.snapshot ?? {})
 
   // 渠道解析：显式指定 > 场景默认 > 优先级兜底；金额/币种不满足则跳过
   const scene = productType === 'subscription' ? 'subscription' : 'single'
@@ -221,7 +228,25 @@ export function createOrder({ userId, productType, planId, dramaId, channel, cou
   productType === 'subscription' ? plan.id : 0,
   productType === 'single' ? Number(dramaId) : 0,
   amount)
-  if (reusable) return { ...paymentOf(reusable), reused: true }
+  if (reusable) {
+    run(`UPDATE orders SET visitor_id = COALESCE(NULLIF(visitor_id, ''), ?),
+      acquisition_channel_id = COALESCE(acquisition_channel_id, ?), acquisition_channel_type = COALESCE(acquisition_channel_type, ?),
+      acquisition_campaign_id = COALESCE(acquisition_campaign_id, ?), promo_code = COALESCE(promo_code, ?),
+      domain_source = COALESCE(domain_source, ?), first_enter_at = COALESCE(first_enter_at, ?),
+      attributed_at = COALESCE(attributed_at, ?), attribution_model = COALESCE(attribution_model, ?),
+      attribution_touch_id = COALESCE(attribution_touch_id, ?), attribution_snapshot_json = COALESCE(attribution_snapshot_json, ?),
+      attribution_status = COALESCE(attribution_status, 'ok'),
+      distributor_user_id = COALESCE(distributor_user_id, ?), distribution_code = COALESCE(distribution_code, ?),
+      distribution_relation_id = COALESCE(distribution_relation_id, ?)
+      WHERE id = ?`,
+    visitorId ? String(visitorId).slice(0, 64) : null,
+    attribution.channelId, attribution.channelType, attribution.campaignId, attribution.promoCode,
+    attribution.domainSource, attribution.firstEnterAt, attribution.attributedAt, attribution.attributionModel,
+    attribution.touchId, attributionSnapshot, distribution.distributorUserId,
+    distribution.distributionCode, distribution.relationId, reusable.id)
+    if (!reusable.visitor_id && visitorId) reusable.visitor_id = visitorId
+    return { ...paymentOf(reusable), reused: true }
+  }
 
   const order = {
     outTradeNo: outTradeNo(),
@@ -232,10 +257,14 @@ export function createOrder({ userId, productType, planId, dramaId, channel, cou
   }
 
   const info = run(`INSERT INTO orders
-    (out_trade_no, user_id, product_type, plan_id, drama_id, amount_cny, coupon_id, channel, status, pay_url,
-     usdt_amount, usdt_rate, usdt_address, expires_at, meta_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?)`,
-  order.outTradeNo, userId, productType,
+    (out_trade_no, user_id, visitor_id, product_type, plan_id, drama_id, amount_cny, coupon_id, channel, status, pay_url,
+     usdt_amount, usdt_rate, usdt_address, expires_at, meta_json,
+     acquisition_channel_id, acquisition_channel_type, acquisition_campaign_id, promo_code, domain_source,
+     first_enter_at, attributed_at, attribution_model, attribution_touch_id, attribution_snapshot_json,
+     attribution_status, distributor_user_id, distribution_code, distribution_relation_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?)`,
+  order.outTradeNo, userId, visitorId ? String(visitorId).slice(0, 64) : null, productType,
   productType === 'subscription' ? plan.id : null,
   productType === 'single' ? Number(dramaId) : null,
   amount, couponResult.coupon?.id ?? null, channelCode,
@@ -247,8 +276,17 @@ export function createOrder({ userId, productType, planId, dramaId, channel, cou
     couponCode: couponCode ?? null,
     channelId: row.id, channelEnv: row.env, channelKeyVersion: row.key_version,
   }),
+  attribution.channelId, attribution.channelType, attribution.campaignId, attribution.promoCode,
+  attribution.domainSource, attribution.firstEnterAt, attribution.attributedAt, attribution.attributionModel,
+  attribution.touchId, attributionSnapshot, distribution.distributorUserId, distribution.distributionCode,
+  distribution.relationId,
   )
   const created = one('SELECT * FROM orders WHERE id = ?', Number(info.lastInsertRowid))
+  recordEvent({
+    type: 'order_created', userId, visitorId, dramaId: created.drama_id,
+    path: productType === 'subscription' ? 'subscription' : `single/${created.drama_id}`,
+    value: amount, meta: { orderId: created.id, productType, planId: created.plan_id, channel: channelCode }, ip, ua,
+  })
   return paymentOf(created)
 }
 
@@ -274,7 +312,7 @@ export function fulfillOrder(order) {
  *  - 订单已 fulfilled → 直接返回
  */
 export function markPaid({ outTradeNo, orderId, channel, channelTxnId, amount, currency = 'CNY', raw }) {
-  return tx(() => {
+  const result = tx(() => {
     const order = outTradeNo
       ? one('SELECT * FROM orders WHERE out_trade_no = ?', String(outTradeNo))
       : one('SELECT * FROM orders WHERE id = ?', Number(orderId))
@@ -298,13 +336,56 @@ export function markPaid({ outTradeNo, orderId, channel, channelTxnId, amount, c
 
     fulfillOrder(order)
     run(`UPDATE orders SET status = 'fulfilled', fulfilled_at = datetime('now') WHERE id = ?`, order.id)
+    // 佣金生成和支付同事务落 outbox；派生失败可重试，不会静默丢失。
+    run('INSERT OR IGNORE INTO commission_outbox (order_id) VALUES (?)', order.id)
     if (order.coupon_id) {
       run('UPDATE coupons SET used = used + 1 WHERE id = ?', order.coupon_id)
       run('INSERT OR IGNORE INTO coupon_redemptions (coupon_id, user_id, order_id) VALUES (?, ?, ?)', order.coupon_id, order.user_id, order.id)
     }
     const paid = one('SELECT * FROM orders WHERE id = ?', order.id)
+    recordEvent({
+      type: 'payment_success', userId: order.user_id, visitorId: order.visitor_id,
+      dramaId: order.drama_id, path: order.out_trade_no, value: Number(order.amount_cny),
+      meta: { orderId: order.id, channel, productType: order.product_type },
+    })
     return { order: paid, paymentId: Number(payment.lastInsertRowid), duplicate: false }
   })
+  // 佣金是支付后的派生数据：不能因为佣金写失败回滚已确认的支付。
+  if (!result.duplicate) {
+    processCommissionOutbox(result.order.id)
+    const refreshed = one('SELECT * FROM orders WHERE id = ?', result.order.id)
+    if (refreshed) result.order = refreshed
+  }
+  return result
+}
+
+/** 处理支付产生的佣金 outbox；失败保留 pending，由后台定时器继续重试。 */
+export function processCommissionOutbox(orderId = null, { limit = 50 } = {}) {
+  const jobs = orderId
+    ? all("SELECT * FROM commission_outbox WHERE order_id = ? AND status <> 'done'", Number(orderId))
+    : all(`SELECT * FROM commission_outbox WHERE status <> 'done'
+      AND (next_retry_at IS NULL OR next_retry_at <= datetime('now'))
+      ORDER BY id LIMIT ?`, Math.max(1, Math.min(200, Number(limit) || 50)))
+  let processed = 0
+  for (const job of jobs) {
+    const order = one('SELECT * FROM orders WHERE id = ?', Number(job.order_id))
+    if (!order || !['paid', 'fulfilled'].includes(order.status)) {
+      run(`UPDATE commission_outbox SET status = 'done', last_error = NULL, updated_at = datetime('now') WHERE id = ?`, job.id)
+      continue
+    }
+    try {
+      createCommissionsForOrder(order, { paidAt: order.paid_at ?? nowSql() })
+      run(`UPDATE commission_outbox SET status = 'done', last_error = NULL, next_retry_at = NULL, updated_at = datetime('now') WHERE id = ?`, job.id)
+      processed += 1
+    } catch (error) {
+      const attempts = Number(job.attempts) + 1
+      const delaySeconds = Math.min(3600, 60 * attempts)
+      run(`UPDATE commission_outbox SET attempts = ?, last_error = ?, next_retry_at = datetime('now', ?), updated_at = datetime('now') WHERE id = ?`,
+        attempts, String(error.message ?? error).slice(0, 500), `+${delaySeconds} seconds`, job.id)
+      logWarn('commerce.commission_create_failed', { orderId: job.order_id, attempts, error })
+    }
+  }
+  return processed
 }
 
 /* ---------------- 支付渠道实现 ---------------- */
@@ -368,7 +449,7 @@ export function approveRefund({ refundId, approverId }) {
 }
 
 export function executeRefund(refundId) {
-  return tx(() => {
+  const result = tx(() => {
     const refund = one('SELECT * FROM refunds WHERE id = ?', refundId)
     const order = one('SELECT * FROM orders WHERE id = ?', refund.order_id)
     // 渠道退款：mock 直接成功；支付宝/USDT 需真实接口，这里记录待人工执行
@@ -380,11 +461,60 @@ export function executeRefund(refundId) {
         return { refund, warning: '支付宝退款接口未启用：需在支付配置开启后再执行' }
       }
     }
-    const revoked = revokeByOrder(order.id)
-    run("UPDATE orders SET status = 'refunded', refunded_amount = refunded_amount + ? WHERE id = ?", refund.amount, order.id)
+    const nextRefundedAmount = Number(order.refunded_amount ?? 0) + Number(refund.amount)
+    const fullyRefunded = nextRefundedAmount >= Number(order.amount_cny) - 0.001
+    const revoked = fullyRefunded ? revokeByOrder(order.id) : { subscriptions: 0, purchases: 0 }
+    // 部分退款不撤销全部权益，订单保持可继续退剩余金额。
+    const nextStatus = fullyRefunded ? 'refunded' : (order.fulfilled_at ? 'fulfilled' : 'paid')
+    run("UPDATE orders SET status = ?, refunded_amount = refunded_amount + ? WHERE id = ?", nextStatus, refund.amount, order.id)
     run("UPDATE refunds SET status = 'done', done_at = datetime('now') WHERE id = ?", refund.id)
-    return { refund: one('SELECT * FROM refunds WHERE id = ?', refund.id), revoked }
+    run(`INSERT OR IGNORE INTO commission_reversal_outbox
+      (refund_id, order_id, total_refunded_amount) VALUES (?, ?, ?)`,
+    refund.id, order.id, nextRefundedAmount)
+    return {
+      refund: one('SELECT * FROM refunds WHERE id = ?', refund.id), revoked,
+      order: { ...order, refunded_amount: nextRefundedAmount }, fullyRefunded,
+    }
   })
+  // 退款先落账，佣金冲减失败不阻断退款；outbox 保留任务并定时重试。
+  if (result.refund?.status === 'done') {
+    processCommissionReversalOutbox(result.refund.id)
+  }
+  return result
+}
+
+export function processCommissionReversalOutbox(refundId = null, { limit = 50 } = {}) {
+  const jobs = refundId
+    ? all("SELECT * FROM commission_reversal_outbox WHERE refund_id = ? AND status <> 'done'", Number(refundId))
+    : all(`SELECT * FROM commission_reversal_outbox WHERE status <> 'done'
+      AND (next_retry_at IS NULL OR next_retry_at <= datetime('now'))
+      ORDER BY id LIMIT ?`, Math.max(1, Math.min(200, Number(limit) || 50)))
+  let processed = 0
+  for (const job of jobs) {
+    const order = one('SELECT * FROM orders WHERE id = ?', Number(job.order_id))
+    const refund = one('SELECT * FROM refunds WHERE id = ?', Number(job.refund_id))
+    if (!order || !refund) {
+      run(`UPDATE commission_reversal_outbox SET status = 'done', last_error = NULL, updated_at = datetime('now') WHERE id = ?`, job.id)
+      continue
+    }
+    try {
+      reverseCommissionsForRefund({
+        order,
+        totalRefundedAmount: Number(job.total_refunded_amount),
+        referenceId: refund.id,
+        reason: refund.reason,
+      })
+      run(`UPDATE commission_reversal_outbox SET status = 'done', last_error = NULL, next_retry_at = NULL, updated_at = datetime('now') WHERE id = ?`, job.id)
+      processed += 1
+    } catch (error) {
+      const attempts = Number(job.attempts) + 1
+      const delaySeconds = Math.min(3600, 60 * attempts)
+      run(`UPDATE commission_reversal_outbox SET attempts = ?, last_error = ?, next_retry_at = datetime('now', ?), updated_at = datetime('now') WHERE id = ?`,
+        attempts, String(error.message ?? error).slice(0, 500), `+${delaySeconds} seconds`, job.id)
+      logWarn('commerce.commission_reverse_failed', { orderId: job.order_id, refundId: job.refund_id, attempts, error })
+    }
+  }
+  return processed
 }
 
 export function rejectRefund({ refundId, approverId, reason }) {
@@ -436,16 +566,41 @@ export function commerceStats() {
   }
 }
 
-export function listOrders({ limit = 100, status, userId } = {}) {
+export function listOrders({ limit = 100, offset = 0, status, userId, q } = {}) {
+  const { where, args } = orderWhere({ status, userId, q })
+  return all(`SELECT o.*, u.nickname, u.phone, p.name AS plan_name, d.title AS drama_title
+    FROM orders o LEFT JOIN users u ON u.id = o.user_id
+    LEFT JOIN plans p ON p.id = o.plan_id LEFT JOIN dramas d ON d.id = o.drama_id
+    ${where} ORDER BY o.id DESC LIMIT ? OFFSET ?`,
+  ...args, Math.min(300, Number(limit) || 100), Math.max(0, Number(offset) || 0))
+}
+
+/** 订单筛选条件统一拼装：列表与计数共用，避免两处 WHERE 不一致。 */
+function orderWhere({ status, userId, q } = {}) {
   const clauses = []
   const args = []
   if (status) { clauses.push('o.status = ?'); args.push(status) }
   if (userId) { clauses.push('o.user_id = ?'); args.push(Number(userId)) }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-  return all(`SELECT o.*, u.nickname, u.phone, p.name AS plan_name, d.title AS drama_title
+  const keyword = String(q ?? '').trim()
+  if (keyword) {
+    const like = `%${keyword}%`
+    clauses.push('(o.out_trade_no LIKE ? OR u.nickname LIKE ? OR p.name LIKE ? OR d.title LIKE ?)')
+    args.push(like, like, like, like)
+  }
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', args }
+}
+
+export function countOrders({ status, userId, q } = {}) {
+  const { where, args } = orderWhere({ status, userId, q })
+  return Number(all(`SELECT COUNT(*) AS n FROM orders o LEFT JOIN users u ON u.id = o.user_id
+    LEFT JOIN plans p ON p.id = o.plan_id LEFT JOIN dramas d ON d.id = o.drama_id ${where}`, ...args)[0]?.n ?? 0)
+}
+
+export function getOrder(id) {
+  return all(`SELECT o.*, u.nickname, u.email, u.phone, p.name AS plan_name, d.title AS drama_title
     FROM orders o LEFT JOIN users u ON u.id = o.user_id
     LEFT JOIN plans p ON p.id = o.plan_id LEFT JOIN dramas d ON d.id = o.drama_id
-    ${where} ORDER BY o.id DESC LIMIT ?`, ...args, Math.min(300, Number(limit) || 100))
+    WHERE o.id = ?`, Number(id))[0]
 }
 
 /** 订单列表的统一出口：前端不再需要在 snake_case / camelCase 之间猜字段。 */

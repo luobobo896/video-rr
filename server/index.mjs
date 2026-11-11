@@ -8,17 +8,23 @@
  */
 import { createServer } from 'node:http'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { extname, join, normalize, resolve, sep } from 'node:path'
+import { extname, join } from 'node:path'
 import { db, seedIfEmpty, ROOT, ensureSettings, ensurePaySafety, ensureUserSchema, ensureAdminSchema, ensureAdminCredentials, ensureLinkSecret, ensureOpsSchema, migrateCodesToNumeric, migratePayChannels, syncMenuCatalog } from './db.mjs'
 import { cleanupCodes } from './otp.mjs'
 import { handlePublic } from './api-public.mjs'
 import { handleAdmin, preAuthorizeAdmin } from './api-admin.mjs'
 import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
+import { processCommissionOutbox, processCommissionReversalOutbox } from './commerce.mjs'
+import { PREVIEW_DIR } from './previews.mjs'
 import { verifyLink } from './entitlements.mjs'
 import { closeExpiredOrders, reconcile } from './commerce.mjs'
 import { refreshAutoRanks } from './rank.mjs'
 import { inspect, sweep } from './ratelimit.mjs'
 import { connectRedis, redisStatus } from './redis.mjs'
+import { logError, logInfo, logWarn, newRequestId } from './logger.mjs'
+import { markCommissionsAvailable, reconcileWithdrawalCommissions, recordInviteClick } from './distribution.mjs'
+import { rebuildContentStats, refreshContentRanks } from './content-stats.mjs'
+import { resolveInside } from './path-safety.mjs'
 
 /**
  * 站点子路径（如 /video）。nginx 会把前缀剥掉再反代，服务端渲染的支付页必须自己拼回去，
@@ -42,6 +48,7 @@ ensureAdminSchema()
 ensureSettings()
 ensureAdminCredentials()   // 老库弱口令轮换（与 seed 解耦）
 ensureOpsSchema()          // 标签层级 / 按集定价 / 榜单自动分 / 搜刮缓存（幂等补列补表）
+reconcileWithdrawalCommissions()
 const codeMigration = migrateCodesToNumeric()  // 套餐/优惠券英文编码迁成雪花数字码
 ensureLinkSecret()         // 播放签名密钥自检
 ensurePaySafety()          // 模拟支付渠道默认关闭 + USDT 确认数口径统一
@@ -50,6 +57,12 @@ const channelMigration = migratePayChannels()
 const PORT = Number(process.env.PORT ?? 8787)
 const PUBLIC = join(ROOT, 'public')
 const ADMIN = join(ROOT, 'admin')
+const CLIENT_BUILD = join(ROOT, 'dist', 'client')
+const ADMIN_BUILD = join(ROOT, 'dist', 'admin')
+const CLIENT_ROOT = existsSync(join(CLIENT_BUILD, 'index.html')) ? CLIENT_BUILD : PUBLIC
+const ADMIN_ROOT = existsSync(join(ADMIN_BUILD, 'index.html')) ? ADMIN_BUILD : ADMIN
+const CLIENT_INDEX = CLIENT_ROOT === PUBLIC ? 'legacy.html' : 'index.html'
+const ADMIN_INDEX = ADMIN_ROOT === ADMIN ? 'legacy.html' : 'index.html'
 const ALLOW_UNSIGNED = process.env.MH_ALLOW_UNSIGNED === '1'
 
 const MIME = {
@@ -58,6 +71,7 @@ const MIME = {
   '.json': 'application/json; charset=utf-8', '.m3u8': 'application/vnd.apple.mpegurl',
   '.ts': 'video/mp2t', '.mp4': 'video/mp4', '.png': 'image/png', '.jpg': 'image/jpeg',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
+  '.webmanifest': 'application/manifest+json; charset=utf-8', '.xml': 'application/xml; charset=utf-8',
 }
 
 /** 大文件上传：流式落地（不把整个视频读进内存）。 */
@@ -121,10 +135,14 @@ function serveFileWithRange(req, res, filePath, cacheControl = 'no-cache') {
 }
 
 function serveStatic(rootDir, pathname, res) {
-  const relative = decodeURIComponent(pathname).replace(/^\/+/, '')
-  const filePath = normalize(join(rootDir, relative === '' ? 'index.html' : relative))
-  const safe = resolve(filePath)
-  if (!safe.startsWith(resolve(rootDir)) || !existsSync(safe) || !statSync(safe).isFile()) {
+  let relative
+  try { relative = decodeURIComponent(pathname).replace(/^\/+/, '') } catch {
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end('400')
+    return
+  }
+  const safe = resolveInside(rootDir, relative || 'index.html')
+  if (!safe || !existsSync(safe) || !statSync(safe).isFile()) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
     res.end('404')
     return
@@ -236,8 +254,30 @@ function linkCredentials(req, mediaPath, url) {
 }
 
 const server = createServer(async (req, res) => {
+  const startedAt = Date.now()
+  const requestId = newRequestId()
+  req.requestId = requestId
+  res.setHeader('x-request-id', requestId)
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
   const pathname = url.pathname
+  res.on('finish', () => {
+    const durationMs = Date.now() - startedAt
+    const apiRequest = pathname.startsWith('/api/') || pathname.startsWith('/admin/api/') || pathname === '/media-auth'
+    const slowMs = Number(process.env.MH_SLOW_MS ?? 800)
+    if (!apiRequest && res.statusCode < 400 && durationMs < slowMs) return
+    const fields = {
+      requestId,
+      method: req.method,
+      path: pathname,
+      status: res.statusCode,
+      durationMs,
+      ip: String(req.socket?.remoteAddress ?? ''),
+      userAgent: String(req.headers['user-agent'] ?? ''),
+      contentLength: res.getHeader('content-length') ?? null,
+    }
+    if (res.statusCode >= 500 || durationMs >= slowMs) logWarn('http.request', fields)
+    else logInfo('http.request', fields)
+  })
 
   try {
     // 反爬与限流（UA 黑名单 / 滑动窗口限流 / 内容枚举探测）
@@ -270,9 +310,9 @@ const server = createServer(async (req, res) => {
         return
       }
       const relative = decodeURIComponent(pathname.replace('/media/hls/', ''))
-      const filePath = resolve(HLS_DIR, relative)
       // 归一化后再校验前缀，堵住 ..%2f 之类的穿越（签名本身不覆盖路径语义）
-      if (filePath !== resolve(HLS_DIR) && !filePath.startsWith(resolve(HLS_DIR) + sep)) {
+      const filePath = resolveInside(HLS_DIR, relative)
+      if (!filePath) {
         res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
         res.end('403 非法路径')
         return
@@ -318,9 +358,26 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/media/images/')) {
-      const filePath = join(ROOT, 'storage', 'images', pathname.replace('/media/images/', ''))
+      const filePath = resolveInside(join(ROOT, 'storage', 'images'), pathname.replace('/media/images/', ''))
+      if (!filePath) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('403 非法路径')
+        return
+      }
       if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
       return serveFileWithRange(req, res, filePath, 'public, max-age=604800')
+    }
+
+    if (pathname.startsWith('/media/previews/')) {
+      const relative = decodeURIComponent(pathname.replace('/media/previews/', ''))
+      const filePath = resolveInside(PREVIEW_DIR, relative)
+      if (!filePath) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('403 非法路径')
+        return
+      }
+      if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
+      return serveFileWithRange(req, res, filePath, 'public, max-age=86400')
     }
 
     if (pathname.startsWith('/pay/mock/')) {
@@ -335,18 +392,38 @@ const server = createServer(async (req, res) => {
       return alipaySimPage(orderNo, res)
     }
 
+    if (pathname.startsWith('/i/')) {
+      let code = ''
+      try { code = decodeURIComponent(pathname.split('/')[2] ?? '') } catch { code = '' }
+      try {
+        if (code) recordInviteClick({
+          code, visitorId: req.headers['x-mh-visitor'], ip: req.socket?.remoteAddress,
+          ua: req.headers['user-agent'], referrer: req.headers.referer,
+        })
+      } catch (error) {
+        logWarn('distribution.invite_click_rejected', { code, error })
+      }
+      const target = `${BASE_PATH}/?ref=${encodeURIComponent(code)}`
+      res.writeHead(302, {
+        location: target,
+        'set-cookie': `mh_ref=${encodeURIComponent(code)}; Path=/; Max-Age=2592000; SameSite=Lax`,
+      })
+      res.end()
+      return
+    }
+
     if (pathname.startsWith('/admin/api/')) {
       const uploadMatch = /^\/admin\/api\/episodes\/(\d+)\/upload$/.exec(pathname)
       if (uploadMatch && req.method === 'POST') {
         // 先鉴权再落盘：否则匿名请求也能往 storage/uploads 写满上限（默认 2GB）
-        const gate = preAuthorizeAdmin(req, 'episode.write')
+        const gate = preAuthorizeAdmin(req, 'content.episode.write')
         if (!gate.ok) {
           res.writeHead(gate.status, { 'content-type': 'application/json; charset=utf-8', connection: 'close' })
           res.end(JSON.stringify({ code: gate.code, msg: gate.msg, data: gate.data ?? {} }))
           return
         }
         const uploaded = await streamToUpload(req)
-        return await handleAdmin(pathname, url, req, res, undefined, { uploadPath: uploaded.path, uploadSize: uploaded.size })
+        return await handleAdmin(pathname, url, req, res, {}, { uploadPath: uploaded.path, uploadSize: uploaded.size })
       }
       return await handleAdmin(pathname, url, req, res)
     }
@@ -362,21 +439,28 @@ const server = createServer(async (req, res) => {
       return
     }
     if (pathname.startsWith('/admin/')) {
-      return serveStatic(ADMIN, pathname.replace(/^\/admin\/?/, '') || 'index.html', res)
+      return serveStatic(ADMIN_ROOT, pathname.replace(/^\/admin\/?/, '') || ADMIN_INDEX, res)
     }
 
-    return serveStatic(PUBLIC, pathname === '/' ? 'index.html' : pathname.replace(/^\//, ''), res)
+    return serveStatic(CLIENT_ROOT, pathname === '/' ? CLIENT_INDEX : pathname.replace(/^\//, ''), res)
   } catch (error) {
     if (error?.code && error?.status && !res.headersSent) {
       // 业务异常（CommerceError 等）：按语义返回 4xx，不吞成 500
+      if (error.status === 413) res.setHeader('connection', 'close')
       res.writeHead(error.status, { 'content-type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify({ code: error.code, msg: error.message, data: {} }))
       return
     }
-    console.error('[mh-clone]', error)
+    logError('http.exception', {
+      requestId,
+      method: req.method,
+      path: pathname,
+      status: Number(error?.status ?? 500),
+      error,
+    })
     if (!res.headersSent) {
       res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
-      res.end(JSON.stringify({ code: '0500', msg: String(error?.message ?? error), data: {} }))
+      res.end(JSON.stringify({ code: '0500', msg: '服务器错误', data: {} }))
     } else {
       try { res.end() } catch { /* ignore */ }
     }
@@ -386,6 +470,10 @@ const server = createServer(async (req, res) => {
 // 每分钟关掉超时未支付的订单
 setInterval(() => {
   try { closeExpiredOrders() } catch (error) { console.error('[closeExpiredOrders]', error) }
+}, 60_000).unref()
+setInterval(() => {
+  try { processCommissionOutbox() } catch (error) { logWarn('commerce.commission_outbox_retry_failed', { error }) }
+  try { processCommissionReversalOutbox() } catch (error) { logWarn('commerce.commission_reversal_outbox_retry_failed', { error }) }
 }, 60_000).unref()
 
 setInterval(() => {
@@ -430,6 +518,23 @@ const runRankRefresh = () => {
 }
 setTimeout(runRankRefresh, 60_000).unref()
 setInterval(runRankRefresh, 6 * 3600_000).unref()
+
+const runGrowthStats = () => {
+  try { rebuildContentStats({ days: 2 }) } catch (error) { logError('content.stats.task_failed', { error }) }
+  try { markCommissionsAvailable() } catch (error) { logError('distribution.available.task_failed', { error }) }
+}
+const runContentRanks = () => {
+  try {
+    const results = refreshContentRanks()
+    const failed = results.filter((row) => row.error)
+    if (failed.length) console.warn('[content-ranks] 部分榜单失败', failed)
+  } catch (error) {
+    logError('content.ranks.task_failed', { error })
+  }
+}
+setTimeout(() => { runGrowthStats(); runContentRanks() }, 60_000).unref()
+setInterval(runGrowthStats, 5 * 60_000).unref()
+setInterval(runContentRanks, 3600_000).unref()
 
 connectRedis().catch(() => {})
 // 复位上次进程中断的转码任务

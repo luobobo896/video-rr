@@ -16,9 +16,11 @@
 - `content_policies.access_mode='paid'` 的内容，**订阅也不放行**，必须 `purchases`。
 - 单个订阅按最长有效期判定；续费在 `valid_to` 基础上顺延（不覆盖剩余时长）。
 
-## 2. 内容策略（后台「付费策略」）
+## 2. 付费策略组（后台「付费策略」）
 
-| 字段 | 含义 | 示例 |
+策略组是付费规则的唯一配置入口；剧集只保存 `content_policies.policy_group_id`。修改组后，所有已分配剧集立即生效。
+
+| 组字段 | 含义 | 示例 |
 |---|---|---|
 | access_mode | free / subscription / paid | 剧集=subscription，高价值电影=paid |
 | free_episodes | 前 N 集免费 | 剧集 1，电影 0 |
@@ -26,6 +28,10 @@
 | single_price_cny | 单片价格 | 12.00 |
 | purchase_kind | single（买断）/ rental（租赁） | single |
 | rental_hours | 租赁时长 | 72 |
+
+- 新建剧集时选择策略组；剧集列表可逐部切换，也可勾选多部批量分配。
+- 「付费策略」页可按标题关键词、内容类型、上架状态预览并批量分配。
+- 未分组剧集保留旧版自定义策略值，不会在启动或部署时被静默改价。
 
 ## 3. 订单状态机
 
@@ -105,3 +111,19 @@ nginx: secure_link $cookie_mh_link,$cookie_mh_expires;
 | analyst | 经营数据、订单只读 |
 
 权限点共 24 个，命名 `<域>.<对象>.<动作>`；后台「角色权限」页可勾选保存，接口即时生效（本人权限变更需重新登录）。
+
+## 9. 渠道归因与订单快照
+
+- 投放渠道通过 `channels`、`channel_domains`、`promo_codes` 配置；入口按“推广码 > 域名最长前缀 > direct”解析。
+- 首次有效非直接触达绑定到 `user_acquisitions`；末次触达保留在访客/账号分析字段中，订单按首次归因写入 `orders.acquisition_*` 快照。
+- 支付回调只更新支付状态，不修改订单归因字段；历史订单标记 `legacy_unattributed`，不进入新渠道转化率。
+- 渠道分析按 `orders.created_at` 统计下单，按 `orders.paid_at` 统计支付，按退款完成统计退款。
+
+## 10. 多级分销佣金
+
+- 绑定直接邀请关系时同步写 `distribution_tree_closure`，支持默认 3 级、最高 5 级的祖先链路。
+- 支付成功后按层级读取 `commission_rules`，每条链路的佣金写入 `commission_records`，以 `(order_id, distributor_user_id)` 唯一保证回调幂等。
+- 退款按比例冲减每一级佣金；已结算后退款形成 `distributor_profiles.debt_fen`，下一次结算先抵扣，结算单记录 `debt_offset_fen`。
+- 结算单创建和打款分离，创建人与复核人不能相同；C 端对外名称为“佣金推广”，后台仍称“分销佣金”。
+- C 端佣金推广页只有一个展示币种（CNY/USD）。好友支付金额、冻结佣金、可结算、已结算和可提现都按同一展示币种折算；提现记录按实际申请币种展示，实际打款以提现方式为准。
+- 默认展示币种：明确请求优先；美国 IP 用 USD，中国 IP 或中文 `Accept-Language` 用 CNY；其余地区默认 USD。

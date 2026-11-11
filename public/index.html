@@ -3,40 +3,39 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' ws://localhost:5173 ws://127.0.0.1:5173 ws://localhost:5174 ws://127.0.0.1:5174; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
   <title>影巢 · 高清影视在线观看</title>
   <meta name="description" content="影巢 · 短剧 / 电影 / 剧集在线观看，会员畅看全站。" />
-  <meta name="theme-color" content="#0a0a0d" />
+  <meta name="theme-color" content="#07050c" />
+  <meta name="application-name" content="影巢" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="影巢" />
+  <meta name="msapplication-TileColor" content="#07050c" />
+  <meta name="msapplication-config" content="./browserconfig.xml" />
   <meta property="og:type" content="website" />
   <meta property="og:title" content="影巢 · 高清影视在线观看" />
   <meta property="og:description" content="短剧 / 电影 / 剧集在线观看，会员畅看全站。" />
-  <meta property="og:image" content="./media/placeholder.svg" />
+  <meta property="og:image" content="./brand/og-cover.jpg" />
   <meta name="twitter:card" content="summary_large_image" />
-  <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="./styles.css" />
-  <link rel="stylesheet" href="./tokens.css" />
+  <meta name="twitter:image" content="./brand/og-cover.jpg" />
+  <link rel="icon" href="./favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="./icons/favicon-16x16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+  <link rel="manifest" href="./site.webmanifest" />
+  <link rel="stylesheet" href="./tokens.css?v=20261111fix8" />
+  <link rel="stylesheet" href="./styles.css?v=20261111fix8" />
+  <link rel="stylesheet" href="./poster-wall.css?v=20261111fix8" />
   <style>
     /* 首屏骨架：app.js 是 module，弱网下在常量请求回来前页面会是纯黑，先给个占位 */
-    #boot { display: grid; place-items: center; min-height: 100vh; color: #6b7280; font-size: 14px; letter-spacing: 1px; }
+    #boot { display: grid; place-items: center; min-height: 100vh; color: #8a93a5; font-size: 14px; letter-spacing: 1px; }
   </style>
 </head>
 <body>
-  <div id="app">
-    <aside class="sidebar" id="sidebar"></aside>
-    <div class="main">
-      <header class="topbar" id="topbar"></header>
-      <main id="view" class="view"><div id="boot">影巢 · 正在加载</div></main>
-    </div>
-    <div id="modal" class="modal hidden"></div>
-    <div id="toast" class="toast hidden"></div>
-  </div>
-  <script>
-  // 子路径部署：/video/ 或 /video-admin/ 时给前端一个 base
-  (function () {
-    var path = location.pathname.replace(/\/index\.html$/, '');
-    if (/\/$/.test(path)) path = path.slice(0, -1);
-    window.__MH_BASE = /^\/(video|video-admin)$/.test(path) ? path : '';
-  })();
-</script>
-  <script type="module" src="./app.js"></script>
+  <div id="vue-root"></div>
+  <script type="module" src="./base.js"></script>
+  <script type="module" src="./main.js"></script>
 </body>
 </html>

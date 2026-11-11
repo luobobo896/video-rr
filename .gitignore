@@ -6,6 +6,9 @@ storage/*
 *.log
 .env
 node_modules/
+dist/
+mh-deploy-*.tgz
+.impeccable/
 
 # 系统垃圾
 .DS_Store

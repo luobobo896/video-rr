@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+  <title>影巢 · 运营后台</title>
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="theme-color" content="#0b0e14" />
+  <meta name="application-name" content="影巢运营后台" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="影巢后台" />
+  <meta name="msapplication-TileColor" content="#0b0e14" />
+  <meta name="msapplication-config" content="./browserconfig.xml" />
+  <link rel="icon" href="./favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="./favicon-16x16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+  <link rel="manifest" href="./admin.webmanifest" />
+  <link rel="stylesheet" href="./tokens.css?v=20261111fix8" />
+  <link rel="stylesheet" href="./styles.css?v=20261111fix8" />
+</head>
+<body>
+  <div id="login" class="login">
+    <form class="login-card" id="login-form">
+      <h1>影巢 · 运营后台</h1>
+      <p>内容 / 订阅 / 订单 / 运营 / 风控</p>
+      <label>账号<input id="login-user" autocomplete="username" placeholder="账号" /></label>
+      <label>密码<input id="login-pass" type="password" autocomplete="current-password" placeholder="请输入密码" /></label>
+      <button type="submit">登录</button>
+      <div class="login-tip" id="login-tip" role="status" aria-live="polite"></div>
+    </form>
+
+    <form class="login-card hidden" id="pass-form">
+      <h1>设置新密码</h1>
+      <p>后台强制使用强口令（≥8 位，含字母与数字，不含用户名）</p>
+      <label>当前密码<input id="pass-old" type="password" autocomplete="current-password" /></label>
+      <label>新密码<input id="pass-new" type="password" autocomplete="new-password" /></label>
+      <label>确认新密码<input id="pass-confirm" type="password" autocomplete="new-password" /></label>
+      <button type="submit">保存并进入后台</button>
+      <div class="login-tip" id="pass-tip" role="status" aria-live="polite"></div>
+    </form>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <h1 class="sr-only">影巢运营后台</h1>
+    <button class="skip-link" type="button">跳到主要内容</button>
+    <aside class="side">
+      <div class="brand"><img class="brand-mark" src="./icons/icon-96x96.png" alt="" width="26" height="26" />影巢后台</div>
+      <nav id="nav" aria-label="后台主导航"></nav>
+      <div class="side-foot">
+        <a id="open-site" href="/" target="_blank" rel="noopener">打开 C 端<svg class="icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="m20 4-9 9"/><path d="M19 13v7H4V5h7"/></svg></a>
+        <button id="change-pass">修改密码</button>
+        <button id="logout">退出登录</button>
+      </div>
+    </aside>
+    <main class="content">
+      <header class="top">
+        <h2 id="page-title">概览</h2>
+        <div class="top-right" id="top-right"></div>
+        <div class="muted" id="whoami" style="font-size:12px;margin-left:14px"></div>
+      </header>
+      <section id="view" tabindex="-1" aria-labelledby="page-title"></section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script src="./base.js?v=20261111fix8"></script>
+  <script type="module" src="./app.js?v=20261111fix8"></script>
+</body>
+</html>

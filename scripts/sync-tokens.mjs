@@ -4,11 +4,12 @@
  * 用法：node scripts/sync-tokens.mjs   （改完 shared 必跑）
  */
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const CHECK = process.argv.includes('--check')
 const source = readFileSync(join(ROOT, 'shared', 'tokens.css'), 'utf8')
 
 const BRAND_ADMIN = `/* @brand-start */
@@ -24,7 +25,7 @@ const BRAND_ADMIN = `/* @brand-start */
   --line-strong: rgba(255, 255, 255, 0.16);
   --text: #e8ebf2;
   --text-2: #98a0b3;
-  --text-3: #6b7484;
+  --text-3: #8a93a5;
   --brand: #4f7cff;
   --brand-2: #22d3ee;
   --brand-contrast: #06121a;
@@ -41,18 +42,45 @@ if (!brandPattern.test(source)) throw new Error('shared/tokens.css 缺少 @brand
 
 const cEnd = source
 const bEnd = source.replace(brandPattern, BRAND_ADMIN)
-
-writeFileSync(join(ROOT, 'public', 'tokens.css'), cEnd, 'utf8')
-writeFileSync(join(ROOT, 'admin', 'tokens.css'), bEnd, 'utf8')
-
 const hash = createHash('sha256').update(source).digest('hex').slice(0, 12)
-mkdirSync(join(ROOT, 'shared'), { recursive: true })
-writeFileSync(join(ROOT, 'shared', 'tokens.version.json'), JSON.stringify({
+const version = {
   source: 'shared/tokens.css',
   hash,
   generated: ['public/tokens.css', 'admin/tokens.css'],
   generatedAt: new Date().toISOString(),
-}, null, 2), 'utf8')
+}
+
+if (CHECK) {
+  const files = [
+    ['public/tokens.css', cEnd],
+    ['admin/tokens.css', bEnd],
+  ]
+  const mismatches = files.filter(([file, expected]) => {
+    const path = join(ROOT, file)
+    return !existsSync(path) || readFileSync(path, 'utf8') !== expected
+  })
+  const versionPath = join(ROOT, 'shared', 'tokens.version.json')
+  let versionOk = false
+  try {
+    const current = JSON.parse(readFileSync(versionPath, 'utf8'))
+    versionOk = current.source === version.source
+      && current.hash === version.hash
+      && JSON.stringify(current.generated) === JSON.stringify(version.generated)
+  } catch { /* invalid version file counts as drift */ }
+  if (mismatches.length || !versionOk) {
+    for (const [file] of mismatches) console.error(`tokens drift: ${file}`)
+    if (!versionOk) console.error('tokens drift: shared/tokens.version.json')
+    process.exit(1)
+  }
+  console.log(`tokens 已同步 hash=${hash}`)
+  process.exit(0)
+}
+
+writeFileSync(join(ROOT, 'public', 'tokens.css'), cEnd, 'utf8')
+writeFileSync(join(ROOT, 'admin', 'tokens.css'), bEnd, 'utf8')
+
+mkdirSync(join(ROOT, 'shared'), { recursive: true })
+writeFileSync(join(ROOT, 'shared', 'tokens.version.json'), JSON.stringify(version, null, 2), 'utf8')
 
 console.log(`tokens 同步完成 hash=${hash}`)
 console.log(`  public/tokens.css  ${cEnd.length} bytes（C 端品牌）`)

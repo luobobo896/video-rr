@@ -10,7 +10,9 @@
  */
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto'
 import { db } from './db.mjs'
-import { sendMail } from './mailer.mjs'
+import { emailSettings, sendMail } from './mailer.mjs'
+import { buildCodeEmail } from './email-template.mjs'
+import { logError, logInfo } from './logger.mjs'
 
 const SECRET = process.env.MH_OTP_SECRET ?? process.env.MH_SECRET ?? 'mh-otp-dev-secret'
 const CODE_TTL_SECONDS = 300          // 5 分钟
@@ -105,24 +107,6 @@ export async function sendCode({ email: rawEmail, purpose = 'login', ip, userAge
        VALUES (?, ?, ?, ?, ?, ?)`, email, purpose, hashCode(email, code), expiresAt, ip ?? null, String(userAgent ?? '').slice(0, 300))
   run('INSERT INTO email_send_log (email, purpose, ip, sent_date) VALUES (?, ?, ?, ?)', email, purpose, ip ?? null, nowSql().slice(0, 10))
 
-  const subjectMap = {
-    login: '影巢 · 登录验证码',
-    change_password: '影巢 · 修改密码验证码',
-    change_email: '影巢 · 更换邮箱验证码',
-  }
-  const text = [
-    '您好，',
-    '',
-    `您正在${purpose === 'login' ? '登录影巢' : purpose === 'change_password' ? '修改密码' : '更换绑定邮箱'}，验证码：`,
-    '',
-    `    ${code}`,
-    '',
-    `验证码 ${CODE_TTL_SECONDS / 60} 分钟内有效，最多尝试 ${MAX_ATTEMPTS} 次。`,
-    '如非本人操作，请忽略本邮件。',
-    '',
-    '—— 影巢',
-  ].join('\r\n')
-
   // 单元测试钩子：只有显式设置 MH_OTP_TEST=1 时把明文码带回（生产环境不设置该变量）
   const testHook = process.env.MH_OTP_TEST === '1'
 
@@ -130,14 +114,26 @@ export async function sendCode({ email: rawEmail, purpose = 'login', ip, userAge
   if (testHook) {
     delivered = true
   } else {
+    const startedAt = Date.now()
     try {
-      const result = await sendMail({ to: email, subject: subjectMap[purpose], text })
+      const mail = buildCodeEmail({
+        to: email, code, purpose, expiresIn: CODE_TTL_SECONDS, attempts: MAX_ATTEMPTS,
+        template: emailSettings().template,
+      })
+      const result = await sendMail({ to: email, ...mail })
       delivered = result.delivered
+      logInfo('otp.mail.sent', { to: email, purpose, channel: result.channel, durationMs: Date.now() - startedAt })
     } catch (error) {
-      console.error('[otp] 邮件发送失败', email, error.message)
+      const authFailed = /(?:535|authentication credentials invalid|AUTH .*失败)/i.test(String(error.message ?? ''))
+      const publicMessage = authFailed
+        ? '邮件服务器认证失败，请管理员在后台更新 SMTP 授权码'
+        : '验证码邮件发送失败，请稍后重试'
+      logError('otp.mail.failed', {
+        to: email, purpose, durationMs: Date.now() - startedAt, reason: authFailed ? 'smtp_auth_failed' : 'send_failed', error,
+      })
       run("UPDATE email_codes SET consumed_at = datetime('now') WHERE email = ? AND purpose = ? AND consumed_at IS NULL", email, purpose)
       rollbackSendLog(email, purpose)
-      throw new OtpError('mail_failed', '验证码邮件发送失败，请稍后重试', 502)
+      throw new OtpError('mail_failed', publicMessage, 502, { reason: authFailed ? 'smtp_auth_failed' : 'send_failed' })
     }
   }
 

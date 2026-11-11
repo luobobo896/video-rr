@@ -54,10 +54,10 @@ test('权益判定顺序：单片 > 订阅 > 免费集 > 拒绝', () => {
   db.prepare("INSERT INTO subscriptions (user_id, plan_id, scope, valid_to, status) VALUES (?, 1, 'all', datetime('now','+30 day'), 'active')").run(uid)
   assert.equal(ent.resolveAccess(uid, drama.id, 2).source, 'subscription')
 
-  // 3) 单片付费内容：会员同样放行（会员「全场畅看」）；非会员需单独购买（免费集是拉新钩子）
+  // 3) 单片付费内容：订阅不覆盖；免费集仍是拉新钩子，其余集必须单独购买
   db.prepare("UPDATE content_policies SET access_mode='paid', single_price_cny=12, free_episodes=1 WHERE drama_id=?").run(drama.id)
-  assert.equal(ent.resolveAccess(uid, drama.id, 1).source, 'subscription')
-  assert.equal(ent.resolveAccess(uid, drama.id, 2).source, 'subscription')
+  assert.equal(ent.resolveAccess(uid, drama.id, 1).source, 'free')
+  assert.equal(ent.resolveAccess(uid, drama.id, 2).reason, 'single_purchase_required')
   // 换一个没有订阅的用户，验证单片付费拦截与价格
   const otherUid = Number(userId())
   assert.equal(ent.resolveAccess(otherUid, drama.id, 1).source, 'free')
@@ -80,6 +80,14 @@ test('过期订阅不再授权', () => {
   db.prepare("UPDATE content_policies SET access_mode='subscription', free_episodes=0 WHERE drama_id=?").run(drama.id)
   db.prepare("INSERT INTO subscriptions (user_id, plan_id, scope, valid_to, status) VALUES (?, 1, 'all', datetime('now','-1 day'), 'active')").run(uid)
   assert.equal(ent.resolveAccess(uid, drama.id, 2).allow, false)
+})
+
+test('草稿和下架内容不可被直接判权或播放', () => {
+  const uid = Number(userId())
+  const dramaId = Number(db.prepare("INSERT INTO dramas (title, status) VALUES ('Draft QA', 'draft')").run().lastInsertRowid)
+  const result = ent.resolveAccess(uid, dramaId, 1)
+  assert.equal(result.allow, false)
+  assert.equal(result.reason, 'content_unavailable')
 })
 
 /* ---------------- 订单状态机 ---------------- */
@@ -171,6 +179,22 @@ test('审计日志可写入与查询', () => {
   rbac.audit({ actorId: 1, actorName: 'admin', action: 'test.action', targetType: 'unit', targetId: 1 })
   const logs = rbac.listAudit({ limit: 5 })
   assert.ok(logs.some((log) => log.action === 'test.action'))
+})
+
+test('列表分页：订单与审计 offset 返回不同批次', () => {
+  const firstOrder = commerce.listOrders({ limit: 1, offset: 0 })
+  const secondOrder = commerce.listOrders({ limit: 1, offset: 1 })
+  assert.equal(firstOrder.length, 1)
+  assert.equal(secondOrder.length, 1)
+  assert.notEqual(firstOrder[0].id, secondOrder[0].id)
+
+  rbac.audit({ actorId: 1, actorName: 'admin', action: 'test.page.one', targetType: 'unit', targetId: 1 })
+  rbac.audit({ actorId: 1, actorName: 'admin', action: 'test.page.two', targetType: 'unit', targetId: 2 })
+  const firstAudit = rbac.listAudit({ limit: 1, offset: 0 })
+  const secondAudit = rbac.listAudit({ limit: 1, offset: 1 })
+  assert.equal(firstAudit.length, 1)
+  assert.equal(secondAudit.length, 1)
+  assert.notEqual(firstAudit[0].id, secondAudit[0].id)
 })
 
 /* ---------------- 播放签名 ---------------- */

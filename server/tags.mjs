@@ -3,6 +3,7 @@
  * 层级只用 parent_id 自关联（一级 parent_id=null，二级挂一级），不做三级以上。
  */
 import { db } from './db.mjs'
+import { adultVisibilitySql } from './content-visibility.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -20,7 +21,7 @@ const bad = (message, status = 400) => Object.assign(new Error(message), { statu
  * @param {'top'|'child'|'all'} [options.level]
  * @param {number} [options.parentId] 只看某个一级标签下的二级
  */
-export function listTags({ withCount = false, includeDisabled = false, page, pageSize, keyword, level = 'all', parentId } = {}) {
+export function listTags({ withCount = false, includeDisabled = false, publicOnly = false, page, pageSize, keyword, level = 'all', parentId } = {}) {
   const p = withCount ? 't.' : ''
   const clauses = []
   const args = []
@@ -38,8 +39,9 @@ export function listTags({ withCount = false, includeDisabled = false, page, pag
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const order = `ORDER BY COALESCE(${p}parent_id, ${p}id), ${p}parent_id IS NOT NULL, ${p}sort, ${p}id`
 
+  const countJoin = publicOnly ? `JOIN dramas d ON d.id = dt.drama_id AND ${adultVisibilitySql()}` : ''
   const sql = withCount
-    ? `SELECT t.*, (SELECT COUNT(*) FROM drama_tags dt WHERE dt.tag_id = t.id) AS drama_count FROM tags t ${where} ${order}`
+    ? `SELECT t.*, (SELECT COUNT(*) FROM drama_tags dt ${countJoin} WHERE dt.tag_id = t.id) AS drama_count FROM tags t ${where} ${order}`
     : `SELECT * FROM tags ${where} ${order}`
 
   const rows = all(sql, ...args).map((row) => (withCount ? { ...row, dramaCount: row.drama_count ?? 0 } : row))

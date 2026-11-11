@@ -3,61 +3,28 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' ws://localhost:5173 ws://127.0.0.1:5173 ws://localhost:5174 ws://127.0.0.1:5174; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
   <title>影巢 · 运营后台</title>
-  <link rel="stylesheet" href="./styles.css" />
-  <link rel="stylesheet" href="./tokens.css" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="theme-color" content="#0b0e14" />
+  <meta name="application-name" content="影巢运营后台" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="影巢后台" />
+  <meta name="msapplication-TileColor" content="#0b0e14" />
+  <meta name="msapplication-config" content="./browserconfig.xml" />
+  <link rel="icon" href="./favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="./favicon-16x16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+  <link rel="manifest" href="./admin.webmanifest" />
+  <link rel="stylesheet" href="./tokens.css?v=20261111fix8" />
+  <link rel="stylesheet" href="./styles.css?v=20261111fix8" />
 </head>
 <body>
-  <div id="login" class="login">
-    <form class="login-card" id="login-form">
-      <h1>影巢 · 运营后台</h1>
-      <p>内容 / 订阅 / 订单 / 运营 / 风控</p>
-      <label>账号<input id="login-user" autocomplete="username" placeholder="管理员账号" /></label>
-      <label>密码<input id="login-pass" type="password" autocomplete="current-password" placeholder="请输入密码" /></label>
-      <button type="submit">登录</button>
-      <div class="login-tip" id="login-tip"></div>
-    </form>
-
-    <form class="login-card hidden" id="pass-form">
-      <h1>设置新密码</h1>
-      <p>后台强制使用强口令（≥8 位，含字母与数字，不含用户名）</p>
-      <label>当前密码<input id="pass-old" type="password" autocomplete="current-password" /></label>
-      <label>新密码<input id="pass-new" type="password" autocomplete="new-password" /></label>
-      <label>确认新密码<input id="pass-confirm" type="password" autocomplete="new-password" /></label>
-      <button type="submit">保存并进入后台</button>
-      <div class="login-tip" id="pass-tip"></div>
-    </form>
-  </div>
-
-  <div id="shell" class="shell hidden">
-    <aside class="side">
-      <div class="brand"><span>影</span>影巢后台</div>
-      <nav id="nav"></nav>
-      <div class="side-foot">
-        <a href="/" target="_blank">打开 C 端 ↗</a>
-        <button id="change-pass">修改密码</button>
-        <button id="logout">退出登录</button>
-      </div>
-    </aside>
-    <main class="content">
-      <header class="top">
-        <h2 id="page-title">概览</h2>
-        <div class="top-right" id="top-right"></div>
-        <div class="muted" id="whoami" style="font-size:12px;margin-left:14px"></div>
-      </header>
-      <section id="view"></section>
-    </main>
-  </div>
-
-  <div id="toast" class="toast hidden"></div>
-  <script>
-  // 子路径部署：/video/ 或 /video-admin/ 时给前端一个 base
-  (function () {
-    var path = location.pathname.replace(/\/index\.html$/, '');
-    if (/\/$/.test(path)) path = path.slice(0, -1);
-    window.__MH_BASE = /^\/(video|video-admin)$/.test(path) ? path : '';
-  })();
-</script>
-  <script type="module" src="./app.js"></script>
+  <div id="vue-root"></div>
+  <script type="module" src="./base.js"></script>
+  <script type="module" src="./main.js"></script>
 </body>
 </html>

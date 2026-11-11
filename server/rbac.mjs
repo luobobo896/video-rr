@@ -40,13 +40,14 @@ export function audit({ actorType = 'admin', actorId, actorName, action, targetT
   )
 }
 
-export function listAudit({ limit = 100, action, actorId } = {}) {
+export function listAudit({ limit = 100, offset = 0, action, actorId } = {}) {
   const clauses = []
   const args = []
   if (action) { clauses.push('action LIKE ?'); args.push(`%${action}%`) }
   if (actorId) { clauses.push('actor_id = ?'); args.push(Number(actorId)) }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
-  return all(`SELECT * FROM audit_logs ${where} ORDER BY id DESC LIMIT ?`, ...args, Math.min(500, Number(limit) || 100))
+  return all(`SELECT * FROM audit_logs ${where} ORDER BY id DESC LIMIT ? OFFSET ?`,
+    ...args, Math.min(500, Number(limit) || 100), Math.max(0, Number(offset) || 0))
 }
 
 export function listRoles() {
@@ -54,6 +55,45 @@ export function listRoles() {
     ...role,
     permissions: all('SELECT permission_code FROM role_permissions WHERE role_id = ?', role.id).map((row) => row.permission_code),
   }))
+}
+
+const normalizeRoleCode = (value) => String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 32)
+
+export function createRole(payload = {}) {
+  const code = normalizeRoleCode(payload.code)
+  const name = String(payload.name ?? '').trim()
+  if (!/^[a-z][a-z0-9_]{1,31}$/.test(code)) {
+    throw Object.assign(new Error('角色编码需为 2–32 位小写字母、数字或下划线，并以字母开头'), { status: 400 })
+  }
+  if (!name) throw Object.assign(new Error('角色名称必填'), { status: 400 })
+  if (one('SELECT id FROM roles WHERE code = ?', code)) {
+    throw Object.assign(new Error('角色编码已存在'), { status: 409 })
+  }
+  const info = db.prepare('INSERT INTO roles (code, name, description, is_system) VALUES (?, ?, ?, 0)')
+    .run(code, name.slice(0, 50), String(payload.description ?? '').trim().slice(0, 200) || null)
+  return listRoles().find((role) => role.id === Number(info.lastInsertRowid))
+}
+
+export function updateRole(roleId, payload = {}) {
+  const role = one('SELECT * FROM roles WHERE id = ?', Number(roleId))
+  if (!role) throw Object.assign(new Error('角色不存在'), { status: 404 })
+  const name = String(payload.name ?? role.name).trim()
+  if (!name) throw Object.assign(new Error('角色名称必填'), { status: 400 })
+  db.prepare('UPDATE roles SET name = ?, description = ? WHERE id = ?')
+    .run(name.slice(0, 50), String(payload.description ?? role.description ?? '').trim().slice(0, 200) || null, role.id)
+  return listRoles().find((item) => item.id === role.id)
+}
+
+export function deleteRole(roleId) {
+  const role = one('SELECT * FROM roles WHERE id = ?', Number(roleId))
+  if (!role) throw Object.assign(new Error('角色不存在'), { status: 404 })
+  if (role.is_system) throw Object.assign(new Error('内置角色不能删除'), { status: 400 })
+  const used = one('SELECT COUNT(*) AS n FROM admin_roles WHERE role_id = ?', role.id)?.n ?? 0
+  if (used > 0) {
+    throw Object.assign(new Error(`该角色仍分配给 ${used} 个后台账号，请先解除分配`), { status: 409 })
+  }
+  db.prepare('DELETE FROM roles WHERE id = ?').run(role.id)
+  return { ok: true, id: role.id, code: role.code }
 }
 
 export function listPermissionCatalog() {
@@ -123,6 +163,11 @@ export function listAdmins() {
 }
 
 export function setAdminRoles(adminId, roleCodes) {
+  const admin = one('SELECT status FROM admins WHERE id = ?', Number(adminId))
+  if (admin?.status === 'active' && isSuper(adminId) && !roleCodes.includes('super_admin')
+    && activeAdminsOfRole('super_admin') <= 1) {
+    throw Object.assign(new Error('这是最后一个启用中的超级管理员，不能摘掉超管角色'), { status: 400 })
+  }
   db.exec('BEGIN')
   try {
     db.prepare('DELETE FROM admin_roles WHERE admin_id = ?').run(adminId)
@@ -229,6 +274,9 @@ export function saveAdminMenu(input, id) {
   if (!label) throw Object.assign(new Error('菜单名称必填'), { status: 400 })
   if (!/^\/[A-Za-z0-9/_-]*$/.test(route)) throw Object.assign(new Error('路由需以 / 开头，例如 /dramas'), { status: 400 })
   const groupKey = String(input.groupKey ?? '').trim() || 'custom'
+  if (!/^[a-z0-9_-]{1,40}$/.test(groupKey)) {
+    throw Object.assign(new Error('分组键只能使用小写字母、数字、下划线或短横线'), { status: 400 })
+  }
   const groupLabel = String(input.groupLabel ?? '').trim() || '自定义'
   const permCode = String(input.permCode ?? '').trim() || null
   if (permCode && !one('SELECT code FROM permissions WHERE code = ?', permCode)) {
@@ -252,6 +300,23 @@ export function saveAdminMenu(input, id) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))`)
     .run(groupKey, groupLabel, groupSort, label, route, String(input.icon ?? '').trim() || null, permCode, sort, visible)
   return { id: Number(info.lastInsertRowid) }
+}
+
+/** 分组是 admin_menus 的树根；改名/排序会同步该组全部子菜单。 */
+export function saveAdminMenuGroup(originalKey, input = {}) {
+  const key = String(input.groupKey ?? originalKey ?? '').trim()
+  const label = String(input.groupLabel ?? '').trim()
+  const sort = Number(input.groupSort ?? 0) || 0
+  if (!/^[a-z0-9_-]{1,40}$/.test(key)) throw Object.assign(new Error('分组键只能使用小写字母、数字、下划线或短横线'), { status: 400 })
+  if (!label) throw Object.assign(new Error('分组名称必填'), { status: 400 })
+  const current = one('SELECT COUNT(*) AS n FROM admin_menus WHERE group_key = ?', String(originalKey ?? '').trim())
+  if (!current?.n) throw Object.assign(new Error('分组不存在'), { status: 404 })
+  if (key !== originalKey && one('SELECT id FROM admin_menus WHERE group_key = ? LIMIT 1', key)) {
+    throw Object.assign(new Error('分组键已存在'), { status: 409 })
+  }
+  db.prepare(`UPDATE admin_menus SET group_key = ?, group_label = ?, group_sort = ?, updated_at = datetime('now')
+    WHERE group_key = ?`).run(key, label, sort, String(originalKey ?? '').trim())
+  return { groupKey: key, groupLabel: label, groupSort: sort, items: Number(current.n) }
 }
 
 export function deleteAdminMenu(id) {

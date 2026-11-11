@@ -8,6 +8,8 @@ import { randomUUID } from 'node:crypto'
 import { getSetting, setSetting } from './db.mjs'
 import { openSecret, sealSecret } from './secretbox.mjs'
 import { httpDeliver, smtpDeliver, smtpVerify } from './mail-transport.mjs'
+import { DEFAULT_CODE_TEMPLATE, normalizeCodeTemplate } from './email-template.mjs'
+import { logError, logInfo, logWarn } from './logger.mjs'
 
 const tokenCache = new Map() // `${channelId}:${refreshToken}` → { token, expiresAt }
 
@@ -130,19 +132,21 @@ export function emailSettings() {
       channels,
       from: stored?.from ?? legacy.from ?? '',
       fromName: stored?.fromName ?? legacy.fromName ?? '影巢',
+      template: normalizeCodeTemplate(stored?.template),
       strict: stored?.strict ?? false,
       migratedFrom: stored ? 'single-provider' : 'smtp-settings',
     }
     setSetting('email', next)
     return next
   }
-  return stored
+  return { ...stored, template: normalizeCodeTemplate(stored.template) }
 }
 
 export function saveEmailSettings(patch) {
   const current = emailSettings()
   const next = { ...current, ...patch }
   if (!Array.isArray(next.channels)) next.channels = current.channels
+  next.template = normalizeCodeTemplate(patch.template ?? current.template)
   setSetting('email', next)
   return next
 }
@@ -300,15 +304,26 @@ export async function sendMail(message) {
 
   const failures = []
   for (const rt of ordered) {
+    const startedAt = Date.now()
     try {
       const result = await deliverWith(rt, message)
       markTest(rt.id, { ok: true, message: `发送成功（${new Date().toLocaleString('zh-CN')}）` })
+      logInfo('mail.send.success', {
+        to: message.to, subject: message.subject, channelId: rt.id, channel: rt.name,
+        transport: rt.type, host: rt.smtp?.host ?? rt.http?.url ?? '', durationMs: Date.now() - startedAt,
+      })
       return { ...result, channel: rt.name || rt.id }
     } catch (error) {
       failures.push(`${rt.name || rt.id}: ${error.message}`)
       markTest(rt.id, { ok: false, message: error.message })
+      logWarn('mail.channel.fail', {
+        to: message.to, subject: message.subject, channelId: rt.id, channel: rt.name,
+        transport: rt.type, host: rt.smtp?.host ?? rt.http?.url ?? '',
+        durationMs: Date.now() - startedAt, error,
+      })
     }
   }
+  logError('mail.send.failed', { to: message.to, subject: message.subject, failures })
   throw new Error(`所有邮件通道均失败 → ${failures.join(' ； ')}`.slice(0, 600))
 }
 
@@ -349,7 +364,7 @@ export async function verifyChannel(id, { sendTo } = {}) {
 }
 
 export function defaultEmailSettings() {
-  return { channels: [], from: '', fromName: '影巢', strict: false }
+  return { channels: [], from: '', fromName: '影巢', strict: false, template: { ...DEFAULT_CODE_TEMPLATE } }
 }
 
 

@@ -34,6 +34,7 @@
   --r-md: 10px;
   --r-lg: 14px;
   --r-pill: 999px;
+  --radius: var(--r-md);
 
   /* 描边 / 焦点环 */
   --bw: 1px;
@@ -50,6 +51,10 @@
   --dur-fast: 120ms;
   --dur-base: 180ms;
 
+  /* 兼容别名必须在品牌块之前定义，后台替换 @brand-* 后仍会保留。 */
+  --text-1: var(--text);
+  --muted: var(--text-2);
+
 /* @brand-start */
   /* B 端（运营台）：功能蓝，几何令牌与 C 端完全一致 */
   --bg: #0d0f14;
@@ -63,7 +68,7 @@
   --line-strong: rgba(255, 255, 255, 0.16);
   --text: #e8ebf2;
   --text-2: #98a0b3;
-  --text-3: #6b7484;
+  --text-3: #8a93a5;
   --brand: #4f7cff;
   --brand-2: #22d3ee;
   --brand-contrast: #06121a;
@@ -171,6 +176,19 @@ textarea {
   font-size: var(--fs-14);
   line-height: 1;
   transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+/* 浏览器自动填充：Chrome/Edge 默认刷白底黑字，这里保持暗色输入框观感 */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill,
+select:-webkit-autofill {
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  -webkit-box-shadow: 0 0 0 1000px var(--surface-2) inset;
+  box-shadow: 0 0 0 1000px var(--surface-2) inset;
+  transition: background-color 9999s ease-out 0s;
 }
 
 /* 小尺寸：表格内 / 工具栏 / 二次确认，统一 32px */
@@ -350,4 +368,27 @@ input[type="checkbox"], input[type="radio"] {
   color: var(--text);
   background: color-mix(in oklab, var(--brand) 20%, var(--bg-elev));
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--brand) 40%, transparent);
+}
+
+/* iOS 聚焦字号下限：页面样式先加载时，避免被令牌层同优先级的 14px 反向覆盖 */
+@media (max-width: 599px) {
+  .search input,
+  .field input,
+  .field textarea,
+  .field select,
+  .input,
+  .form-row input,
+  .form-row select,
+  .form input,
+  .form select,
+  .login-card input,
+  .tree-toolbar input,
+  .paywall-coupon input,
+  .player-tools input,
+  .player-tools select,
+  table input,
+  table select,
+  textarea {
+    font-size: var(--fs-16);
+  }
 }

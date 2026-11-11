@@ -2,6 +2,8 @@
 
 对标 `https://mh.yichengwlkj.com/pc` 的**付费点播**全栈实现：内容 → 权益判定 → 套餐/单片 → 订单支付 → 退款对账 → 后台 RBAC，全部可跑通。**无直播模块**（无直播场景，已整体移除）。
 
+设计规范：[`DESIGN.md`](DESIGN.md)、[`docs/RESPONSIVE-DESIGN-SYSTEM.md`](docs/RESPONSIVE-DESIGN-SYSTEM.md)、[`docs/BRAND-ICONS.md`](docs/BRAND-ICONS.md)。
+
 ```
 C 端  public/         /api/*            首页/分类/榜单/搜索/详情/播放/购买/我的
 后台  admin/          /admin/api/*      内容/付费策略/套餐/优惠券/订单/退款/对账/权限/审计
@@ -13,14 +15,22 @@ C 端  public/         /api/*            首页/分类/榜单/搜索/详情/播�
 
 ```bash
 cd mh-clone
-npm start                 # node server/index.mjs
-npm test                  # node --test（12 项：权益矩阵/订单幂等/优惠券/双人复核/RBAC/签名）
+npm install
+npm run dev               # Node + Vite 客户端 5173 + Vite 后台 5174
+npm run build             # 构建 dist/client、dist/admin
+npm start                 # 构建后启动 Node 服务（8787）
+npm test                  # node --test（133 项：权益/订单/支付/邮件/RBAC/角色 CRUD/埋点/归因/内容统计/多级分销/图标/分页/索引）
+node scripts/generate-previews.mjs --only sintel   # 生成首页静音预览片
 ```
+
+前端入口使用 Vue 3 根壳层与 Element Plus 通用组件，现有 C 端/后台业务渲染逻辑通过兼容宿主原样挂载，保证行为不变；Node 服务优先读取 `dist/client`、`dist/admin`，未构建时回退 `public/legacy.html`、`admin/legacy.html`。
+
+首页预览片按 `storage/previews/preview-<slug>.mp4` 约定自动发现；文件存在时 Hero 与 16:9 内容卡会静音自动播放，缺失时回退静态横图。导入流水线在 `--build` / `--force` 时也会同步生成预览片。
 
 | 入口 | 地址 | 账号 |
 |---|---|---|
-| C 端 | <http://127.0.0.1:8787/> | 任意 `1xxxxxxxxxx` 手机号登录 |
-| 后台 | <http://127.0.0.1:8787/admin> | `admin/admin123`（超管）、`ops01`（内容运营）、`fin01`（财务）、`cs01`（客服） |
+| C 端 | <http://127.0.0.1:8787/> | 邮箱验证码登录；已设密码的账号也可用邮箱 + 密码 |
+| 后台 | <http://127.0.0.1:8787/admin> | 初始账号与随机口令见 `storage/admin-initial-passwords.txt`，首次登录强制改密 |
 | 线上 | <https://hk.hsddns.com/video/> · <https://hk.hsddns.com/video-admin/> | 同上 |
 
 ## 商业化规则（已实现）
@@ -38,10 +48,17 @@ npm test                  # node --test（12 项：权益矩阵/订单幂等/优
 | 对账 | `/admin/api/reconcile`：补支付、补权益、发现孤儿支付 |
 | 优惠券 | 满减/折扣、门槛、总量、有效期，下单核销并计数 |
 
+## 增长域（已实现）
+
+- 渠道归因：域名/推广码触达、首次归因、订单快照、后台渠道转化分析。
+- 内容统计：点击去重、有效观看会话、收藏事件、日聚合、热播/收藏/完播/新片/推荐榜。
+- 佣金推广：C 端对外名称为「佣金推广」，后台为「分销佣金」；默认 3 级、最高 5 级，逐级佣金、退款冲回、负余额抵扣和双人结算复核。
+- Schema 参考：`docs/database/GROWTH-SCHEMA.sql`；方案：`docs/requirements/CHANNEL-CONTENT-DISTRIBUTION-PRD.md`。
+
 ## 后台权限（RBAC）
 
 - 6 个角色：超管 / 内容运营 / 财务 / 客服 / 审核员 / 数据分析
-- 权限点 `<域>.<对象>.<动作>`（24 个），**接口层校验是唯一可信层**，菜单按权限渲染
+- 权限点 `<域>.<对象>.<动作>`，**接口层校验是唯一可信层**，菜单按权限渲染
 - 审计：每次写操作记录人、IP、动作、对象、改前/改后、原因、结果；越权尝试记为 `rbac.denied`
 - 敏感操作：删除/退款/禁用/改策略需填原因；退款 ≥ 任意金额都需第二位管理员审批
 
@@ -57,7 +74,7 @@ server/
   media.mjs       ffprobe / ffmpeg 多码率 HLS 队列
   api-public.mjs  C 端接口
   api-admin.mjs   后台接口
-public/ admin/    两个 SPA（原生 ESM，无构建）
+public/ admin/    Vue 兼容入口、业务渲染器与静态素材；构建产物在 dist/
 deploy/            HK 部署脚本、nginx 片段、压测、容量评估
 docs/              COMMERCE.md（资金与权益设计）、API-ADMIN.md、REVIEW-paid-product.md（评审）
 test/              node:test 回归
@@ -66,12 +83,14 @@ test/              node:test 回归
 ## 部署（HK 已验证）
 
 ```bash
-git clone https://github.com/luobobo896/video-rr.git /opt/video-rr
-cd /opt/video-rr && bash deploy/install-hk.sh    # 幂等：服务 + nginx 子路径 + 播放签名密钥
+npm run pack:deploy                              # 生成包含当前未提交修复的发布包
+# 上传 mh-deploy-*.tgz 到服务器并解压到 /opt/video-rr 后：
+cd /opt/video-rr && bash deploy/install-hk.sh    # 安装依赖 → 构建 → 服务 → nginx
 ```
 
 nginx：`/video/` 静态、`/video/api/` 反代、`/video/media/hls/` 走 `secure_link`、`/video-admin/*` 后台。
 播放签名密钥在 `.env` 的 `MH_LINK_SECRET`，安装脚本注入 nginx。
+不要直接 `git pull` 发布：当前修复可能仍在工作区，远程 HEAD 不一定包含它们。
 
 ## 容量
 

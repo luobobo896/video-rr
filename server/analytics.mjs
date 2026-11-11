@@ -7,12 +7,34 @@ import { db } from './db.mjs'
 const one = (sql, ...args) => db.prepare(sql).get(...args)
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 
+const normalizeVisitorId = (value) => {
+  const id = String(value ?? '').trim().slice(0, 64)
+  return /^[A-Za-z0-9_-]{8,64}$/.test(id) ? id : null
+}
+
+function touchVisitor({ visitorId, userId, path, ip, ua } = {}) {
+  const id = normalizeVisitorId(visitorId)
+  if (!id) return null
+  db.prepare(`INSERT INTO visitors (id, user_id, first_path, ip, ua)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      user_id = COALESCE(excluded.user_id, visitors.user_id),
+      last_seen = datetime('now'),
+      ip = COALESCE(excluded.ip, visitors.ip),
+      ua = COALESCE(excluded.ua, visitors.ua)`).run(
+    id, userId ?? null, String(path ?? '').slice(0, 200),
+    String(ip ?? '').slice(0, 64), String(ua ?? '').slice(0, 200),
+  )
+  return id
+}
+
 /** 播放埋点（每次成功播放/试看记一条） */
-export function recordPlay({ userId, dramaId, episodeId, episodeNo, source = 'play', ip, ua }) {
+export function recordPlay({ userId, visitorId, dramaId, episodeId, episodeNo, source = 'play', ip, ua }) {
   try {
-    db.prepare(`INSERT INTO play_events (user_id, drama_id, episode_id, episode_no, source, ip, ua)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-      userId ?? null, Number(dramaId), episodeId ?? null, episodeNo ?? null,
+    const visitor = touchVisitor({ visitorId, userId, path: `/play/${dramaId}/${episodeNo}`, ip, ua })
+    db.prepare(`INSERT INTO play_events (user_id, visitor_id, drama_id, episode_id, episode_no, source, ip, ua)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      userId ?? null, visitor, Number(dramaId), episodeId ?? null, episodeNo ?? null,
       source, String(ip ?? '').slice(0, 64), String(ua ?? '').slice(0, 200),
     )
   } catch { /* 埋点失败不影响播放 */ }
@@ -21,21 +43,27 @@ export function recordPlay({ userId, dramaId, episodeId, episodeNo, source = 'pl
 /** 行为埋点白名单：只收已知类型，避免被当成任意写入的口子 */
 export const TRACK_TYPES = new Set([
   'impression', 'detail_view', 'paywall_view', 'paywall_click', 'play_end', 'search', 'share',
-  'category_filter', 'rank_view', 'login_open',
+  'category_filter', 'rank_view', 'login_open', 'login_success', 'page_view', 'session_start',
+  'play_start', 'play_error', 'episode_click', 'favorite', 'order_created', 'payment_success',
+  'track_change', 'lp_view', 'lp_cta_click', 'trial_start', 'trial_end',
 ])
+
+const SERVER_ONLY_TRACK_TYPES = new Set(['order_created', 'payment_success'])
+export const isClientTrackType = (type) => TRACK_TYPES.has(String(type ?? '')) && !SERVER_ONLY_TRACK_TYPES.has(String(type ?? ''))
 
 /**
  * 漏斗上游埋点。播放开始已有 play_events，这里补曝光/详情/付费墙/完播。
  * 完播用 value = 完播率（position/duration），方便算平均完播。
  */
-export function recordEvent({ type, userId, dramaId, episodeId, path, value, position, duration, meta, ip, ua } = {}) {
+export function recordEvent({ type, userId, visitorId, dramaId, episodeId, path, value, position, duration, meta, ip, ua } = {}) {
   const kind = String(type ?? '')
   if (!TRACK_TYPES.has(kind)) return false
   try {
+    const visitor = touchVisitor({ visitorId, userId, path, ip, ua })
     db.prepare(`INSERT INTO track_events
-      (type, user_id, drama_id, episode_id, path, value, position, duration, meta_json, ip, ua)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      kind, userId ?? null, dramaId ? Number(dramaId) : null, episodeId ? Number(episodeId) : null,
+      (type, user_id, visitor_id, drama_id, episode_id, path, value, position, duration, meta_json, ip, ua)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      kind, userId ?? null, visitor, dramaId ? Number(dramaId) : null, episodeId ? Number(episodeId) : null,
       String(path ?? '').slice(0, 200),
       Number.isFinite(Number(value)) ? Number(value) : null,
       Number.isFinite(Number(position)) ? Number(position) : null,
@@ -54,18 +82,21 @@ const dateRange = (days) => {
 
 export function analyticsReport({ days = 7 } = {}) {
   const since = dateRange(days)
-  const plays = all(`SELECT date(created_at) AS day, COUNT(*) AS plays, COUNT(DISTINCT COALESCE(user_id, ip)) AS viewers
+  const identityOf = (table) => `COALESCE(NULLIF(${table}.visitor_id, ''),
+    CASE WHEN ${table}.user_id IS NOT NULL THEN 'u:' || ${table}.user_id ELSE 'ip:' || COALESCE(${table}.ip, '') END)`
+  const viewerExpr = identityOf('play_events')
+  const plays = all(`SELECT date(created_at) AS day, COUNT(*) AS plays, COUNT(DISTINCT ${viewerExpr}) AS viewers
     FROM play_events WHERE created_at >= ? GROUP BY day ORDER BY day`, since)
 
   const totals = {
     plays: one('SELECT COUNT(*) AS n FROM play_events WHERE created_at >= ?', since).n,
-    viewers: one('SELECT COUNT(DISTINCT COALESCE(user_id, ip)) AS n FROM play_events WHERE created_at >= ?', since).n,
+    viewers: one(`SELECT COUNT(DISTINCT ${viewerExpr}) AS n FROM play_events WHERE created_at >= ?`, since).n,
     dramasPlayed: one('SELECT COUNT(DISTINCT drama_id) AS n FROM play_events WHERE created_at >= ?', since).n,
     playsAllTime: one('SELECT COUNT(*) AS n FROM play_events').n,
   }
 
   const topDramas = all(`SELECT d.id AS dramaId, d.title,
-      COUNT(*) AS plays, COUNT(DISTINCT COALESCE(p.user_id, p.ip)) AS viewers
+      COUNT(*) AS plays, COUNT(DISTINCT COALESCE(p.visitor_id, CASE WHEN p.user_id IS NOT NULL THEN 'u:' || p.user_id ELSE 'ip:' || COALESCE(p.ip, '') END)) AS viewers
     FROM play_events p JOIN dramas d ON d.id = p.drama_id
     WHERE date(p.created_at) >= date(?)
     GROUP BY p.drama_id ORDER BY plays DESC LIMIT 10`, since)
@@ -112,6 +143,13 @@ export function analyticsReport({ days = 7 } = {}) {
       WHERE status IN ('paid','fulfilled') AND created_at >= ?`, since).n,
   }
 
+  const visitors = {
+    total: one('SELECT COUNT(*) AS n FROM visitors WHERE last_seen >= ?', since).n,
+    anonymous: one('SELECT COUNT(*) AS n FROM visitors WHERE user_id IS NULL AND last_seen >= ?', since).n,
+    linked: one('SELECT COUNT(*) AS n FROM visitors WHERE user_id IS NOT NULL AND last_seen >= ?', since).n,
+    newByDay: all('SELECT date(first_seen) AS day, COUNT(*) AS n FROM visitors WHERE first_seen >= ? GROUP BY day ORDER BY day', since),
+  }
+
   const subscriptions = {
     active: one("SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'active' AND datetime(valid_to) > datetime('now')").n,
     byPlan: all(`SELECT p.name, COUNT(*) AS n FROM subscriptions s JOIN plans p ON p.id = s.plan_id
@@ -131,13 +169,24 @@ export function analyticsReport({ days = 7 } = {}) {
   /* ---------- 漏斗上游（曝光 → 详情 → 付费墙 → 下单 → 支付）---------- */
   const countOf = (type) => one('SELECT COUNT(*) AS n FROM track_events WHERE type = ? AND created_at >= ?', type, since).n
   const upstream = {
+    pageViews: countOf('page_view'),
+    impressions: countOf('impression'),
     detailViews: countOf('detail_view'),
+    episodeClicks: countOf('episode_click'),
+    playStarts: countOf('play_start'),
+    playErrors: countOf('play_error'),
     paywallViews: countOf('paywall_view'),
     paywallClicks: countOf('paywall_click'),
+    loginOpens: countOf('login_open'),
+    loginSuccesses: countOf('login_success'),
+    favorites: countOf('favorite'),
+    orderEvents: countOf('order_created'),
+    paymentEvents: countOf('payment_success'),
     playEnds: countOf('play_end'),
     searches: countOf('search'),
     shares: countOf('share'),
-    impressions: countOf('impression'),
+    visitors: one(`SELECT COUNT(DISTINCT ${identityOf('track_events')}) AS n
+      FROM track_events WHERE type IN ('page_view', 'session_start') AND created_at >= ?`, since).n,
   }
   upstream.detailToPaywall = upstream.detailViews ? Number(((upstream.paywallViews / upstream.detailViews) * 100).toFixed(2)) : 0
   upstream.paywallToOrder = upstream.paywallViews ? Number(((funnel.orders / upstream.paywallViews) * 100).toFixed(2)) : 0
@@ -163,9 +212,63 @@ export function analyticsReport({ days = 7 } = {}) {
     WHERE type = 'search' AND created_at >= ? AND path <> ''
     GROUP BY path ORDER BY n DESC LIMIT 10`, since)
 
+  // 漏斗按同一访客逐级去重：后一步只统计完成过前一步的访客，避免历史数据造成倒挂或 >100%。
+  const trackIdentity = identityOf('track_events')
+  const playIdentity = identityOf('play_events')
+  const orderIdentity = `COALESCE(NULLIF(orders.visitor_id, ''), 'u:' || orders.user_id)`
+  const reach = one(`WITH
+    visited AS (
+      SELECT DISTINCT ${trackIdentity} AS id FROM track_events WHERE created_at >= ?
+      UNION
+      SELECT DISTINCT ${playIdentity} AS id FROM play_events WHERE created_at >= ?
+    ),
+    detailed AS (
+      SELECT DISTINCT ${trackIdentity} AS id FROM track_events
+      WHERE type = 'detail_view' AND created_at >= ? AND ${trackIdentity} IN (SELECT id FROM visited)
+    ),
+    played AS (
+      SELECT DISTINCT ${playIdentity} AS id FROM play_events
+      WHERE created_at >= ? AND ${playIdentity} IN (SELECT id FROM detailed)
+    ),
+    paywalled AS (
+      SELECT DISTINCT ${trackIdentity} AS id FROM track_events
+      WHERE type = 'paywall_view' AND created_at >= ? AND ${trackIdentity} IN (SELECT id FROM played)
+    ),
+    ordered AS (
+      SELECT DISTINCT ${orderIdentity} AS id FROM orders
+      WHERE created_at >= ? AND ${orderIdentity} IN (SELECT id FROM paywalled)
+    ),
+    converted AS (
+      SELECT DISTINCT ${orderIdentity} AS id FROM orders
+      WHERE status IN ('paid', 'fulfilled') AND created_at >= ?
+        AND ${orderIdentity} IN (SELECT id FROM ordered)
+    )
+    SELECT
+      (SELECT COUNT(*) FROM visited) AS visitors,
+      (SELECT COUNT(*) FROM detailed) AS details,
+      (SELECT COUNT(*) FROM played) AS plays,
+      (SELECT COUNT(*) FROM paywalled) AS paywalls,
+      (SELECT COUNT(*) FROM ordered) AS orders,
+      (SELECT COUNT(*) FROM converted) AS paid`, since, since, since, since, since, since, since)
+  const conversion = [
+    { key: 'visitors', label: '访问访客', value: Number(reach.visitors ?? 0) },
+    { key: 'detailViews', label: '查看详情', value: Number(reach.details ?? 0) },
+    { key: 'plays', label: '开始播放', value: Number(reach.plays ?? 0) },
+    { key: 'paywallViews', label: '触达付费墙', value: Number(reach.paywalls ?? 0) },
+    { key: 'orders', label: '创建订单', value: Number(reach.orders ?? 0) },
+    { key: 'paid', label: '支付成功', value: Number(reach.paid ?? 0) },
+  ].map((stage, index, list) => {
+    const previous = index === 0 ? stage.value : list[index - 1].value
+    return {
+      ...stage,
+      rate: index === 0 ? (stage.value ? 100 : 0) : (previous ? Number(((stage.value / previous) * 100).toFixed(1)) : 0),
+      dropped: index === 0 ? 0 : Math.max(0, previous - stage.value),
+    }
+  })
+
   return {
     range: { days, since }, totals: { ...totals, playsPerViewer: perViewer }, playsByDay: plays, topDramas, sourceSplit,
-    ordersByDay, byChannel, byProduct, funnel, money, users, subscriptions, content,
+    ordersByDay, byChannel, byProduct, funnel, money, users, visitors, subscriptions, content, conversion,
     tracking: { upstream, byType: trackByType, byDay: trackByDay, completion: completionStats, topDetailViews, searchTerms },
   }
 }

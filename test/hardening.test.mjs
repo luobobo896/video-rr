@@ -26,8 +26,24 @@ dbModule.ensureAdminSchema()
 const auth = await import('../server/auth.mjs')
 const commerce = await import('../server/commerce.mjs')
 const watch = await import('../server/usdt-watch.mjs')
+const artwork = await import('../server/artwork.mjs')
 
 const ADDRESS = 'TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE'
+
+test('关键列表/权益索引已创建', () => {
+  const indexes = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map((row) => row.name))
+  for (const name of ['idx_orders_user', 'idx_orders_status', 'idx_subscriptions_user', 'idx_section_items_section', 'idx_rank_items_list']) {
+    assert.equal(indexes.has(name), true, `缺少索引 ${name}`)
+  }
+})
+
+test('封面远程下载只允许受信任图片域名', () => {
+  assert.equal(artwork.isAllowedRemoteImage('https://image.tmdb.org/t/p/w500/a.jpg'), true)
+  assert.equal(artwork.isAllowedRemoteImage('https://upload.wikimedia.org/a.jpg'), true)
+  assert.equal(artwork.isAllowedRemoteImage('https://127.0.0.1/secret.png'), false)
+  assert.equal(artwork.isAllowedRemoteImage('http://169.254.169.254/latest/meta-data'), false)
+  assert.equal(artwork.isAllowedRemoteImage('file:///etc/passwd'), false)
+})
 
 test('密钥加固：dev-link-secret 与过短密钥会被替换成随机值', () => {
   dbModule.setSetting('site', { ...dbModule.getSetting('site', {}), linkSecret: 'dev-link-secret' })

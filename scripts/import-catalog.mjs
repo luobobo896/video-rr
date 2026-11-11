@@ -18,7 +18,8 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, re
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { join } from 'node:path'
-import { db, ROOT } from '../server/db.mjs'
+import { contentTypeOfCategory, db, ROOT } from '../server/db.mjs'
+import { generatePreview } from '../server/previews.mjs'
 
 const FFMPEG = process.env.MH_FFMPEG ?? 'ffmpeg'
 const FFPROBE = process.env.MH_FFPROBE ?? 'ffprobe'
@@ -311,19 +312,32 @@ async function buildOne(drama, index, segmentSeconds) {
     bannerPath = `/media/images/${bannerFile}`
   }
   log(`  封面 ${(coverBytes / 1024).toFixed(0)} KB${bannerPath ? '，横幅已生成' : ''}`)
+  const preview = await generatePreview({
+    source: target,
+    slug: drama.slug,
+    at: Math.min(60, Math.max(4, info.duration * 0.18)),
+    duration: 16,
+    force: FORCE,
+    ffmpeg: FFMPEG,
+  })
+  log(`  预览片 ${preview.skipped ? '复用' : '生成'} ${(preview.bytes / 1024 / 1024).toFixed(2)} MB`)
 
-  const insertDrama = db.prepare(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, score, status, sort)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'published', ?)`)
+  const insertDrama = db.prepare(`INSERT INTO dramas
+    (title, sub_title, cover_url, description, year, area, category, score, status, sort, content_type, published_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, datetime('now'))`)
+  const category = drama.category ?? 'TV'
   const dramaInfo = insertDrama.run(
     drama.title, drama.subTitle ?? '', `/media/images/${coverFile}`, drama.description ?? '',
-    drama.year ?? null, drama.area ?? '', drama.category ?? 'TV', drama.score ?? 8.5, index,
+    drama.year ?? null, drama.area ?? '', category, drama.score ?? 8.5, index,
+    contentTypeOfCategory(category),
   )
   const dramaId = Number(dramaInfo.lastInsertRowid)
 
   const access = drama.access ?? {}
+  const freeEpisodes = category === 'MOVIE' ? 0 : (access.freeEpisodes ?? 0)
   db.prepare(`INSERT INTO content_policies (drama_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
     VALUES (?, ?, ?, ?, ?, 'single', 72)`).run(
-    dramaId, access.mode ?? 'subscription', access.freeEpisodes ?? 0, access.trialSeconds ?? 0, access.singlePrice ?? 0,
+    dramaId, access.mode ?? 'subscription', freeEpisodes, access.trialSeconds ?? 0, access.singlePrice ?? 0,
   )
 
   for (const [tagIndex, name] of (drama.tags ?? []).entries()) {
@@ -331,7 +345,7 @@ async function buildOne(drama, index, segmentSeconds) {
     db.prepare('INSERT OR IGNORE INTO drama_tags (drama_id, tag_id) VALUES (?, ?)').run(dramaId, tagId)
   }
 
-  const count = Math.max(1, Number(drama.episodeCount ?? Math.round(info.duration / segmentSeconds)))
+  const count = category === 'MOVIE' ? 1 : Math.max(1, Number(drama.episodeCount ?? Math.round(info.duration / segmentSeconds)))
   const slice = info.duration / count
   log(`  切分为 ${count} 集（每集约 ${Math.round(slice)}s）`)
 

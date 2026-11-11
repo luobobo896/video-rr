@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { db } from './db.mjs'
+import { findTmdb } from './tmdb.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const run = (sql, ...args) => db.prepare(sql).run(...args)
@@ -118,6 +119,26 @@ function fromCache(title) {
   }
 }
 
+async function fromTmdb(title) {
+  const hit = await findTmdb(title).catch(() => null)
+  if (!hit) return null
+  const payload = toPayload({
+    title: hit.title || title,
+    subTitle: [hit.originalTitle, hit.year].filter(Boolean).join(' · '),
+    description: hit.overview,
+    year: hit.year,
+    area: hit.area,
+    category: hit.mediaType === 'tv' ? 'TV' : 'MOVIE',
+    score: hit.score,
+    coverUrl: hit.posterUrl,
+    bannerUrl: hit.backdropUrl,
+    tags: hit.tags,
+  }, 'tmdb')
+  payload.tmdb = { id: hit.id, type: hit.mediaType, imdbId: hit.imdbId }
+  cachePut(title, payload)
+  return payload
+}
+
 /**
  * 真实外部搜刮：archive.org 公开检索（无需密钥）。
  * 用户填电影名 → 拿到海报（services/img）、年份、简介、题材标签，
@@ -218,14 +239,17 @@ export async function scrapeTitle(title) {
   const value = String(title ?? '').trim()
   if (!value) throw Object.assign(new Error('请先填写标题'), { status: 400 })
 
-  const remote = await fromRemote(value)
-  if (remote) return { found: true, payload: remote, suggestions: suggest(value) }
+  const local = fromCatalog(value)
+  if (local) return { found: true, payload: local, suggestions: suggest(value) }
+
+  const tmdb = await fromTmdb(value)
+  if (tmdb) return { found: true, payload: tmdb, suggestions: suggest(value) }
 
   const cached = fromCache(value)
   if (cached) return { found: true, payload: toPayload(cached, cached.source ?? 'cache'), suggestions: suggest(value) }
 
-  const local = fromCatalog(value)
-  if (local) return { found: true, payload: local, suggestions: suggest(value) }
+  const remote = await fromRemote(value)
+  if (remote) return { found: true, payload: remote, suggestions: suggest(value) }
 
   const draft = toPayload({ title: value, category: guessCategory(value) }, 'draft')
   return { found: false, payload: draft, suggestions: suggest(value) }
