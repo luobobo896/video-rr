@@ -796,6 +796,9 @@ function posterCard(item, options = {}) {
   const plays = options.plays && Number(item.playCount) > 0 ? `<span class="card-plays">${icon('play', 10)}${fmtCount(item.playCount)}</span>` : ''
   const meta = (item.labels ?? []).slice(0, 2).join(' · ')
   const sub = `${plays}${escapeHtml(item.subTitle || meta)}`
+  const adultMeta = item.isAdult && item.stats
+    ? [item.releaseDate ? `发行 ${item.releaseDate}` : '', `收藏 ${fmtCount(item.stats.favoriteCount ?? 0)}`, `浏览 ${fmtCount(item.stats.totalViews ?? 0)}`].filter(Boolean).join(' · ')
+    : ''
   return `
     <div class="card" data-drama-id="${escapeHtml(item.dramaId)}">
       <a class="poster" href="#/drama/${escapeHtml(item.dramaId)}" title="${escapeHtml(item.title)}">
@@ -806,6 +809,7 @@ function posterCard(item, options = {}) {
       </a>
       <div class="card-title">${escapeHtml(item.title)}</div>
       ${sub ? `<div class="card-sub">${sub}</div>` : ''}
+      ${adultMeta ? `<div class="card-sub card-adult-stats">${escapeHtml(adultMeta)}</div>` : ''}
     </div>`
 }
 
@@ -1399,6 +1403,7 @@ async function renderCategory(type, params = new URLSearchParams(), audience = '
   let expanded = false
   let requestSeq = 0
   let facets = { channels: [], sorts: [], regions: [], genres: [], years: [], tags: [] }
+  let adultTags = []
 
   const channelLabel = () => (facets.channels.find((row) => row.value === state.channel) ?? { label: '全部' }).label
   const adultLabel = () => state.constants?.adultMenu?.labels?.[getLang()] ?? (getLang() === 'en' ? 'Adult' : '成人')
@@ -1423,7 +1428,11 @@ async function renderCategory(type, params = new URLSearchParams(), audience = '
     if (location.hash !== next) window.history.replaceState(null, '', next)
   }
 
-  const first = await api(`/api/category?${buildQuery(1).toString()}`)
+  const [first, adultTagResult] = await Promise.all([
+    api(`/api/category?${buildQuery(1).toString()}`),
+    adultMode ? api('/api/tags?scope=adult').catch(() => ({ list: [] })) : Promise.resolve(null),
+  ])
+  adultTags = adultMode ? (adultTagResult?.list ?? []) : []
   total = Number(first.total ?? 0)
   baseline = total
   items = first.list ?? []
@@ -1452,8 +1461,9 @@ async function renderCategory(type, params = new URLSearchParams(), audience = '
     const more = limit < list.length
       ? `<button class="pill pill-more" data-expand="1">${expanded ? '收起选项' : `展开 ${list.length - limit} 项`}</button>`
       : (options.collapsible && expanded ? '<button class="pill pill-more" data-expand="1">收起选项</button>' : '')
+    const all = options.showAll === false ? '' : pill('', '全部')
     return `<div class="filter-row" data-filter-row="${key}"><span class="filter-label">${title}</span>
-      <div class="subtabs" data-filter-strip="${key}">${pill('', '全部')}${shown.map((facet) => pill(facet.value, facet.label ?? facet.value, facet.count)).join('')}${options.collapsible ? more : ''}</div></div>`
+      <div class="subtabs" data-filter-strip="${key}">${all}${shown.map((facet) => pill(facet.value, facet.label ?? facet.value, facet.count)).join('')}${options.collapsible ? more : ''}</div></div>`
   }
 
   const paintFilters = () => {
@@ -1467,10 +1477,19 @@ async function renderCategory(type, params = new URLSearchParams(), audience = '
     const genreRow = row('类型', 'genre', (facets.genres ?? []).map((g) => ({ value: g.value, label: g.label, count: g.count })))
     const yearRow = row('年份', 'year', facets.years ?? [])
     const tagRow = expanded ? row('标签', 'tag', facets.tags ?? [], { limit: 24 }) : ''
-    bar.innerHTML = `${channelRow}${sortRow}${regionRow}${genreRow}${yearRow}
-      ${tagRow}
+    const adultTagRows = adultMode
+      ? adultTags.filter((tag) => !tag.parent_id).map((group) => {
+        const children = adultTags.filter((tag) => Number(tag.parent_id) === Number(group.id))
+        return row(group.name, 'tag', children.map((tag) => ({
+          value: tag.id,
+          label: tag.label ?? tag.name,
+          count: tag.dramaCount,
+        })), { showAll: false })
+      }).join('')
+      : ''
+    bar.innerHTML = `${adultMode ? `${sortRow}${adultTagRows}` : `${channelRow}${sortRow}${regionRow}${genreRow}${yearRow}${tagRow}`}
       <div class="filter-foot">
-        <button class="btn-ghost sm" data-expand="1">${expanded ? '收起选项' : '更多筛选（标签）'}</button>
+        ${adultMode ? '' : `<button class="btn-ghost sm" data-expand="1">${expanded ? '收起选项' : '更多筛选（标签）'}</button>`}
         ${hasFilter() ? '<button class="btn-ghost sm" id="cat-reset">清空筛选</button>' : ''}
       </div>`
     bar.querySelectorAll('[data-filter-strip]').forEach((strip) => {
@@ -1497,8 +1516,8 @@ async function renderCategory(type, params = new URLSearchParams(), audience = '
       if (state.region) parts.push((facets.regions.find((r) => r.value === state.region) ?? {}).label ?? state.region)
       if (state.year) parts.push((facets.years.find((r) => r.value === state.year) ?? {}).label ?? state.year)
       if (state.genre) parts.push(state.genre)
-      const activeTag = (facets.tags ?? []).find((tag) => String(tag.value) === String(state.tag))
-      if (activeTag) parts.push(`#${activeTag.label}`)
+      const activeTag = (adultMode ? adultTags : (facets.tags ?? [])).find((tag) => String(tag.value ?? tag.id) === String(state.tag))
+      if (activeTag) parts.push(`#${activeTag.label ?? activeTag.name}`)
       hint.textContent = parts.filter(Boolean).join(' · ')
     }
     const grid = $('#cat-grid')
@@ -1983,6 +2002,8 @@ async function renderDrama(id) {
   const entitled = hasSubscription || owned
   const resumeNo = Number(detail.resumeEpisodeNo ?? 0) || null
   const priceText = Number(detail.singlePrice ?? 0).toFixed(2)
+  const dateOnly = (value) => (value ? String(value).slice(0, 10) : '—')
+  const adultStats = detail.isAdult ? detail.stats : null
   const payCta = `<button class="btn-ghost" id="open-paywall">${canSingle ? '解锁全部 ¥' + priceText : '开通会员看全集'}</button>`
   const cta = episodes.length === 0
     ? '<button class="btn-primary" disabled>暂无剧集</button>'
@@ -2007,10 +2028,18 @@ async function renderDrama(id) {
           <span>${escapeHtml(detail.dramaTypeLabel ?? categoryLabel(detail.dramaType))}</span>
           <span>全 ${detail.episodes.length} 集</span>
           <span>${detail.freeEpisodes > 0 ? `首 ${detail.freeEpisodes} 集免费` : (canSingle ? '单片付费' : '会员专享')}</span>
+          ${detail.isAdult ? `<span>发行 ${escapeHtml(dateOnly(detail.releaseDate))}</span><span>最近更新 ${escapeHtml(dateOnly(detail.updatedAt))}</span>` : ''}
         </div>
         <div class="detail-desc">${escapeHtml(detail.subTitle ?? '')}<br/>${escapeHtml(detail.description ?? '')}</div>
+        ${adultStats ? `<div class="adult-stat-grid" aria-label="成人内容统计">
+          <div><span>收藏</span><strong>${fmtCount(adultStats.favoriteCount ?? 0)}</strong></div>
+          <div><span>今日浏览</span><strong>${fmtCount(adultStats.todayViews ?? 0)}</strong></div>
+          <div><span>本周浏览</span><strong>${fmtCount(adultStats.weekViews ?? 0)}</strong></div>
+          <div><span>本月浏览</span><strong>${fmtCount(adultStats.monthViews ?? 0)}</strong></div>
+          <div><span>总浏览</span><strong>${fmtCount(adultStats.totalViews ?? 0)}</strong></div>
+        </div>` : ''}
         ${(detail.tags ?? []).length > 0
-          ? `<div class="subtabs">${detail.tags.map((tag) => `<a class="pill" href="#/search?tag=${tag.id}">${escapeHtml(tag.name)}</a>`).join('')}</div>`
+          ? `<div class="subtabs">${detail.tags.map((tag) => `<a class="pill" href="${detail.isAdult ? '#/adult' : '#/search'}?tag=${tag.id}">${escapeHtml(tag.name)}</a>`).join('')}</div>`
           : ''}
         <div class="detail-actions">
           ${cta}

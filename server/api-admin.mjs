@@ -17,6 +17,7 @@ import {
 } from './commerce.mjs'
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
 import { downloadRemoteVideo } from './media-import.mjs'
+import { adultStatsFor } from './adult-stats.mjs'
 import { policyOf, rulesOfDrama, setEpisodeRules } from './entitlements.mjs'
 import {
   PRESETS, channelList, emailSettings, mailUnavailable, markTest, removeChannel, saveEmailSettings, sendMail, upsertChannel as upsertMailChannel, verifyChannel,
@@ -49,7 +50,13 @@ import { usdtWatchStatus } from './usdt-watch.mjs'
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
 const run = (sql, ...args) => db.prepare(sql).run(...args)
-const dramaDto = (row) => (row ? { ...row, isAdult: Boolean(row.is_adult) } : row)
+const dramaDto = (row) => (row ? {
+  ...row,
+  isAdult: Boolean(row.is_adult),
+  releaseDate: row.release_date ?? null,
+  updatedAt: row.updated_at ?? null,
+} : row)
+const validDate = (value) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value)
 
 const ipOf = (req) => clientIpOf(req)
 const safeJson = (text) => { try { return JSON.parse(text) } catch { return null } }
@@ -705,6 +712,25 @@ const deny = (perm) => {
     }
   }
 
+  if (pathname === '/admin/api/adult-stats' && method === 'GET') {
+    if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
+    const rows = all(`SELECT id, title, status, release_date, updated_at, created_at
+      FROM dramas WHERE is_adult = 1
+      ORDER BY COALESCE(release_date, updated_at, created_at) DESC, id DESC LIMIT 500`)
+    const stats = adultStatsFor(rows.map((row) => row.id))
+    return send(res, {
+      total: rows.length,
+      list: rows.map((row) => ({
+        dramaId: row.id,
+        title: row.title,
+        status: row.status,
+        releaseDate: row.release_date ?? null,
+        updatedAt: row.updated_at ?? null,
+        ...stats.get(row.id),
+      })),
+    })
+  }
+
   if (seg[0] === 'dramas' && seg.length === 1 && method === 'GET') {
     if (!guard(PERM.dramas)) return deny(PERM.dramas)
     const { page, pageSize } = paging(url, 20)
@@ -722,6 +748,8 @@ const deny = (perm) => {
       list: rows.map((drama) => ({
         ...drama,
         isAdult: Boolean(drama.is_adult),
+        releaseDate: drama.release_date ?? null,
+        updatedAt: drama.updated_at ?? null,
         episodeCount: one('SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ?', drama.id).n,
         readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ? AND status = 'ready' AND hls_path IS NOT NULL", drama.id).n,
         policy: policyOf(drama.id) ?? null,
@@ -845,6 +873,8 @@ const deny = (perm) => {
     if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
     const title = String(body.title ?? '').trim()
     if (!title) return send(res, {}, '0400', '请先填写剧集标题', 400)
+    const releaseDate = String(body.releaseDate ?? '').trim()
+    if (!validDate(releaseDate)) return send(res, {}, '0400', '发行日期格式应为 YYYY-MM-DD', 400)
     const policyGroupId = Number(body.policyGroupId ?? 0) || null
     const policyGroup = policyGroupId ? one('SELECT * FROM policy_groups WHERE id = ?', policyGroupId) : null
     if (policyGroupId && !policyGroup) return send(res, {}, '0404', '付费策略组不存在', 404)
@@ -853,10 +883,10 @@ const deny = (perm) => {
     const contentType = ['series', 'movie', 'comic_drama'].includes(body.contentType)
       ? body.contentType
       : (body.category === 'MOVIE' ? 'movie' : body.category === 'ANIME' ? 'comic_drama' : 'series')
-    const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, is_adult, score, status, sort, content_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, is_adult, release_date, score, status, sort, content_type, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     title, body.subTitle ?? '', body.coverUrl ?? '', body.description ?? '',
-    Number(body.year ?? 0) || 0, body.area ?? '', body.category ?? '', body.isAdult ? 1 : 0, Number(body.score ?? 0) || 0,
+    Number(body.year ?? 0) || 0, body.area ?? '', body.category ?? '', body.isAdult ? 1 : 0, releaseDate || null, Number(body.score ?? 0) || 0,
     'draft', Number(body.sort ?? 0), contentType)
     const dramaId = Number(info.lastInsertRowid)
     run(`INSERT INTO content_policies
@@ -884,6 +914,8 @@ const deny = (perm) => {
     const dramaId = Number(seg[1])
     const before = one('SELECT * FROM dramas WHERE id = ?', dramaId)
     if (!before) return send(res, {}, '0404', '剧集不存在', 404)
+    const releaseDate = body.releaseDate === undefined ? (before.release_date ?? '') : String(body.releaseDate ?? '').trim()
+    if (!validDate(releaseDate)) return send(res, {}, '0400', '发行日期格式应为 YYYY-MM-DD', 400)
     const nextStatus = body.status ?? before.status
     // 上架是独立权限 + 必须过资料完整性校验（否则编辑口可以绕过发布口的检查）
     if (nextStatus === 'published' && before.status !== 'published') {
@@ -906,12 +938,13 @@ const deny = (perm) => {
       ? body.contentType
       : before.content_type ?? (body.category === 'MOVIE' ? 'movie' : body.category === 'ANIME' ? 'comic_drama' : 'series')
     const isAdult = body.isAdult === undefined ? before.is_adult : (body.isAdult ? 1 : 0)
-    run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, is_adult = ?, score = ?, status = ?, sort = ?, content_type = ?,
+    run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, is_adult = ?, release_date = ?, score = ?, status = ?, sort = ?, content_type = ?,
+      updated_at = datetime('now'),
       published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, datetime('now')) ELSE published_at END
       WHERE id = ?`,
     body.title ?? before.title, body.subTitle ?? before.sub_title, body.coverUrl ?? before.cover_url,
     body.description ?? before.description, Number(body.year ?? before.year), body.area ?? before.area,
-    body.category ?? before.category, isAdult, Number(body.score ?? before.score), nextStatus,
+    body.category ?? before.category, isAdult, releaseDate || null, Number(body.score ?? before.score), nextStatus,
     Number(body.sort ?? before.sort), contentType, nextStatus, dramaId)
     log('content.drama.update', 'drama', dramaId, before, { ...body, status: nextStatus })
     return send(res, dramaDto(one('SELECT * FROM dramas WHERE id = ?', dramaId)))
@@ -969,6 +1002,7 @@ const deny = (perm) => {
     const title = body.title ?? (drama.category === 'MOVIE' ? '正片' : `第 ${nextNo} 集`)
     const info = run("INSERT INTO episodes (drama_id, no, title, status) VALUES (?, ?, ?, 'ready')",
       dramaId, Number(body.no ?? nextNo), title)
+    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", dramaId)
     log('content.episode.create', 'episode', Number(info.lastInsertRowid), null, { dramaId, no: body.no ?? nextNo })
     return send(res, one('SELECT * FROM episodes WHERE id = ?', Number(info.lastInsertRowid)))
   }
@@ -1201,6 +1235,7 @@ const deny = (perm) => {
     if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
     const before = one('SELECT * FROM episodes WHERE id = ?', Number(seg[1]))
     run('DELETE FROM episodes WHERE id = ?', Number(seg[1]))
+    if (before?.drama_id) run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", before.drama_id)
     log('content.episode.delete', 'episode', seg[1], before, null, body.reason)
     return send(res, { deleted: true })
   }
@@ -1213,6 +1248,7 @@ const deny = (perm) => {
     const info = await probe(opts.uploadPath)
     run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, opts.uploadPath, episode.id)
     enqueueEpisode({ ...episode, source_path: opts.uploadPath, duration: info?.duration ?? 0 })
+    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
     log('content.episode.upload', 'episode', episode.id, null, { size: opts.uploadSize, probe: info })
     return send(res, { ok: true, probe: info, queue: queueState() })
   }
@@ -1234,6 +1270,7 @@ const deny = (perm) => {
     }
     run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info.duration, download.path, episode.id)
     enqueueEpisode({ ...episode, source_path: download.path, duration: info.duration })
+    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
     const host = (() => { try { return new URL(download.sourceUrl).host } catch { return '' } })()
     log('content.episode.importUrl', 'episode', episode.id, null, {
       host, size: download.size, probe: info, contentType: download.contentType,
@@ -1249,6 +1286,7 @@ const deny = (perm) => {
     const info = await probe(file)
     run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, file, episode.id)
     enqueueEpisode({ ...episode, source_path: file, duration: info?.duration ?? 0 })
+    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
     log('content.episode.sample', 'episode', episode.id, null, { file })
     return send(res, { ok: true, source: file, probe: info, queue: queueState() })
   }
@@ -1993,21 +2031,23 @@ const deny = (perm) => {
     const includeDisabled = url.searchParams.get('includeDisabled') === '1'
     const keyword = url.searchParams.get('keyword') ?? ''
     const level = url.searchParams.get('level') ?? 'all'
-    const paged = page ? listTags({ withCount: true, includeDisabled, page: Number(page), pageSize: Number(url.searchParams.get('pageSize') ?? 20), keyword, level }) : null
-    const list = paged ? paged.list : listTags({ withCount: true, includeDisabled, keyword, level })
+    const requestedScope = url.searchParams.get('scope') ?? 'general'
+    const scope = ['general', 'adult', 'all'].includes(requestedScope) ? requestedScope : 'general'
+    const paged = page ? listTags({ withCount: true, includeDisabled, scope, page: Number(page), pageSize: Number(url.searchParams.get('pageSize') ?? 20), keyword, level }) : null
+    const list = paged ? paged.list : listTags({ withCount: true, includeDisabled, scope, keyword, level })
     return send(res, {
       list,
       total: paged ? paged.total : list.length,
       page: paged ? paged.page : 1,
       pageSize: paged ? paged.pageSize : list.length,
-      tree: tagTree({ includeDisabled: true, withCount: true }),
+      tree: tagTree({ includeDisabled: true, withCount: true, scope }),
     })
   }
 
   if (pathname === '/admin/api/tags' && method === 'POST') {
     if (!guard(PERM.tagWrite)) return deny(PERM.tagWrite)
-    const tag = body?.id ? updateTag(body.id, body) : createTag(body ?? {})
-    log('admin.tag.save', 'tag', tag.id, null, { name: tag.name, parentId: tag.parent_id ?? null })
+    const tag = body?.id ? updateTag(body.id, body) : createTag({ scope: 'general', ...(body ?? {}) })
+    log('admin.tag.save', 'tag', tag.id, null, { name: tag.name, scope: tag.scope, parentId: tag.parent_id ?? null })
     return send(res, { tag })
   }
 
@@ -2032,9 +2072,13 @@ const deny = (perm) => {
   if (/^\/admin\/api\/dramas\/\d+\/tags$/.test(pathname) && method === 'POST') {
     if (!guard(PERM.tagWrite)) return deny(PERM.tagWrite)
     const dramaId = Number(pathname.split('/')[4])
-    const tags = setDramaTags(dramaId, body?.tagIds ?? [])
-    log('admin.drama.tags', 'drama', dramaId, null, { tagIds: tags.map((tag) => tag.id) })
-    return send(res, { tags: tags.map((tag) => ({ id: tag.id, name: tag.name })) })
+    try {
+      const tags = setDramaTags(dramaId, body?.tagIds ?? [])
+      log('admin.drama.tags', 'drama', dramaId, null, { tagIds: tags.map((tag) => tag.id) })
+      return send(res, { tags: tags.map((tag) => ({ id: tag.id, name: tag.name })) })
+    } catch (error) {
+      return fail(res, error, '保存标签失败')
+    }
   }
 
   /* ---------------- 订单：USDT 人工确认到账 / 补单 ---------------- */

@@ -67,3 +67,42 @@
 - 成人可见性 SQL 收敛到 `server/content-visibility.mjs`，减少五处重复谓词。
 - 年龄门按钮桌面 40px、移动端 48px，符合 `DESIGN.md` 的控件刻度。
 - URL 导入改为单一 15 分钟总时限，重定向不再重复续期。
+
+## 成人标签、发行日期与统计复验
+
+自动化：
+
+- `node --test test/adult-menu.test.mjs`：5/5 通过。
+- `npm test`：152/152 通过。
+- `npm run check`：token 同步与 10 个前端文件语法检查通过。
+- `npm run build`：C 端和后台生产构建通过。
+- 新增“删除默认成人标签后再次初始化不回填”回归，确认 `settings.adult.tagSeedVersion` 只在首次播种后写入。
+
+数据与页面：
+
+- 后台成人标签页共 119 个节点：8 个一级分组、111 个二级标签，标签可按普通/成人范围隔离维护。
+- 预览库统计卡片显示收藏 1、今日浏览 1、本周浏览 2、本月浏览 3、总浏览 4，与构造的播放事件一致。
+- C 端成人列表完整显示 8 个分组和 111 个标签；点击标签进入 `#/adult?tag=<id>`，成人内容卡片显示发行日期、收藏和总浏览。
+- 成人详情显示发行日期、最近更新、收藏、今日/本周/本月/总浏览，移动端统计为两列。
+- 375 / 768 / 1024 / 1440 四档实测：成人列表与详情均无页面级横向溢出；≤1199px 移动底栏为 6 项，375px 详情统计为 2 列。
+- 后台成人标签页与成人菜单设置在 1440 / 375 两档实测无页面级横向溢出。
+
+截图：
+
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/admin-adult-settings.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/admin-adult-tags.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/c-end-adult-list.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/c-end-adult-detail.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/c-end-adult-mobile.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/c-end-adult-list-375.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/c-end-adult-list-1440.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/c-end-adult-detail-375.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/c-end-adult-detail-1440.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/admin-adult-tags-375.png`
+- `C:/Users/hanson/.codex/ego/adult-tags-stats-qa-20261111/admin-adult-settings-375.png`
+
+静态检查：
+
+- `impeccable.cmd detect public/app.js public/styles.css admin/app.js --json` 返回 `[]`。
+- `impeccable.cmd context --target public/app.js` 成功加载 `PRODUCT.md` 与 `DESIGN.md`。
+- `@google/design.md lint DESIGN.md` 未完成：npx 解析依赖时长时间无输出，已终止；不影响本次页面的浏览器与 detector 验收。

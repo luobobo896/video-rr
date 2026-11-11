@@ -1064,8 +1064,21 @@ async function pageDramas() {
 }
 
 async function pageAdultSettings() {
-  const settings = await api('/admin/api/adult-menu')
+  const [settings, stats] = await Promise.all([
+    api('/admin/api/adult-menu'),
+    api('/admin/api/adult-stats'),
+  ])
   const enabled = settings.enabled !== false
+  const statRows = (stats.list ?? []).map((row) => `<tr>
+    <td><a href="#/dramas/${row.dramaId}">${esc(row.title)}</a><div class="muted">${row.status === 'published' ? '已上架' : '草稿'}</div></td>
+    <td class="settings-num">${esc(row.releaseDate ?? '—')}</td>
+    <td class="settings-num">${esc(fmtTs(row.updatedAt))}</td>
+    <td class="settings-num">${fmt(Number(row.favoriteCount ?? 0))}</td>
+    <td class="settings-num">${fmt(Number(row.todayViews ?? 0))}</td>
+    <td class="settings-num">${fmt(Number(row.weekViews ?? 0))}</td>
+    <td class="settings-num">${fmt(Number(row.monthViews ?? 0))}</td>
+    <td class="settings-num">${fmt(Number(row.totalViews ?? 0))}</td>
+  </tr>`).join('')
   view.innerHTML = `
     <div class="settings-ui settings-page">
       <div class="settings-intro">
@@ -1103,6 +1116,18 @@ async function pageAdultSettings() {
           <button class="btn primary" type="button" id="adult-save">保存设置</button>
         </div>
       </section>
+      <section class="panel settings-section" aria-labelledby="adult-stats-title">
+        <div class="settings-section-head">
+          <div>
+            <h3 id="adult-stats-title">成人内容统计</h3>
+            <p>统计按北京时间计算今日、本周和本月；浏览数取自实际播放事件，收藏数为当前收藏总量。</p>
+          </div>
+        </div>
+        ${statRows ? `<div class="settings-table-wrap"><table class="settings-table">
+          <thead><tr><th>内容</th><th>发行日期</th><th>最近更新</th><th>收藏</th><th>今日浏览</th><th>本周浏览</th><th>本月浏览</th><th>总浏览</th></tr></thead>
+          <tbody>${statRows}</tbody>
+        </table></div>` : '<div class="settings-empty"><strong>还没有成人内容</strong><span>在剧集编辑页勾选“成人内容”后，这里会出现统计。</span></div>'}
+      </section>
     </div>`
   $('#adult-save').addEventListener('click', async () => {
     const labelZh = $('#adult-label-zh').value.trim()
@@ -1131,7 +1156,7 @@ function dramaWizard(options, policyGroups = []) {
   const defaultGroup = groups.find((group) => group.access_mode === 'subscription') ?? groups[0] ?? null
   const draft = {
     title: '', subTitle: '', category: '', coverUrl: '', year: '', area: '', score: '', description: '',
-    contentType: '', policyGroupId: defaultGroup?.id ?? null, isAdult: false,
+    contentType: '', policyGroupId: defaultGroup?.id ?? null, isAdult: false, releaseDate: '',
   }
 
   openOverlay('新建剧集', `
@@ -1162,6 +1187,7 @@ function dramaWizard(options, policyGroups = []) {
         <span class="muted" id="wz-policy-summary">${esc(policyGroupSummary(defaultGroup))}</span>
       </div>
       <div class="field"><label>年份</label><input id="wz-year" placeholder="2010" /></div>
+      <div class="field"><label>发行日期</label><input id="wz-release-date" type="date" value="${esc(draft.releaseDate)}" /></div>
       <div class="field"><label>地区</label><input id="wz-area" placeholder="荷兰 / 中国大陆" /></div>
       <div class="field"><label>评分（0–10）</label><input id="wz-score" placeholder="9.1" /></div>
     </div>
@@ -1189,6 +1215,7 @@ function dramaWizard(options, policyGroups = []) {
       draft.contentType = body.querySelector('#wz-content-type').value
       draft.policyGroupId = Number(body.querySelector('#wz-policy-group').value || 0) || null
       draft.year = body.querySelector('#wz-year').value
+      draft.releaseDate = body.querySelector('#wz-release-date').value
       draft.area = body.querySelector('#wz-area').value.trim()
       draft.score = body.querySelector('#wz-score').value
       draft.isAdult = body.querySelector('#wz-adult').checked
@@ -1262,6 +1289,7 @@ function dramaWizard(options, policyGroups = []) {
             title: value.title, subTitle: value.subTitle, category: value.category,
             contentType: value.contentType,
             isAdult: value.isAdult,
+            releaseDate: value.releaseDate,
             coverUrl: value.coverUrl, description: value.description,
             year: Number(value.year) || 0, area: value.area, score: Number(value.score) || 0,
             policyGroupId: value.policyGroupId,
@@ -1292,7 +1320,7 @@ function dramaWizard(options, policyGroups = []) {
 async function pageDramaEdit(id) {
   const [data, tagResult, groupResult] = await Promise.all([
     api(`/admin/api/dramas/${id}`),
-    api('/admin/api/tags').then((result) => ({ list: result.list ?? [] })).catch((error) => ({ error })),
+    api('/admin/api/tags?scope=all').then((result) => ({ list: result.list ?? [] })).catch((error) => ({ error })),
     api('/admin/api/policy-groups').then((result) => ({ groups: result.groups ?? [] })).catch((error) => ({ error })),
   ])
   const drama = data.drama
@@ -1317,6 +1345,7 @@ async function pageDramaEdit(id) {
           ${[['series', '剧集'], ['movie', '电影'], ['comic_drama', '漫剧']].map(([value, label]) => `<option value="${value}" ${drama.content_type === value ? 'selected' : ''}>${label}</option>`).join('')}
         </select></label>
         ${field('year', '年份', drama.year, 'number')}
+        ${field('releaseDate', '发行日期', drama.releaseDate, 'date')}
         ${field('area', '地区', drama.area)}
         ${field('score', '评分', drama.score, 'number')}
         <label>付费策略组<select id="f-policy-group">
@@ -1329,6 +1358,7 @@ async function pageDramaEdit(id) {
         </select></label>
         <label class="span-2 switch"><input id="f-is-adult" type="checkbox" ${drama.isAdult ? 'checked' : ''} />成人内容（仅成人菜单可见）</label>
       </div>
+      <div class="muted" style="margin-top:8px">最近更新：${esc(fmtTs(drama.updatedAt))}</div>
       <div class="muted" id="f-policy-summary" style="margin-top:8px">
         <span id="f-policy-text">当前：${esc(currentGroup ? policyGroupSummary(currentGroup) : `${ACCESS_LABEL[policy.access_mode] ?? '会员免费'}（旧版自定义策略）`)}</span>
         <a href="#/policies">管理策略组 →</a>
@@ -1343,7 +1373,7 @@ async function pageDramaEdit(id) {
         ? '<span class="pill bad">标签加载失败，标签保存已禁用</span>'
         : allTags.length === 0
           ? '<span class="muted">还没有标签，先去「标签管理」新建</span>'
-          : allTags.map((tag) => `<label class="tag-option" data-name="${esc(tag.name)}" style="display:inline-flex;align-items:center;gap:6px;font-size:13px">
+          : allTags.map((tag) => `<label class="tag-option" data-name="${esc(tag.name)}" data-scope="${esc(tag.scope)}" style="display:inline-flex;align-items:center;gap:6px;font-size:13px">
             <input type="checkbox" class="f-tag" value="${tag.id}" ${currentTags.has(Number(tag.id)) ? 'checked' : ''} />${esc(tag.name)}
           </label>`).join('')}
     </div>
@@ -1372,15 +1402,30 @@ async function pageDramaEdit(id) {
     const badge = $('#tag-selected-count')
     if (badge) badge.textContent = `已选 ${count}`
   }
+  const tagScope = () => ($('#f-is-adult')?.checked ? 'adult' : 'general')
+  const applyTagScope = () => {
+    const scope = tagScope()
+    view.querySelectorAll('.tag-option').forEach((node) => {
+      const match = node.dataset.scope === scope
+      if (!match) node.querySelector('.f-tag').checked = false
+      node.style.display = match ? 'inline-flex' : 'none'
+    })
+    syncTagCount()
+  }
   $('#tag-search')?.addEventListener('input', (event) => {
     const keyword = event.target.value.trim().toLowerCase()
     view.querySelectorAll('.tag-option').forEach((node) => {
       const hit = !keyword || String(node.dataset.name ?? '').toLowerCase().includes(keyword)
-      node.style.display = hit || node.querySelector('.f-tag')?.checked ? 'inline-flex' : 'none'
+      const inScope = node.dataset.scope === tagScope()
+      node.style.display = inScope && (hit || node.querySelector('.f-tag')?.checked) ? 'inline-flex' : 'none'
     })
   })
   view.querySelectorAll('.f-tag').forEach((node) => node.addEventListener('change', syncTagCount))
-  syncTagCount()
+  $('#f-is-adult')?.addEventListener('change', () => {
+    $('#tag-search').value = ''
+    applyTagScope()
+  })
+  applyTagScope()
 
   $('#edit-rules').addEventListener('click', () => openRuleEditor(Number(id), drama.title))
   $('#f-policy-group')?.addEventListener('change', (event) => {
@@ -1395,6 +1440,7 @@ async function pageDramaEdit(id) {
         title: $('#f-title').value, subTitle: $('#f-subTitle').value, coverUrl: $('#f-coverUrl').value,
         category: $('#f-category').value, contentType: $('#f-content-type').value,
         isAdult: $('#f-is-adult').checked,
+        releaseDate: $('#f-releaseDate').value,
         year: Number($('#f-year').value), area: $('#f-area').value,
         score: Number($('#f-score').value), status: $('#f-status').value,
         description: $('#f-description').value,
@@ -5061,14 +5107,16 @@ function openCurrencyOverlay(currency, onSaved) {
 
 /* ---------------- 标签管理 ---------------- */
 const TAG_LEVELS = [['all', '全部'], ['top', '一级标签'], ['child', '二级标签']]
+const TAG_SCOPES = [['general', '普通标签'], ['adult', '成人标签']]
 
 async function pageTags() {
   const page = Number(listPages.tags ?? 1)
+  const scope = state.params.tagScope === 'adult' ? 'adult' : 'general'
   const level = state.params.tagLevel ?? 'all'
   const keyword = (state.params.tagQ ?? '').trim()
   const showDisabled = state.params.tagDisabled ? '1' : ''
   const canWrite = new Set(state.me?.permissions ?? []).has('tag.write')
-  const query = new URLSearchParams({ page: String(page), pageSize: '20', level, includeDisabled: '1' })
+  const query = new URLSearchParams({ page: String(page), pageSize: '20', level, includeDisabled: '1', scope })
   if (keyword) query.set('keyword', keyword)
   if (showDisabled) query.set('includeDisabled', '1')
   const data = await api(`/admin/api/tags?${query.toString()}`)
@@ -5076,9 +5124,10 @@ async function pageTags() {
 
   view.innerHTML = `
     <div class="panel">
-      <h3>标签管理 <span class="muted">共 ${data.total ?? 0} 个</span></h3>
-      <p class="muted">启停即时生效；二级标签可更换父级。</p>
+      <h3>${scope === 'adult' ? '成人标签管理' : '标签管理'} <span class="muted">共 ${data.total ?? 0} 个</span></h3>
+      <p class="muted">${scope === 'adult' ? '成人标签使用独立分组，不与普通影视标签混用。' : '启停即时生效；二级标签可更换父级。'}</p>
       <div class="form-row">
+        <div class="subtabs">${TAG_SCOPES.map(([key, label]) => `<button class="pill ${scope === key ? 'active' : ''}" data-scope="${key}">${label}</button>`).join('')}</div>
         <div class="subtabs">${TAG_LEVELS.map(([key, label]) => `<button class="pill ${level === key ? 'active' : ''}" data-level="${key}">${label}</button>`).join('')}</div>
         <input id="tag-q" aria-label="搜索标签" placeholder="搜标签名" value="${esc(keyword)}" style="width:160px" />
         ${canWrite ? '<button class="btn primary" id="tag-add">＋ 新增标签</button>' : ''}
@@ -5106,6 +5155,11 @@ async function pageTags() {
     </div>`
 
   const reload = () => pageTags()
+  view.querySelectorAll('[data-scope]').forEach((button) => button.addEventListener('click', () => {
+    state.params.tagScope = button.dataset.scope
+    listPages.tags = 1
+    reload()
+  }))
   view.querySelectorAll('[data-level]').forEach((button) => button.addEventListener('click', () => {
     state.params.tagLevel = button.dataset.level
     listPages.tags = 1
@@ -5148,6 +5202,7 @@ async function pageTags() {
         if (!name) return toast('请填标签名')
         const payload = {
           name,
+          scope,
           sort: Number(body.querySelector('#tg-sort').value || 100),
           status: body.querySelector('#tg-status').value,
           parentId: body.querySelector('#tg-parent').value ? Number(body.querySelector('#tg-parent').value) : null,

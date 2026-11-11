@@ -15,6 +15,7 @@ let publicApi
 let auth
 let mediaImport
 let posterWall
+let adultStats
 let adminToken
 let userToken
 let adultDramaId
@@ -23,6 +24,7 @@ let episodeId
 let userId
 let posterAdultId
 let posterGeneralId
+let adultTagId
 const posterCoverFile = join(process.cwd(), 'storage', 'images', 'cover-sintel.jpg')
 
 function fakeResponse() {
@@ -81,6 +83,7 @@ async function createDrama(title, isAdult) {
     coverUrl: `/media/images/cover-${isAdult ? 'adult' : 'general'}.jpg`,
     description: title,
     year: 2026,
+    releaseDate: '2026-01-02',
     area: '美国',
     score: 8.1,
     isAdult,
@@ -99,6 +102,7 @@ before(async () => {
   auth = await import('../server/auth.mjs')
   mediaImport = await import('../server/media-import.mjs')
   posterWall = await import('../server/poster-wall.mjs')
+  adultStats = await import('../server/adult-stats.mjs')
 
   const admin = db.prepare("SELECT id FROM admins WHERE username = 'admin'").get()
   db.prepare('UPDATE admins SET must_change_password = 0 WHERE id = ?').run(admin.id)
@@ -113,6 +117,18 @@ before(async () => {
   generalDramaId = Number(general.id)
   episodeId = Number(db.prepare("INSERT INTO episodes (drama_id, no, title, status) VALUES (?, 1, '正片', 'ready')")
     .run(adultDramaId).lastInsertRowid)
+
+  adultTagId = Number(db.prepare("SELECT id FROM tags WHERE scope = 'adult' AND name = 'Cosplay'").get().id)
+  db.prepare('INSERT INTO drama_tags (drama_id, tag_id) VALUES (?, ?)').run(adultDramaId, adultTagId)
+
+  const starts = adultStats.adultStatsWindowStarts()
+  const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
+  const fortyDaysAgo = new Date(Date.now() - 40 * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
+  const addPlay = db.prepare("INSERT INTO play_events (drama_id, episode_id, source, created_at) VALUES (?, ?, 'play', ?)")
+  addPlay.run(adultDramaId, episodeId, now)
+  addPlay.run(adultDramaId, episodeId, starts.week)
+  addPlay.run(adultDramaId, episodeId, starts.month)
+  addPlay.run(adultDramaId, episodeId, fortyDaysAgo)
 
   const tagId = Number(db.prepare("INSERT INTO tags (name, sort, status) VALUES ('成人回归标签', 0, 'active')").run().lastInsertRowid)
   db.prepare('INSERT INTO drama_tags (drama_id, tag_id) VALUES (?, ?)').run(adultDramaId, tagId)
@@ -199,6 +215,15 @@ test('成人内容只进入成人列表，普通分类、搜索与标签计数�
   assert.ok(adultIds.includes(posterAdultId))
   assert.ok(!adultIds.includes(generalDramaId))
   assert.ok(adult.data.list.every((item) => item.isAdult === true))
+  assert.ok(adult.data.list.find((item) => item.dramaId === adultDramaId)?.stats)
+
+  const adultTags = await callPublic('/api/tags?scope=adult')
+  assert.equal(adultTags.data.list.filter((tag) => !tag.parent_id).length, 8)
+  assert.equal(adultTags.data.list.filter((tag) => tag.parent_id).length, 111)
+  assert.ok(adultTags.data.list.some((tag) => tag.name === 'Cosplay' && tag.dramaCount === 1))
+
+  const adultTagFiltered = await callPublic(`/api/category?audience=adult&tag=${adultTagId}&pageSize=60`)
+  assert.deepEqual(adultTagFiltered.data.list.map((item) => item.dramaId), [adultDramaId])
 
   const search = await callPublic(`/api/search?keyword=${encodeURIComponent('成人独占测试片')}`)
   assert.equal(search.code, '0000')
@@ -220,11 +245,24 @@ test('成人内容只进入成人列表，普通分类、搜索与标签计数�
 
   const detail = await callPublic(`/api/drama/${adultDramaId}`)
   assert.equal(detail.data.isAdult, true)
+  assert.equal(detail.data.releaseDate, '2026-01-02')
+  assert.equal(detail.data.stats.favoriteCount, 1)
+  assert.ok(detail.data.stats.todayViews >= 1)
+  assert.ok(detail.data.stats.weekViews >= 2)
+  assert.ok(detail.data.stats.monthViews >= 2)
+  assert.equal(detail.data.stats.totalViews, 4)
   assert.ok(detail.data.similar.every((item) => item.dramaId !== generalDramaId && item.isAdult))
 
   const posterIds = posterWall.posterWallCandidates().map((item) => item.dramaId)
   assert.ok(posterIds.includes(posterGeneralId))
   assert.ok(!posterIds.includes(posterAdultId))
+
+  const generalTag = db.prepare("SELECT id FROM tags WHERE scope = 'general' LIMIT 1").get()
+  const mismatch = await callAdmin('POST', `/admin/api/dramas/${adultDramaId}/tags`, { tagIds: [generalTag.id] })
+  assert.equal(mismatch.status, 400)
+
+  const adminStats = await callAdmin('GET', '/admin/api/adult-stats')
+  assert.ok(adminStats.data.list.some((row) => row.dramaId === adultDramaId && row.totalViews === 4))
 })
 
 test('个人历史与收藏保留成人记录', async () => {
@@ -251,4 +289,16 @@ test('URL 导入拒绝私网、非 HTTP 协议与带凭据地址', async () => {
   const blocked = await callAdmin('POST', `/admin/api/episodes/${episodeId}/import-url`, { url: 'http://127.0.0.1/movie.mp4' })
   assert.equal(blocked.status, 400)
   assert.match(blocked.msg, /内网/)
+})
+
+test('成人标签只在首次初始化播种，后台删除后重启不回填', async () => {
+  const dbModule = await import('../server/db.mjs')
+  const seeded = db.prepare("SELECT id FROM tags WHERE scope = 'adult' AND name = '黑絲'").get()
+  assert.ok(seeded)
+
+  db.prepare('DELETE FROM tags WHERE id = ?').run(seeded.id)
+  dbModule.ensureAdultTagSeed()
+
+  assert.equal(db.prepare("SELECT id FROM tags WHERE scope = 'adult' AND name = '黑絲'").get(), undefined)
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM tags WHERE scope = 'adult' AND parent_id IS NOT NULL").get().n, 110)
 })

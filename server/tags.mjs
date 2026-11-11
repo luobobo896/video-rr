@@ -21,10 +21,14 @@ const bad = (message, status = 400) => Object.assign(new Error(message), { statu
  * @param {'top'|'child'|'all'} [options.level]
  * @param {number} [options.parentId] 只看某个一级标签下的二级
  */
-export function listTags({ withCount = false, includeDisabled = false, publicOnly = false, page, pageSize, keyword, level = 'all', parentId } = {}) {
+export function listTags({ withCount = false, includeDisabled = false, publicOnly = false, scope = 'general', page, pageSize, keyword, level = 'all', parentId } = {}) {
   const p = withCount ? 't.' : ''
   const clauses = []
   const args = []
+  if (scope !== 'all') {
+    clauses.push(`${p}scope = ?`)
+    args.push(scope)
+  }
   if (!includeDisabled) clauses.push(`${p}status = 'active'`)
   if (keyword) {
     clauses.push(`${p}name LIKE ?`)
@@ -39,7 +43,9 @@ export function listTags({ withCount = false, includeDisabled = false, publicOnl
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const order = `ORDER BY COALESCE(${p}parent_id, ${p}id), ${p}parent_id IS NOT NULL, ${p}sort, ${p}id`
 
-  const countJoin = publicOnly ? `JOIN dramas d ON d.id = dt.drama_id AND ${adultVisibilitySql()}` : ''
+  const countJoin = publicOnly
+    ? `JOIN dramas d ON d.id = dt.drama_id AND d.status = 'published' AND ${adultVisibilitySql(scope === 'adult' ? 'adult' : 'general')}`
+    : ''
   const sql = withCount
     ? `SELECT t.*, (SELECT COUNT(*) FROM drama_tags dt ${countJoin} WHERE dt.tag_id = t.id) AS drama_count FROM tags t ${where} ${order}`
     : `SELECT * FROM tags ${where} ${order}`
@@ -52,8 +58,8 @@ export function listTags({ withCount = false, includeDisabled = false, publicOnl
 }
 
 /** 一级/二级树，后台标签管理页直接用。 */
-export function tagTree({ includeDisabled = true, withCount = true } = {}) {
-  const rows = listTags({ withCount, includeDisabled })
+export function tagTree({ includeDisabled = true, withCount = true, scope = 'general' } = {}) {
+  const rows = listTags({ withCount, includeDisabled, scope })
   const list = Array.isArray(rows) ? rows : rows.list
   const tops = list.filter((row) => !row.parent_id)
   const children = new Map()
@@ -65,39 +71,45 @@ export function tagTree({ includeDisabled = true, withCount = true } = {}) {
   return tops.map((row) => ({ ...row, children: children.get(row.id) ?? [] }))
 }
 
-function normalizeParent(parentId, selfId) {
+function normalizeParent(parentId, selfId, scope) {
   if (parentId === undefined || parentId === null || parentId === '' || Number(parentId) === 0) return null
   const id = Number(parentId)
   if (!Number.isFinite(id)) throw bad('上级标签不合法')
   if (selfId && id === Number(selfId)) throw bad('不能把自己设为上级')
-  const parent = one('SELECT id, parent_id FROM tags WHERE id = ?', id)
+  const parent = one('SELECT id, parent_id, scope FROM tags WHERE id = ?', id)
   if (!parent) throw bad('上级标签不存在', 404)
+  if (parent.scope !== scope) throw bad('上级标签与当前标签类型不一致')
   if (parent.parent_id) throw bad('只支持两级标签：二级标签下不能再挂标签')
   return id
 }
 
-export function createTag({ name, sort = 100, status = 'active', parentId = null }) {
+export function createTag({ name, sort = 100, status = 'active', parentId = null, scope = 'general' }) {
+  if (!['general', 'adult'].includes(scope)) throw bad('标签类型不合法')
   const trimmed = String(name ?? '').trim()
   if (trimmed.length < 1 || trimmed.length > 20) throw bad('标签名需 1–20 字')
   const existing = one('SELECT * FROM tags WHERE name = ?', trimmed)
-  if (existing) return existing
-  const parent = normalizeParent(parentId)
+  if (existing) {
+    if (existing.scope !== scope) throw bad('同名标签已存在于其他分类')
+    return existing
+  }
+  const parent = normalizeParent(parentId, null, scope)
   const info = db
-    .prepare("INSERT INTO tags (name, sort, status, parent_id, updated_at) VALUES (?, ?, ?, ?, datetime('now'))")
-    .run(trimmed, Number(sort) || 100, status === 'disabled' ? 'disabled' : 'active', parent)
+    .prepare("INSERT INTO tags (name, scope, sort, status, parent_id, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+    .run(trimmed, scope, Number(sort) || 100, status === 'disabled' ? 'disabled' : 'active', parent)
   return one('SELECT * FROM tags WHERE id = ?', Number(info.lastInsertRowid))
 }
 
 export function updateTag(id, patch = {}) {
   const tag = one('SELECT * FROM tags WHERE id = ?', Number(id))
   if (!tag) throw bad('标签不存在', 404)
+  if (patch.scope !== undefined && patch.scope !== tag.scope) throw bad('标签类型不可修改')
   const name = patch.name !== undefined ? String(patch.name).trim() : tag.name
   if (!name || name.length > 20) throw bad('标签名需 1–20 字')
   const dup = one('SELECT id FROM tags WHERE name = ? AND id <> ?', name, Number(id))
   if (dup) throw bad('标签名重复')
   const sort = patch.sort !== undefined ? Number(patch.sort) || 0 : tag.sort
   const status = patch.status !== undefined ? (patch.status === 'disabled' ? 'disabled' : 'active') : tag.status
-  const parent = patch.parentId !== undefined ? normalizeParent(patch.parentId, id) : tag.parent_id
+  const parent = patch.parentId !== undefined ? normalizeParent(patch.parentId, id, tag.scope) : tag.parent_id
   db.prepare("UPDATE tags SET name = ?, sort = ?, status = ?, parent_id = ?, updated_at = datetime('now') WHERE id = ?")
     .run(name, sort, status, parent, Number(id))
   return one('SELECT * FROM tags WHERE id = ?', Number(id))
@@ -132,13 +144,19 @@ export function tagsOfDrama(dramaId) {
 }
 
 export function setDramaTags(dramaId, tagIds) {
+  const drama = one('SELECT is_adult FROM dramas WHERE id = ?', Number(dramaId))
+  if (!drama) throw bad('剧集不存在', 404)
+  const scope = Number(drama.is_adult) ? 'adult' : 'general'
   const ids = [...new Set((tagIds ?? []).map(Number).filter((id) => Number.isFinite(id) && id > 0))]
   db.exec('BEGIN IMMEDIATE')
   try {
     db.prepare('DELETE FROM drama_tags WHERE drama_id = ?').run(Number(dramaId))
     const insert = db.prepare('INSERT OR IGNORE INTO drama_tags (drama_id, tag_id) VALUES (?, ?)')
     for (const tagId of ids) {
-      if (one('SELECT 1 AS x FROM tags WHERE id = ?', tagId)) insert.run(Number(dramaId), tagId)
+      const tag = one('SELECT scope FROM tags WHERE id = ?', tagId)
+      if (!tag) throw bad('标签不存在', 404)
+      if (tag.scope !== scope) throw bad('标签类型与内容不匹配')
+      insert.run(Number(dramaId), tagId)
     }
     db.exec('COMMIT')
   } catch (error) {

@@ -22,7 +22,7 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/admin/api/dramas?page=1&pageSize=20&keyword=&category=&status=` | 分页列表（含 `episodeCount`、`categoryCounts`、`statusCounts`） |
-| POST | `/admin/api/dramas` | 新建 `{title,subTitle,coverUrl,description,year,area,category,score,isAdult,status}` |
+| POST | `/admin/api/dramas` | 新建 `{title,subTitle,coverUrl,description,year,area,category,score,isAdult,releaseDate,status}` |
 | GET/PUT/DELETE | `/admin/api/dramas/:id` | 详情 / 更新 / 删除（级联分集） |
 | GET | `/admin/api/dramas/:id/episodes` | 分集列表（含 `status/progress/hls_path/error`，过滤 `merged`，返回 `category`） |
 | POST | `/admin/api/dramas/:id/episodes` | 新增分集（自动取下一个集号） |
@@ -73,8 +73,12 @@
 |---|---|---|
 | GET | `/admin/api/adult-menu` | 返回 `{enabled,labelZh,labelEn}`，默认 `true/成人/Adult` |
 | PUT | `/admin/api/adult-menu` | 保存同一结构；`enabled` 必须是布尔值，中英文标签去空白后各 1–20 字；写审计 `content.adultMenu.update` |
+| GET | `/admin/api/adult-stats` | 成人内容统计：发行日期、最近更新、收藏、今日/本周/本月/总浏览 |
 
 权限统一使用 `content.drama.write`。剧集创建、更新、详情和列表使用布尔字段 `isAdult`；数据库列为 `dramas.is_adult`。
+剧集支持 `releaseDate`（`YYYY-MM-DD`）和只读 `updatedAt`；成人浏览统计取 `play_events`。
+
+`GET /admin/api/tags?scope=general|adult|all` 按标签域查询；成人标签使用独立两级分组，保存时 `scope` 不可跨域修改。
 
 ## 审核
 | GET | `/admin/api/danmus?status=pending` | 弹幕列表 |
@@ -107,11 +111,12 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/home` | Banner + 楼层 + 热搜 |
-| GET | `/api/category?type=&page=&pageSize=&audience=adult` | 分类分页；默认只返回普通内容，`audience=adult` 只返回成人内容 |
+| GET | `/api/category?type=&page=&pageSize=&audience=adult` | 分类分页；默认只返回普通内容，`audience=adult` 只返回成人内容并附 `stats` |
 | GET | `/api/rank?type=HOT|SEARCH|RISE|CLASSIC` | 榜单 |
 | GET | `/api/search?keyword=&tag=` | 搜索标题、副标题、简介、地区、标签名和内容类型；可与标签 ID 叠加 |
 | GET | `/api/plans` | 会员套餐公开价格；落地页未登录也可读取 |
-| GET | `/api/drama/:id` | 详情 + 分集（含 `status/hls/isAdult`） |
+| GET | `/api/drama/:id` | 详情 + 分集（含 `status/hls/isAdult/releaseDate/updatedAt/stats`） |
+| GET | `/api/tags?scope=adult` | 成人标签列表（含分组父级、排序和成人内容计数） |
 | GET | `/api/play/:id/:no` | 播放信息 `{hls,danmu,audioTracks,subtitleTracks,preferredAudio,preferredSubtitle}`；`?trial=1` 允许游客试看，其他情况未登录返回 `0401` |
 | GET | `/api/live` | 直播频道（`rtmp`/`hls`） |
 | POST | `/api/auth/login` | `{phone}` → `{token,user}` |

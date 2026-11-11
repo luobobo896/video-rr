@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { hashPassword } from './auth.mjs'
 import { currentKeyVersion, maskConfig, sealSecret } from './secretbox.mjs'
+import { ADULT_TAG_GROUPS } from './adult-taxonomy.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const ROOT = join(HERE, '..')
@@ -146,10 +147,12 @@ CREATE TABLE IF NOT EXISTS dramas (
   area TEXT,
   category TEXT,
   is_adult INTEGER NOT NULL DEFAULT 0,
+  release_date TEXT,
   score REAL,
   status TEXT NOT NULL DEFAULT 'published',
   sort INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS episodes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -434,6 +437,7 @@ CREATE INDEX IF NOT EXISTS idx_visitors_user ON visitors(user_id);
 CREATE TABLE IF NOT EXISTS tags (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
+  scope TEXT NOT NULL DEFAULT 'general',
   sort INTEGER NOT NULL DEFAULT 100,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -766,13 +770,18 @@ export function ensureOpsSchema() {
   if (has('dramas')) {
     const columns = cols('dramas')
     if (!columns.includes('is_adult')) db.exec('ALTER TABLE dramas ADD COLUMN is_adult INTEGER NOT NULL DEFAULT 0')
+    if (!columns.includes('release_date')) db.exec('ALTER TABLE dramas ADD COLUMN release_date TEXT')
+    if (!columns.includes('updated_at')) db.exec('ALTER TABLE dramas ADD COLUMN updated_at TEXT')
+    db.exec("UPDATE dramas SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''")
     db.exec('CREATE INDEX IF NOT EXISTS idx_dramas_adult_status ON dramas(is_adult, status, id DESC)')
   }
 
   if (has('tags')) {
     const columns = cols('tags')
+    if (!columns.includes('scope')) db.exec("ALTER TABLE tags ADD COLUMN scope TEXT NOT NULL DEFAULT 'general'")
     if (!columns.includes('parent_id')) db.exec('ALTER TABLE tags ADD COLUMN parent_id INTEGER REFERENCES tags(id) ON DELETE SET NULL')
     if (!columns.includes('updated_at')) db.exec('ALTER TABLE tags ADD COLUMN updated_at TEXT')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tags_scope_parent ON tags(scope, parent_id, sort)')
   }
 
   if (has('rank_lists')) {
@@ -938,6 +947,27 @@ export function ensureAdminSchema() {
   const columns = db.prepare('PRAGMA table_info(admins)').all().map((row) => row.name)
   if (!columns.includes('must_change_password')) db.exec('ALTER TABLE admins ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0')
   if (!columns.includes('password_updated_at')) db.exec('ALTER TABLE admins ADD COLUMN password_updated_at TEXT')
+}
+
+/** 成人标签使用独立 scope，仅首次启动补齐 Jable 对应的 8 组 111 个标签。 */
+export function ensureAdultTagSeed() {
+  if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tags'").get()) return
+  if (getSetting('adult.tagSeedVersion')) return
+  const find = db.prepare('SELECT * FROM tags WHERE name = ?')
+  const insert = db.prepare(`INSERT INTO tags (name, scope, sort, status, parent_id, updated_at)
+    VALUES (?, 'adult', ?, 'active', ?, datetime('now'))`)
+  for (const group of ADULT_TAG_GROUPS) {
+    let parent = find.get(group.name)
+    if (!parent) {
+      insert.run(group.name, group.sort, null)
+      parent = find.get(group.name)
+    }
+    if (!parent || parent.scope !== 'adult') continue
+    group.tags.forEach((name, index) => {
+      if (!find.get(name)) insert.run(name, (index + 1) * 10, parent.id)
+    })
+  }
+  setSetting('adult.tagSeedVersion', 1)
 }
 
 /**
@@ -1942,6 +1972,7 @@ export function ensureSettings() {
 // 放在这里而不是只在 index.mjs 调，是为了测试与脚本（导入、探针）导入 db 时也有一致的表结构。
 ensureOpsSchema()
 ensureGrowthSchema()
+ensureAdultTagSeed()
 // 新增的权限节点（如 system.menu）也要在脚本/测试场景下补齐，否则角色授权页看不到
 syncMenuCatalog()
 

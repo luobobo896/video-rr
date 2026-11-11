@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { db, getSetting, ROOT } from './db.mjs'
 import { adultMenuSettings } from './adult-menu.mjs'
 import { adultVisibilitySql } from './content-visibility.mjs'
+import { adultStatsFor } from './adult-stats.mjs'
 import {
   authOf, changeUserEmail, checkPasswordStrength, issueToken, loginByEmail, publicUser, revokeSessions, revokeToken, setUserPassword,
   updateProfile, verifyPassword,
@@ -131,6 +132,9 @@ function cardOf(drama, userId, context = {}) {
     dramaType: drama.category,
     dramaTypeLabel: enumLabel(lang, 'category', drama.category),
     isAdult: Boolean(drama.is_adult),
+    releaseDate: drama.release_date ?? null,
+    updatedAt: drama.updated_at ?? null,
+    stats: drama.adult_stats ?? null,
     score: drama.score,
     year: drama.year,
     area: drama.area,
@@ -624,14 +628,18 @@ export async function handlePublic(pathname, url, req, res) {
           [label, label]) })),
         years: CATEGORY_YEARS.map((row) => ({ value: row.value, label: localizedYearLabel(lang, row.label), count: countBy('d.year >= ? AND d.year <= ?', [row.from, row.to]) })),
         tags: all(`SELECT t.id, t.name, (SELECT COUNT(*) FROM drama_tags dt
-            JOIN dramas d ON d.id = dt.drama_id AND ${audienceSql}
+            JOIN dramas d ON d.id = dt.drama_id AND d.status = 'published' AND ${audienceSql}
             WHERE dt.tag_id = t.id) AS n
           FROM tags t WHERE t.status = 'active' ORDER BY n DESC, t.sort LIMIT 24`)
           .map((row) => ({ value: Number(row.id), label: enumLabel(lang, 'genre', row.name, row.name), count: Number(row.n) })),
       }
+      const adultStats = audience === 'adult' ? adultStatsFor(rows.map((drama) => drama.id)) : null
+      const listRows = adultStats
+        ? rows.map((drama) => ({ ...drama, adult_stats: adultStats.get(drama.id) }))
+        : rows
       return sendPublic(res, {
         page, pageSize, total,
-        list: rows.map((drama) => cardOf(drama, userId, context)),
+        list: listRows.map((drama) => cardOf(drama, userId, context)),
         facets,
         active: { audience, channel, sort, region, year, genre, tagId },
       })
@@ -715,9 +723,12 @@ export async function handlePublic(pathname, url, req, res) {
     }
 
     if (pathname === '/api/tags') {
+      const requestedScope = url.searchParams.get('scope') ?? 'general'
+      const scope = requestedScope === 'adult' ? 'adult' : 'general'
       return sendPublic(res, {
-        list: listTags({ withCount: true, publicOnly: true }).map((tag) => ({
-          ...tag, label: enumLabel(lang, 'genre', tag.name, tag.name),
+        list: listTags({ withCount: true, publicOnly: true, scope }).map((tag) => ({
+          ...tag,
+          label: scope === 'adult' ? tag.name : enumLabel(lang, 'genre', tag.name, tag.name),
         })),
       })
     }
@@ -736,8 +747,10 @@ export async function handlePublic(pathname, url, req, res) {
       // 否则前端只能再打一次 /api/me，多一轮请求且首屏会闪。
       const favorite = userId ? one('SELECT 1 AS x FROM favorites WHERE user_id = ? AND drama_id = ?', userId, drama.id) : undefined
       const resume = userId ? one('SELECT episode_no, position, updated_at FROM history WHERE user_id = ? AND drama_id = ?', userId, drama.id) : undefined
+      const card = cardOf(drama, userId, context)
+      if (drama.is_adult) card.stats = adultStatsFor([drama.id]).get(drama.id)
       return sendPublic(res, {
-        ...cardOf(drama, userId, context),
+        ...card,
         description: drama.description,
         episodes: decided.map((episode) => ({
           id: episode.id, no: episode.no, title: episode.title, duration: episode.duration,
