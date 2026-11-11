@@ -144,3 +144,52 @@ systemctl start video-rr
 ```
 
 回滚后依次检查 `/video/`、`/video-admin/`、`/video/api/constants`、未签名 HLS 403 和日志。
+
+---
+
+## 00:00 成人标签与内容统计发布（2026-11-12）
+
+### 发布信息
+
+- Git 提交：`f7cb040`（`codex/adult-menu`）
+- 时间：2026-11-12 00:00 CST
+- 发布包：`mh-deploy-20261111-235918.tgz`
+- SHA256：`013fb150c09b67887f99efc5bd4bf0e47627ede6d067ef75112f3fee1a343387`
+- 远端上传：`/tmp/mh-deploy-20261111-235918.tgz`，SHA256 与本地一致。
+- 发布前源码备份：`/opt/video-rr/storage/backup/source-20261111-235928.tgz`
+- 发布前数据库备份：`/opt/video-rr/storage/backup/app.db.20261111-235956`
+
+### 变更
+
+- 成人标签按衣著、身材、交合、玩法、剧情、角色、地点、杂项 8 组初始化，共 111 个二级标签。
+- 默认标签只在首次启动播种，写入 `settings.adult.tagSeedVersion`；后台删除或改名后重启不再回填。
+- 新增 `dramas.release_date`、`dramas.updated_at`、`tags.scope` 及成人状态与标签域索引。
+- 成人列表和详情显示发行日期、最近更新、收藏、今日/本周/本月/总浏览；后台成人菜单页显示同一组统计。
+- 后台标签管理支持“普通标签 / 成人标签”切换，剧集编辑按成人标记隔离可选标签。
+
+### 验收结果
+
+- `video-rr`：`active/running`，`NRestarts=0`，启动时间 `2026-11-12 00:00:19 CST`。
+- `/video/`、`/video-admin/`、`/video/api/constants`：200；未签名 HLS：403。
+- `/video/api/constants` 返回 `adultMenu={enabled:true,labels:{zh:"成人",en:"Adult"}}`。
+- `/video/api/tags?scope=adult` 返回 119 个节点：8 个一级分组、111 个二级标签。
+- 数据库标签分布：`adult=119`、`general=59`；`settings` 已存在 `adult.tagSeedVersion` 与 `adultMenu`。
+- 数据库列已迁移：`dramas.is_adult/release_date/updated_at`、`tags.scope`。
+- `/video/api/category?audience=adult` 返回 `0000`，当前线上尚未标记成人内容，因此总数为 0。
+- 线上浏览器 1440 / 375 验证成人页正常加载，8 个分组完整显示，无横向溢出，移动底栏为 6 项。
+- 线上 C 端资源为 `index-Dim93-nB.js`、`index-D4OzJIxu.css`；后台资源为 `index-B2vezhk1.js`、`index-G7krLnQr.css`。
+- `journalctl -u video-rr --since '10 min ago'`：未发现 error/exception/failed/panic。
+- 磁盘：`76%` 使用，剩余约 12G。
+
+### 回滚
+
+```bash
+cd /opt/video-rr
+tar -xzf storage/backup/source-20261111-235928.tgz
+systemctl stop video-rr
+cp storage/backup/app.db.20261111-235956 storage/app.db
+cp storage/backup/app.db.20261111-235956-wal storage/app.db-wal 2>/dev/null || true
+systemctl start video-rr
+```
+
+回滚后检查 `/video/`、`/video-admin/`、`/video/api/constants`、成人标签接口与未签名 HLS 403。
