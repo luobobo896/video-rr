@@ -3,7 +3,8 @@
 ## Project Structure & Module Organization
 
 - `server/`: Node API and domain logic. `index.mjs` is the HTTP entry; `api-public.mjs` and `api-admin.mjs` expose APIs; `db.mjs` owns SQLite schema and seeds.
-- `public/` and `admin/`: C-end and admin UIs; both mount the legacy renderer in a Vue 3 shell.
+- `public/` and `admin/`: C-end and admin UIs. `public/src` owns the Vue 3 C-end
+  redesign; `admin/` keeps the full-featured operations console.
 - `shared/`: design tokens. `scripts/`: build, import, and deployment helpers. `deploy/`: nginx and deployment files.
 - `test/`: test suites. `docs/`: API, database, testing, and operations docs. `dist/` and `storage/`: generated or runtime files.
 

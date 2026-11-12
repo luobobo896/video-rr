@@ -4,13 +4,14 @@ import { href } from '../router.js';
 
 defineProps({
   film: { type: Object, required: true },
-  badge: { type: Boolean, default: true }
+  badge: { type: Boolean, default: true },
+  ratio: { type: String, default: 'portrait' }
 });
 </script>
 
 <template>
   <a class="film" :href="href(`/detail/${film.id}`)" :aria-label="film.title">
-    <FilmArt :film="film" :badge="badge" />
+    <FilmArt :film="film" :badge="badge" :ratio="ratio" />
     <span class="film-title truncate">{{ film.title }}</span>
     <span class="film-meta">
       <span class="score">{{ film.score.toFixed(1) }}</span>

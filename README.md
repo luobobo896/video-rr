@@ -23,7 +23,9 @@ npm test                  # node --test（133 项：权益/订单/支付/邮件/
 node scripts/generate-previews.mjs --only sintel   # 生成首页静音预览片
 ```
 
-前端入口使用 Vue 3 根壳层与 Element Plus 通用组件，现有 C 端/后台业务渲染逻辑通过兼容宿主原样挂载，保证行为不变；Node 服务优先读取 `dist/client`、`dist/admin`，未构建时回退 `public/legacy.html`、`admin/legacy.html`。
+前端入口使用 Vue 3：C 端由 `public/src` 构建；后台保留功能完整的运营控制台，
+使用同一套深色设计令牌。Node 服务优先读取 `dist/client`、`dist/admin`，未构建时回退
+`public/legacy.html`、`admin/legacy.html`。
 
 首页预览片按 `storage/previews/preview-<slug>.mp4` 约定自动发现；文件存在时 Hero 与 16:9 内容卡会静音自动播放，缺失时回退静态横图。导入流水线在 `--build` / `--force` 时也会同步生成预览片。
 
@@ -92,21 +94,15 @@ nginx：`/video/` 静态、`/video/api/` 反代、`/video/media/hls/` 走 `secur
 播放签名密钥在 `.env` 的 `MH_LINK_SECRET`，安装脚本注入 nginx。
 不要直接 `git pull` 发布：当前修复可能仍在工作区，远程 HEAD 不一定包含它们。
 
-## Vue 视觉改版（真实接口）
+## 主站前端
 
-`web-redesign/` 是独立 Vue 入口，直接复用现有 `/api` 与 `/admin/api`：
+C 端主站已切换为 `public/src/` 的 Vue 3 应用，直接复用 `/api`：
+多 Banner 轮播、服务端楼层、内容数据榜、消息、订单、资料编辑与会员落地页。
+登录态沿用 `mh-token`，媒体与接口前缀由 `window.__MH_BASE` 或
+`VITE_PUBLIC_API_BASE`、`VITE_MEDIA_BASE` 控制。
 
-```bash
-npm run dev:redesign      # http://127.0.0.1:5175
-npm run build:redesign    # 输出 dist/redesign
-npm run preview:redesign  # http://127.0.0.1:4175
-```
-
-本地开发需要同时运行 `npm run start:server`。登录态沿用 `mh-token` /
-`mh-admin-token`；生产环境沿用 `window.__MH_BASE` 或
-`VITE_PUBLIC_API_BASE`、`VITE_ADMIN_API_BASE`、`VITE_MEDIA_BASE` 覆盖接口与媒体前缀。
-HK 审核入口：<https://hk.hsddns.com/video-redesign/>，现有 `/video/` 与
-`/video-admin/` 不受影响；后台改版入口为同一路径下的 `#/admin/login`。
+`/admin/` 使用完整运营控制台，保留分析、埋点、渠道、内容 CRUD、订单退款与 RBAC。
+本地开发需要同时运行 `npm run start:server`。
 
 ## 容量
 

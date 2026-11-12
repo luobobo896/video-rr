@@ -13,7 +13,14 @@ $('.skip-link')?.addEventListener('click', (event) => {
   view.focus()
   view.scrollIntoView({ block: 'start' })
 })
-if (openSite) openSite.href = BASE ? `${BASE.replace(/-admin$/, '')}/` : '/'
+if (openSite) {
+  const cBase = BASE
+    ? `${BASE.replace(/-admin$/, '')}/`
+    : location.port === '5174'
+      ? `${location.protocol}//${location.hostname}:5173/`
+      : '/'
+  openSite.href = cBase
+}
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
 document.addEventListener('error', (event) => {
   const img = event.target
@@ -85,11 +92,19 @@ const hasPerm = (perm, perms) => !perm || String(perm).split('&').every((item) =
 function navGroups() {
   const remote = state.me?.menus
   if (Array.isArray(remote) && remote.length) {
-    return remote.map((group) => ({
+    const groups = remote.map((group) => ({
       id: group.key,
       title: group.label,
       items: (group.items ?? []).map((item) => [String(item.route ?? '').replace(/^\//, ''), item.label, item.permCode, item.icon, item.visible !== false]),
     }))
+    // 服务端历史菜单可能缺少后来新增的内置页（例如「首页运营」）；补齐内置入口，避免功能存在但无法进入。
+    const hasOps = groups.some((group) => group.items.some(([id]) => id === 'ops'))
+    if (!hasOps) {
+      const content = groups.find((group) => group.id === 'content' || group.title === '内容运营')
+      const ops = NAV_GROUPS.find((group) => group.id === 'content')?.items.find(([id]) => id === 'ops')
+      if (content && ops) content.items.push(ops)
+    }
+    return groups
   }
   return NAV_GROUPS
 }
@@ -101,6 +116,7 @@ let routeController = null
 
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
 const fmt = (n) => (typeof n === 'number' ? n.toLocaleString('zh-CN') : n ?? '—')
+const navChevron = (expanded = false) => `<svg class="icon nav-chevron${expanded ? ' is-open' : ''}" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>`
 /** 数据库时间是 UTC，后台统一按北京时间展示，避免与 C 端同一订单相差 8 小时。 */
 const fmtTs = (value) => {
   if (!value) return '—'
@@ -499,6 +515,20 @@ function renderNav() {
   adminUi.openKeys = [...open]
   const who = $('#whoami')
   if (who) who.textContent = state.me ? `${state.me.admin.username}${(state.me.roles ?? []).length ? ` · ${(state.me.roles ?? []).map((role) => role.name).join(' / ')}` : ''}` : ''
+  const adminName = state.me?.admin?.displayName || state.me?.admin?.username || '管理员'
+  const roleName = (state.me?.roles ?? []).map((role) => role.name).join(' / ')
+  const sideRoleText = roleName && roleName !== adminName
+    ? roleName
+    : `${state.me?.permissions?.length ?? 0} 个权限点`
+  const avatarText = String(adminName).slice(0, 1)
+  for (const id of ['who-avatar', 'top-avatar']) {
+    const avatar = document.getElementById(id)
+    if (avatar) avatar.textContent = avatarText
+  }
+  const sideName = $('#side-user-name')
+  const sideRole = $('#side-user-role')
+  if (sideName) sideName.textContent = adminName
+  if (sideRole) sideRole.textContent = sideRoleText
 }
 
 /** 只切 active，不重建菜单：切换页面时侧栏不抖动、不滚回顶部。 */
@@ -3677,7 +3707,7 @@ const EVENT_LABEL = {
   play_error: '播放失败', order_created: '创建订单', payment_success: '支付成功',
 }
 
-const CHART_COLORS = ['#4f7cff', '#22d3ee', '#f59e0b', '#22c55e', '#a78bfa', '#ef4444']
+const CHART_COLORS = ['#5b86ff', '#22d3ee', '#f5b545', '#45d19a', '#a78bfa', '#ff5f7a']
 
 function svgLineChart(rows, series, { height = 220 } = {}) {
   if (!rows?.length) return '<div class="chart-empty">该区间暂无数据</div>'
@@ -3816,7 +3846,7 @@ async function pageAnalytics() {
     </div>`).join('') || '<div class="muted">该区间暂无数据</div>'}</div>`
   }
 
-  view.innerHTML = panel('经营数据', `
+  view.innerHTML = `
     <div class="form-row" style="margin-bottom:12px">
       ${[7, 14, 30].map((n) => `<button class="btn sm ${days === n ? 'primary' : ''}" data-days="${n}">近 ${n} 天</button>`).join('')}
       <span class="spacer" style="flex:1"></span>
@@ -3951,7 +3981,7 @@ async function pageAnalytics() {
           ${(t.searchTerms.length ? t.searchTerms : [{ term: '—', n: 0 }]).map((row) => `<tr><td>${esc(row.term)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
         </tbody></table>
       </div>
-    </div>`)
+    </div>`
 
   for (const button of view.querySelectorAll('[data-days]')) {
     button.addEventListener('click', async () => {
@@ -3985,7 +4015,7 @@ async function pageChannels() {
     ...codes.map((row) => `<tr><td>${esc(row.code)}</td><td>${esc(row.channel_name)}</td><td>${row.purpose === 'distribution' ? '分销' : '投放'}码</td></tr>`),
   ]
   const touchPage = clientPage('channelTouchpoints', touchRows, 20)
-  view.innerHTML = panel('渠道分析', `
+  view.innerHTML = `
     <div class="form-row" style="margin-bottom:12px">
       ${[7, 14, 30].map((n) => `<button class="btn sm ${days === n ? 'primary' : ''}" data-channel-days="${n}">近 ${n} 天</button>`).join('')}
       <span class="spacer" style="flex:1"></span>
@@ -3998,6 +4028,7 @@ async function pageChannels() {
       <button class="btn sm" id="add-domain">＋ 域名</button>
       <button class="btn sm" id="add-promo">＋ 推广码</button>
     </div>
+    <p class="page-note muted">归因口径：推广码优先，其次域名最长前缀</p>
     <div class="cards">
       ${card('渠道访客', fmt(t.visitors), '人')}
       ${card('新增注册', fmt(t.newUsers), '人')}
@@ -4034,7 +4065,7 @@ async function pageChannels() {
         ${table(['域名 / 推广码', '归属', '状态'], touchPage.items)}
         ${pager('channelTouchpoints', touchPage.page, touchPage.pageSize, touchPage.total, '个')}
       </div>
-    </div>`, '<span class="muted">归因口径：推广码优先，其次域名最长前缀</span>')
+    </div>`
 
   for (const button of view.querySelectorAll('[data-channel-days]')) {
     button.addEventListener('click', async () => {
@@ -5252,15 +5283,17 @@ async function pageEvents() {
   const avgPerDay = data.byDay?.length ? Math.round((data.total ?? 0) / data.byDay.length) : 0
 
   view.innerHTML = `
+    <div class="cards">
+      ${card('事件总数', fmt(data.total ?? 0), '条')}
+      ${card('独立访客', fmt(data.visitors ?? 0), '人')}
+      ${card('事件类型', fmt(eventTypes), '种')}
+      ${card('日均事件', fmt(avgPerDay), '条/日')}
+    </div>
     <div class="panel">
-      <h3>埋点数据 <span class="muted">近 ${days} 天 · 共 ${fmt(data.total ?? 0)} 条 · 独立访客 ${fmt(data.visitors ?? 0)}</span></h3>
-      <div class="cards">
-        ${card('事件总数', fmt(data.total ?? 0), '条')}
-        ${card('独立访客', fmt(data.visitors ?? 0), '人')}
-        ${card('事件类型', fmt(eventTypes), '种')}
-        ${card('日均事件', fmt(avgPerDay), '条/日')}
-      </div>
+      <h3>事件趋势 <span class="muted">近 ${days} 天 · 共 ${fmt(data.total ?? 0)} 条 · 独立访客 ${fmt(data.visitors ?? 0)}</span></h3>
       ${svgLineChart(data.byDay ?? [], [{ key: 'n', label: '事件数', color: CHART_COLORS[0] }], { height: 180 })}
+    </div>
+    <div class="panel">
       <div class="form-row">
         <div class="subtabs">${[1, 7, 30].map((n) => `<button class="pill ${days === n ? 'active' : ''}" data-days="${n}">${n} 天</button>`).join('')}</div>
         <select id="ev-type" aria-label="事件类型" style="width:160px">

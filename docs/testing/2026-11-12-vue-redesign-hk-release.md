@@ -1,5 +1,9 @@
 # 双端视觉改版 HK 审核发布（2026-11-12）
 
+> 后续变更：改版已并入 `/video/` 主站，`/video-redesign/` 入口与
+> `web-redesign/` 源码目录已移除；本文保留为历史发布记录。
+> 后台只读限制已被 `docs/testing/2026-11-12-admin-function-restore.md` 取代。
+
 ## 发布信息
 
 - 环境：HK 生产（`hk.hsddns.com`，`/opt/video-rr`）
@@ -70,3 +74,30 @@ nginx -t && systemctl reload nginx
 
 回滚后检查 `/video/`、`/video-admin/`、`/video/api/constants`、未签名 HLS 403
 和服务日志。
+
+## 14:02 审核反馈修复
+
+- Git 提交：`a1a6fc7 fix: 移除C端运营入口并恢复中英文切换`
+- 发布包：`mh-deploy-20261112-140142.tgz`
+- SHA256：`fa9fdd34eb71df67d405ccea3d7dba89ad050382aa34129d9e0d37a6dc2bc0cd`
+- 发布前源码备份：`/opt/video-rr/storage/backup/source-20261112-140209.tgz`
+- 发布前数据库备份：`/opt/video-rr/storage/backup/app.db.20261112-140219`
+
+修复内容：
+
+- 移除 C 端侧栏和顶栏的运营后台入口。
+- 恢复中英文切换，复用 `public/i18n.js`；切换后重新拉取服务端语言数据。
+- 会员页恢复月卡 / 季卡 / 年卡三档并排展示，侧栏套餐入口改为多档文案。
+- 补齐改版页面的英文导航、套餐、空态和关键按钮文案。
+
+验收结果：
+
+- 英文模式：`Featured / Library / Adult / Rankings / Collections / Poster Wall`
+  等导航正常；会员页显示 3 档套餐和英文价格单位。
+- 中文模式：导航与会员页正常，C 端无运营入口。
+- `/video-redesign/`、`/video/`、`/video-admin/`、`/video/api/constants`：200。
+- 未签名 HLS：403。
+- `video-rr`：`active/running`，`NRestarts=0`，启动时间 `2026-11-12 14:02:33 CST`。
+- 最近 10 分钟日志：error/exception/failed 计数 0。
+- `npm run check`：通过。
+- `npm test`：154/154 通过。

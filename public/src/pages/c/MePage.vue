@@ -57,8 +57,20 @@ onMounted(load);
       <div class="profile-copy">
         <h2>{{ state.user.nickname || state.user.email }}</h2>
         <p>{{ state.user.email }}</p>
+        <div class="completeness" style="margin-top: 10px">
+          <div class="row-between">
+            <span class="meta">资料完整度</span>
+            <strong>{{ state.me?.completion?.percent ?? 0 }}%</strong>
+          </div>
+          <div class="completeness-track">
+            <span :style="{ width: `${state.me?.completion?.percent ?? 0}%` }"></span>
+          </div>
+        </div>
       </div>
-      <a class="btn btn--ghost btn--sm" :href="href('/vip')">管理会员</a>
+      <div class="toolbar">
+        <a class="btn btn--ghost btn--sm" :href="href('/profile-edit')">编辑资料</a>
+        <a class="btn btn--ghost btn--sm" :href="href('/vip')">管理会员</a>
+      </div>
     </div>
     <div class="stat-strip">
       <div class="stat"><strong class="num">{{ daysLeft }}</strong><span>会员剩余天数</span></div>
@@ -73,6 +85,14 @@ onMounted(load);
       <a class="panel" :href="href('/favorites')">
         <div class="panel-head"><h3>我的收藏</h3><Icon name="chevron" /></div>
         <p class="small muted">{{ state.me?.favorites?.length ?? 0 }} 部已收藏</p>
+      </a>
+      <a class="panel" :href="href('/messages')">
+        <div class="panel-head"><h3>消息</h3><Icon name="chevron" /></div>
+        <p class="small muted">会员到期与订单状态通知</p>
+      </a>
+      <a class="panel" :href="href('/orders')">
+        <div class="panel-head"><h3>我的订单</h3><Icon name="chevron" /></div>
+        <p class="small muted">支付记录与待支付订单</p>
       </a>
     </div>
     <section>

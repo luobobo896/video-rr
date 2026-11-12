@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import CheckoutDialog from '../../components/CheckoutDialog.vue';
 import Icon from '../../components/Icon.vue';
 import PosterCard from '../../components/PosterCard.vue';
@@ -15,16 +15,71 @@ const error = ref('');
 const home = ref({ banners: [], sections: [], hotwords: [] });
 const rankItems = ref([]);
 const checkoutOpen = ref(false);
+const activeBanner = ref(0);
+const paused = ref(false);
+const interactionPaused = ref(false);
+const sectionOffsets = reactive({});
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+let carouselTimer = 0;
 
+const banners = computed(() => home.value.banners ?? []);
 const sections = computed(() =>
   home.value.sections.map(normalizedSection).filter((section) => section.items.length)
 );
-const featureSection = computed(() => sections.value[0] ?? { title: '编辑片单', items: [] });
-const featuredFilms = computed(() => featureSection.value.items.slice(0, 7));
+const floorSections = computed(() =>
+  sections.value.map((section, index) => ({
+    ...section,
+    films: rotate(section.items, sectionOffsets[index] || 0).slice(0, 6)
+  }))
+);
 const topRanks = computed(() => rankItems.value.slice(0, 4));
 const vipPrice = computed(() => state.constants?.vipPrice ?? '25.00');
 const adultEnabled = computed(() => state.constants?.adultMenu?.enabled !== false);
-const heroBanner = computed(() => home.value.banners?.[0] ?? null);
+const heroSlides = computed(() => {
+  const slides = banners.value.map((banner, index) => ({
+    id: `banner-${banner.id}`,
+    adult: false,
+    image: banner.image,
+    side: [
+      `${banner.categoryLabel || 'SELECTED'} · CHANNEL ${String(index + 2).padStart(2, '0')}`,
+      banner.areaLabel || 'CINEMA NEST'
+    ],
+    kicker: '影巢 · 精选',
+    title: banner.name || banner.title,
+    meta: [
+      banner.score ? { text: Number(banner.score).toFixed(1), accent: true } : null,
+      banner.year ? { text: banner.year } : null,
+      banner.categoryLabel ? { text: banner.categoryLabel } : null,
+      banner.areaLabel ? { text: banner.areaLabel } : null,
+      banner.isNew ? { text: 'NEW', badge: true } : null
+    ].filter(Boolean),
+    desc: banner.description || banner.subTitle || '影巢精选内容，登录后同步观看记录与收藏。',
+    primary: banner.targetDramaId
+      ? { label: '查看详情', path: `/detail/${banner.targetDramaId}`, icon: 'play' }
+      : { label: '浏览片库', path: '/category', icon: 'grid' },
+    secondary: { label: '浏览片库', path: '/category', icon: 'grid' }
+  }));
+  if (adultEnabled.value) {
+    slides.unshift({
+      id: 'midnight',
+      adult: true,
+      image: '',
+      side: ['18+ · MIDNIGHT', 'CHANNEL 01'],
+      kicker: '影巢 · 午夜场',
+      title: t('午夜场'),
+      meta: [
+        { text: '18+', badge: true },
+        { text: '影片' },
+        { text: 'AI 短剧' },
+        { text: '会员畅看' }
+      ],
+      desc: '深夜才开的放映厅。成人影片与 AI 短剧，更成熟的题材、更克制的界面，以及只对成年用户开放的内容分级。',
+      primary: { label: '进入成人专区', path: '/adult', icon: 'lock' },
+      secondary: { label: '浏览片库', path: '/category', icon: 'grid' }
+    });
+  }
+  return slides;
+});
 
 const continueItems = computed(() =>
   (state.me?.history ?? []).slice(0, 3).map((row) => ({
@@ -36,6 +91,57 @@ const continueItems = computed(() =>
     })
   }))
 );
+
+function rotate(items, offset) {
+  if (!items.length) return [];
+  return [...items.slice(offset), ...items.slice(0, offset)];
+}
+
+function rotateSection(index, items) {
+  if (!items.length) return;
+  sectionOffsets[index] = ((sectionOffsets[index] || 0) + 1) % items.length;
+}
+
+function showBanner(index) {
+  if (!heroSlides.value.length) return;
+  activeBanner.value = (index + heroSlides.value.length) % heroSlides.value.length;
+}
+
+function syncCarousel() {
+  window.clearInterval(carouselTimer);
+  if (paused.value || interactionPaused.value || reduceMotion || document.hidden || heroSlides.value.length < 2) return;
+  carouselTimer = window.setInterval(() => showBanner(activeBanner.value + 1), 6500);
+}
+
+function pauseForInteraction() {
+  interactionPaused.value = true;
+  syncCarousel();
+}
+
+function resumeAfterInteraction() {
+  interactionPaused.value = false;
+  syncCarousel();
+}
+
+function handleFocusOut(event) {
+  if (event.currentTarget.contains(event.relatedTarget)) return;
+  resumeAfterInteraction();
+}
+
+function stepBanner(direction) {
+  showBanner(activeBanner.value + direction);
+  syncCarousel();
+}
+
+function selectBanner(index) {
+  showBanner(index);
+  syncCarousel();
+}
+
+function togglePause() {
+  paused.value = !paused.value;
+  syncCarousel();
+}
 
 async function loadHome() {
   loading.value = true;
@@ -50,14 +156,14 @@ async function loadHome() {
     ]);
     home.value = homeData;
     rankItems.value = (rankData.items ?? []).map(normalizeCard);
+    activeBanner.value = 0;
+    syncCarousel();
   } catch (requestError) {
     error.value = requestError.message;
   } finally {
     loading.value = false;
   }
 }
-
-onMounted(loadHome);
 
 function openCheckout() {
   if (!state.user) {
@@ -66,27 +172,84 @@ function openCheckout() {
   }
   checkoutOpen.value = true;
 }
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', syncCarousel);
+  loadHome();
+});
+onBeforeUnmount(() => {
+  window.clearInterval(carouselTimer);
+  document.removeEventListener('visibilitychange', syncCarousel);
+});
 </script>
 
 <template>
-  <div v-if="heroBanner" class="hero">
-    <img v-if="heroBanner.image" :src="mediaUrl(heroBanner.image)" alt="" />
-    <div class="hero-body">
-      <div class="hero-kicker"><span class="line"></span>影巢 · 精选</div>
-      <h1 class="hero-title">{{ heroBanner.name || heroBanner.title }}</h1>
-      <div class="hero-meta">
-        <span v-if="heroBanner.score" class="accent">{{ Number(heroBanner.score).toFixed(1) }}</span>
-        <span v-if="heroBanner.year">{{ heroBanner.year }}</span>
-        <span v-if="heroBanner.categoryLabel">{{ heroBanner.categoryLabel }}</span>
-        <span v-if="heroBanner.areaLabel">{{ heroBanner.areaLabel }}</span>
+  <div
+    v-if="heroSlides.length"
+    class="hero-carousel"
+    @mouseenter="pauseForInteraction"
+    @mouseleave="resumeAfterInteraction"
+    @focusin="pauseForInteraction"
+    @focusout="handleFocusOut"
+  >
+    <article
+      v-for="(slide, index) in heroSlides"
+      :key="slide.id"
+      v-show="activeBanner === index"
+      class="hero hero-slide"
+      :class="{ 'is-active': activeBanner === index, 'hero--adult': slide.adult }"
+    >
+      <img v-if="slide.image" :src="mediaUrl(slide.image)" alt="" />
+      <div class="hero-side">
+        <span>{{ slide.side[0] }}</span>
+        <span>{{ slide.side[1] }}</span>
       </div>
-      <p class="hero-desc">{{ heroBanner.description || heroBanner.subTitle }}</p>
-      <div class="hero-actions">
-        <a v-if="heroBanner.targetDramaId" class="btn btn--primary btn--lg" :href="href(`/detail/${heroBanner.targetDramaId}`)">
-          <Icon name="play" />查看详情
-        </a>
-        <a class="btn btn--ghost btn--lg" :href="href('/category')"><Icon name="grid" />浏览片库</a>
+      <div class="hero-body">
+        <div class="hero-kicker"><span class="line"></span>{{ slide.kicker }}</div>
+        <h1 class="hero-title">{{ slide.title }}</h1>
+        <div class="hero-meta">
+          <span
+            v-for="item in slide.meta"
+            :key="item.text"
+            :class="{ accent: item.accent, 'badge badge--18': item.badge }"
+          >{{ item.text }}</span>
+        </div>
+        <p class="hero-desc">{{ slide.desc }}</p>
+        <div class="hero-actions">
+          <a class="btn btn--primary btn--lg" :href="href(slide.primary.path)">
+            <Icon :name="slide.primary.icon" />{{ slide.primary.label }}
+          </a>
+          <a class="btn btn--ghost btn--lg" :href="href(slide.secondary.path)">
+            <Icon :name="slide.secondary.icon" />{{ slide.secondary.label }}
+          </a>
+        </div>
       </div>
+    </article>
+    <div v-if="heroSlides.length > 1" class="hero-controls" aria-label="推荐轮播">
+      <button class="hero-arrow prev" type="button" aria-label="上一张" @click="stepBanner(-1)">
+        <Icon name="back" />
+      </button>
+      <button
+        v-for="(slide, index) in heroSlides"
+        :key="slide.id"
+        class="hero-dot"
+        type="button"
+        :aria-current="activeBanner === index ? 'true' : undefined"
+        :aria-label="`第 ${index + 1} 张：${slide.title}`"
+        @click="selectBanner(index)"
+      ></button>
+      <button class="hero-arrow next" type="button" aria-label="下一张" @click="stepBanner(1)">
+        <Icon name="chevron" />
+      </button>
+      <button
+        class="hero-arrow"
+        type="button"
+        :aria-label="paused ? '继续轮播' : '暂停轮播'"
+        :aria-pressed="paused"
+        @click="togglePause"
+      >
+        <Icon :name="paused ? 'play' : 'pause'" />
+      </button>
     </div>
   </div>
   <div v-else class="hero" :class="{ 'hero--adult': adultEnabled }">
@@ -163,15 +326,21 @@ function openCheckout() {
       </div>
     </section>
 
-    <section>
+    <section v-for="(section, index) in floorSections" :key="section.id">
       <div class="section-head">
-        <div><h2>{{ featureSection.title }}</h2><p>{{ featuredFilms.length }} 部内容</p></div>
-        <a class="section-link" :href="href('/category')">查看全部<Icon name="chevron" /></a>
+        <div><h2>{{ section.title }}</h2><p>{{ section.items.length }} 部内容</p></div>
+        <div class="floor-actions">
+          <button v-if="section.items.length > 1" class="btn btn--quiet btn--sm" type="button" @click="rotateSection(index, section.items)">换一换</button>
+          <a class="section-link" :href="href('/category')">查看全部<Icon name="chevron" /></a>
+        </div>
       </div>
-      <div v-if="featuredFilms.length" class="film-grid">
-        <PosterCard v-for="film in featuredFilms" :key="film.id" :film="film" />
+      <div class="film-grid floor-grid">
+        <PosterCard v-for="film in section.films" :key="film.id" :film="film" />
       </div>
-      <div v-else class="empty">
+    </section>
+
+    <section v-if="!sections.length">
+      <div class="empty">
         <Icon name="film" />
         <h3>内容正在上架</h3>
         <p>剧场暂时没有已发布内容。</p>

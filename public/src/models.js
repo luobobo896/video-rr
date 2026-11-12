@@ -7,6 +7,7 @@ export function normalizeCard(raw = {}) {
     title: raw.title || '未命名内容',
     subtitle: raw.subTitle ?? '',
     coverUrl: mediaUrl(raw.coverUrl),
+    previewUrl: mediaUrl(raw.previewUrl),
     score: Number(raw.score ?? 0),
     year: Number(raw.year ?? 0),
     area: raw.areaLabel ?? raw.area ?? '',

@@ -4,8 +4,9 @@
 
 前端现在有两个 Vite 构建入口：
 
-- C 端：`public/index.html` → `public/main.js` → `public/LegacyHost.vue` → `public/app.js`
+- C 端：`public/index.html` → `public/main.js` → `public/src/App.vue`
 - 后台：`admin/index.html` → `admin/main.js` → `admin/LegacyHost.vue` → `admin/app.js`
+  （新版壳层样式见 `admin/modern.css`）
 
 构建产物分别输出到 `dist/client`、`dist/admin`。Node 服务优先提供构建产物；没有构建产物时回退到 `public/legacy.html`、`admin/legacy.html`，因此不会因为漏构建而加载未编译的 Vue 入口。
 
@@ -32,7 +33,8 @@ HK 的 nginx 也必须直接指向构建产物：
 选用 **Element Plus**（含 `@element-plus/icons-vue`）。理由是后台的表单、菜单、表格、弹窗与分页覆盖完整，C 端也能只复用输入、分段控件和按钮，不需要引入第二套设计体系。
 
 - C 端：顶栏使用 `ElInput`、`ElSegmented`、`ElButton` 与 Element Plus 图标；海报、Hero、播放器、付费墙仍使用品牌专属实现。
-- 后台：登录页使用 `ElForm` / `ElInput` / `ElButton`，侧栏使用 `ElMenu` / `ElSubMenu` / `ElMenuItem`；页面数据渲染仍由 `admin/app.js` 驱动。
+- 后台：登录页使用 `ElForm` / `ElButton`，侧栏使用 `ElMenu` / `ElSubMenu` / `ElMenuItem`；
+  页面数据渲染仍由 `admin/app.js` 驱动，视觉统一由 `admin/modern.css` 覆盖。
 - 主题：组件只通过 `--el-*` 变量映射到 `shared/tokens.css`，不直接使用 Element Plus 默认蓝；品牌渐变和 C/B 两套主色保持不变。
 - 边界：不重写支付、权益、RBAC、路由和埋点逻辑；组件迁移只改变壳层与通用控件。
 

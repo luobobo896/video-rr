@@ -23,7 +23,8 @@ const groups = [
       { key: 'home', label: '精选', path: '/', icon: 'home' },
       { key: 'category', label: '片库', path: '/category', icon: 'grid' },
       { key: 'adult', label: '成人', path: '/adult', icon: 'lock', badge: '18+' },
-      { key: 'rank', label: '榜单', path: '/rank', icon: 'chart' }
+      { key: 'rank', label: '榜单', path: '/rank', icon: 'chart' },
+      { key: 'content-rank', label: '内容数据榜', path: '/content-rank', icon: 'chart' }
     ]
   },
   {
@@ -39,6 +40,8 @@ const groups = [
     items: [
       { key: 'history', label: '观看历史', path: '/history', icon: 'history' },
       { key: 'favorites', label: '我的收藏', path: '/favorites', icon: 'heart' },
+      { key: 'messages', label: '消息', path: '/messages', icon: 'bell' },
+      { key: 'orders', label: '我的订单', path: '/orders', icon: 'orders' },
       { key: 'promotion', label: '佣金推广', path: '/promotion', icon: 'share' },
       { key: 'me', label: '个人中心', path: '/me', icon: 'user' },
       { key: 'vip', label: '会员', path: '/vip', icon: 'crown' }
@@ -51,8 +54,8 @@ const bottomItems = [
   { key: 'category', label: '片库', path: '/category', icon: 'grid' },
   { key: 'adult', label: '成人', path: '/adult', icon: 'lock' },
   { key: 'rank', label: '榜单', path: '/rank', icon: 'chart' },
-  { key: 'playlists', label: '片单', path: '/playlists', icon: 'film' },
-  { key: 'me', label: '我的', path: '/me', icon: 'user' }
+  { key: 'me', label: '我的', path: '/me', icon: 'user' },
+  { key: 'messages', label: '消息', path: '/messages', icon: 'bell' }
 ];
 
 const userInitial = computed(() => (state.user?.nickname || state.user?.email || '影').slice(0, 1));
@@ -116,16 +119,12 @@ function toggleLang() {
       </div>
 
       <div class="sidebar-foot">
-        <div class="side-card">
+        <div v-if="!isVip" class="side-card">
           <strong>
-            {{ isVip
-              ? (lang === 'en' ? 'Membership active' : '会员已生效')
-              : (lang === 'en' ? `Plans from ¥${vipPrice}` : `会员套餐 ¥${vipPrice} 起`) }}
+            {{ lang === 'en' ? `Plans from ¥${vipPrice}` : `会员套餐 ¥${vipPrice} 起` }}
           </strong>
           <p>
-            {{ isVip
-              ? (lang === 'en' ? 'All titles · Adult channel included' : '全站畅看，成人专区同权。')
-              : (lang === 'en' ? 'Monthly, quarterly and annual plans · Adult channel included' : '月卡 / 季卡 / 年卡可选，成人专区同权。') }}
+            {{ lang === 'en' ? 'Monthly, quarterly and annual plans · Adult channel included' : '月卡 / 季卡 / 年卡可选，成人专区同权。' }}
           </p>
           <a class="btn btn--primary btn--sm btn--block" :href="href('/vip')">
             {{ lang === 'en' ? 'View plans' : '查看套餐' }}
@@ -160,6 +159,9 @@ function toggleLang() {
           </a>
           <a class="icon-btn" :href="href('/vip')" aria-label="会员权益">
             <Icon name="crown" />
+          </a>
+          <a class="icon-btn" :href="href('/messages')" aria-label="消息">
+            <Icon name="bell" />
           </a>
           <button
             class="icon-btn lang-switch"

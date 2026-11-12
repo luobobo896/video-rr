@@ -1,4 +1,4 @@
-import { translateText } from './i18n.js?v=20261111fix8'
+import { translateText } from './i18n.js?v=20261112ops3'
 
 const BASE = window.__MH_BASE || ''
 const CATEGORY_ORDER = ['MOVIE', 'TV', 'PLAYLET', 'ANIME', 'DOCUMENTARY']

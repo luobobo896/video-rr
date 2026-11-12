@@ -94,7 +94,7 @@ watch(
 </script>
 
 <template>
-  <dialog ref="dialog" :aria-labelledby="`checkout-title-${dramaId}`" @close="close" @click.self="close">
+  <dialog ref="dialog" class="checkout-dialog" :aria-labelledby="`checkout-title-${dramaId}`" @close="close" @click.self="close">
     <div class="dialog-head">
       <div>
         <h2 :id="`checkout-title-${dramaId}`">{{ order ? '订单已创建' : title }}</h2>
@@ -132,7 +132,7 @@ watch(
       <div class="dialog-body">
         <div v-if="loading" class="empty" style="padding: 24px">正在加载价格…</div>
         <template v-else>
-          <div class="plan-grid" :class="{ 'plan-grid--two': true }">
+          <div class="plan-grid">
             <label v-if="hasSingle" class="plan">
               <input v-model="selection" type="radio" name="purchase" value="single" />
               <strong>单片购买</strong>

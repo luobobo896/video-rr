@@ -25,9 +25,7 @@ const tagGroups = computed(() => {
   return parents
     .map((parent) => ({
       ...parent,
-      children: adultTags.value.filter(
-        (tag) => Number(tag.parent_id) === Number(parent.id) && Number(tag.dramaCount ?? 0) > 0
-      )
+      children: adultTags.value.filter((tag) => Number(tag.parent_id) === Number(parent.id))
     }))
     .filter((group) => group.children.length);
 });

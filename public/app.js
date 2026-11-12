@@ -36,7 +36,7 @@ function readStoredUser() {
 let hlsPromise
 function loadHls() {
   if (!hlsPromise) {
-    hlsPromise = import(`${BASE}/vendor/hls.mjs?v=20261111fix8`)
+    hlsPromise = import(`${BASE}/vendor/hls.mjs?v=20261112ops3`)
       .then((mod) => mod.default ?? mod.Hls)
       .catch((error) => {
         hlsPromise = undefined
@@ -1695,7 +1695,7 @@ async function downloadDistributionPoster(code, link) {
   if (!ctx) return toast('当前浏览器不支持生成海报')
   let drawQrCode
   try {
-    ({ drawQrCode } = await import('./qr-code.js?v=20261111fix8'))
+    ({ drawQrCode } = await import('./qr-code.js?v=20261112ops3'))
   } catch {
     return toast('二维码组件加载失败，请刷新后重试')
   }
@@ -3362,7 +3362,7 @@ async function route() {
     else if (segments[0] === 'play') await renderPlay(segments[1], segments[2] ?? '1', params)
     else if (segments[0] === 'playlists') await renderPlaylists()
     else if (segments[0] === 'posters') {
-      const { renderPosterWall } = await import('./poster-wall-view.js?v=20261111fix8')
+      const { renderPosterWall } = await import('./poster-wall-view.js?v=20261112ops3')
       await renderPosterWall(view, api)
     }
     else if (segments[0] === 'me') await renderMe(params)

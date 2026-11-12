@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self' ws://localhost:5173 ws://127.0.0.1:5173 ws://localhost:5174 ws://127.0.0.1:5174; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://img.bwcgee.cn; media-src 'self' blob: https:; connect-src 'self' ws://localhost:5173 ws://127.0.0.1:5173 ws://localhost:5174 ws://127.0.0.1:5174; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'" />
   <title>影巢 · 高清影视在线观看</title>
   <meta name="description" content="影巢 · 短剧 / 电影 / 剧集在线观看，会员畅看全站。" />
-  <meta name="theme-color" content="#07050c" />
+  <meta name="theme-color" content="#0b0709" />
   <meta name="application-name" content="影巢" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -25,16 +25,9 @@
   <link rel="icon" type="image/png" sizes="16x16" href="./icons/favicon-16x16.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
   <link rel="manifest" href="./site.webmanifest" />
-  <link rel="stylesheet" href="./tokens.css?v=20261111fix8" />
-  <link rel="stylesheet" href="./styles.css?v=20261111fix8" />
-  <link rel="stylesheet" href="./poster-wall.css?v=20261111fix8" />
-  <style>
-    /* 首屏骨架：app.js 是 module，弱网下在常量请求回来前页面会是纯黑，先给个占位 */
-    #boot { display: grid; place-items: center; min-height: 100vh; color: #8a93a5; font-size: 14px; letter-spacing: 1px; }
-  </style>
 </head>
 <body>
-  <div id="vue-root"></div>
+  <div id="app"></div>
   <script type="module" src="./base.js"></script>
   <script type="module" src="./main.js"></script>
 </body>

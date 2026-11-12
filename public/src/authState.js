@@ -64,9 +64,24 @@ function saveSession(data) {
   localStorage.setItem('mh-user', JSON.stringify(data.user));
 }
 
+function applyUser(user) {
+  if (!user) return;
+  state.user = user;
+  if (state.me) state.me.user = user;
+  localStorage.setItem('mh-user', JSON.stringify(user));
+}
+
+function applyToken(token) {
+  if (token) localStorage.setItem('mh-token', token);
+}
+
 function clearSession(kind) {
   if (kind === 'admin') {
     localStorage.removeItem('mh-admin-token');
+    localStorage.removeItem('mh-admin-must-change');
+    adminState.token = '';
+    adminState.mustChangePassword = false;
+    adminState.me = null;
     return;
   }
   localStorage.removeItem('mh-token');
@@ -141,6 +156,47 @@ export async function refreshMe() {
   }
 }
 
+export async function saveProfile(patch) {
+  const data = await publicApi('/me/profile', { method: 'PUT', body: patch });
+  applyUser(data.user);
+  await refreshMe().catch(() => null);
+  return data.user;
+}
+
+export async function uploadAvatar(dataUrl) {
+  const data = await publicApi('/me/avatar', { method: 'POST', body: { dataUrl } });
+  applyUser(data.user);
+  return data.user;
+}
+
+export async function sendPasswordChangeCode() {
+  if (!state.user?.email) throw Object.assign(new Error('当前账号未绑定邮箱'), { code: 'email_missing' });
+  return publicApi('/auth/password/send', { method: 'POST', body: { email: state.user.email } });
+}
+
+export async function changePassword({ email, code, newPassword }) {
+  const data = await publicApi('/auth/password/change', {
+    method: 'POST',
+    body: { email, code, newPassword }
+  });
+  applyToken(data.token);
+  return data;
+}
+
+export async function sendEmailChangeCode(newEmail) {
+  return publicApi('/auth/email/send-change', { method: 'POST', body: { newEmail } });
+}
+
+export async function changeEmail({ newEmail, code }) {
+  const data = await publicApi('/auth/email/change', {
+    method: 'POST',
+    body: { newEmail, code }
+  });
+  applyToken(data.token);
+  applyUser(data.user);
+  return data;
+}
+
 export async function loadConstants() {
   if (state.constants) return state.constants;
   state.constants = await publicApi('/constants');
@@ -186,6 +242,7 @@ export function confirmAdult() {
 
 export const adminState = reactive({
   token: localStorage.getItem('mh-admin-token') || '',
+  mustChangePassword: localStorage.getItem('mh-admin-must-change') === '1',
   me: null,
   loading: false
 });
@@ -218,7 +275,10 @@ export async function loginAdmin(username, password) {
     token: ''
   });
   adminState.token = data.token;
+  adminState.mustChangePassword = Boolean(data.mustChangePassword);
   localStorage.setItem('mh-admin-token', data.token);
+  if (data.mustChangePassword) localStorage.setItem('mh-admin-must-change', '1');
+  else localStorage.removeItem('mh-admin-must-change');
   await loadAdminMe();
   return data;
 }
@@ -230,6 +290,8 @@ export async function logoutAdmin() {
     // Always allow local sign-out.
   }
   adminState.token = '';
+  adminState.mustChangePassword = false;
   adminState.me = null;
   localStorage.removeItem('mh-admin-token');
+  localStorage.removeItem('mh-admin-must-change');
 }

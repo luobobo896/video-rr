@@ -1,5 +1,5 @@
-import qrcode from './vendor/qrcode.mjs?v=20261111fix8'
-import { stringToBytes } from './vendor/qrcode_UTF8.mjs?v=20261111fix8'
+import qrcode from './vendor/qrcode.mjs?v=20261112ops3'
+import { stringToBytes } from './vendor/qrcode_UTF8.mjs?v=20261112ops3'
 
 qrcode.stringToBytes = stringToBytes
 

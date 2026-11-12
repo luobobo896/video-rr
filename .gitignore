@@ -9,6 +9,7 @@ node_modules/
 dist/
 mh-deploy-*.tgz
 .impeccable/
+.codegraph/
 
 # 系统垃圾
 .DS_Store

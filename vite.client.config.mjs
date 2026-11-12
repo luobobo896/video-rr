@@ -2,6 +2,8 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'node:path'
 
+const apiTarget = process.env.MH_DEV_API_ORIGIN || 'http://127.0.0.1:8787'
+
 export default defineConfig({
   root: resolve('public'),
   base: './',
@@ -12,9 +14,9 @@ export default defineConfig({
     strictPort: true,
     open: '/',
     proxy: {
-      '/api': 'http://127.0.0.1:8787',
-      '/media': 'http://127.0.0.1:8787',
-      '/i': 'http://127.0.0.1:8787',
+      '/api': apiTarget,
+      '/media': apiTarget,
+      '/i': apiTarget,
     },
   },
   build: {

@@ -54,6 +54,48 @@ async function copyLink() {
   }
 }
 
+function downloadPoster() {
+  if (!link.value) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = 1080;
+  canvas.height = 1440;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createLinearGradient(0, 0, 1080, 1440);
+  gradient.addColorStop(0, '#1b0b12');
+  gradient.addColorStop(1, '#0b0709');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 1080, 1440);
+  ctx.strokeStyle = 'rgba(217,178,111,.45)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(48, 48, 984, 1344);
+  ctx.fillStyle = '#d9b26f';
+  ctx.font = "700 40px 'PingFang SC', 'Microsoft YaHei', sans-serif";
+  ctx.fillText('影巢 · 午夜场', 96, 150);
+  ctx.fillStyle = '#f7eef1';
+  ctx.font = "700 108px 'Songti SC', 'SimSun', serif";
+  ctx.fillText('深夜才开的', 96, 430);
+  ctx.fillText('放映厅', 96, 560);
+  ctx.fillStyle = '#c3adb4';
+  ctx.font = "32px 'PingFang SC', 'Microsoft YaHei', sans-serif";
+  ctx.fillText('电影 · 剧集 · 会员畅看', 96, 640);
+  ctx.fillStyle = '#f0335f';
+  ctx.fillRect(96, 760, 888, 4);
+  ctx.fillStyle = '#f7eef1';
+  ctx.font = "600 36px 'PingFang SC', sans-serif";
+  ctx.fillText('扫码或打开推广链接', 96, 900);
+  ctx.fillStyle = '#d9b26f';
+  ctx.font = '24px ui-monospace, monospace';
+  ctx.fillText(link.value.replace(/^https?:\/\//, ''), 96, 952);
+  ctx.fillStyle = '#9a828b';
+  ctx.font = "22px 'PingFang SC', sans-serif";
+  ctx.fillText(`推广码 ${data.value.code} · 18+ 仅限成年用户`, 96, 1300);
+  const anchor = document.createElement('a');
+  anchor.download = `yingchao-promo-${data.value.code}.png`;
+  anchor.href = canvas.toDataURL('image/png');
+  anchor.click();
+  toast('推广海报已生成');
+}
+
 onMounted(load);
 </script>
 
@@ -105,6 +147,9 @@ onMounted(load);
       <p class="mono small" style="word-break: break-all">{{ link }}</p>
       <div class="toolbar" style="margin-top: 12px">
         <button class="btn btn--primary btn--sm" type="button" @click="copyLink">复制链接</button>
+        <button class="btn btn--ghost btn--sm" type="button" @click="downloadPoster">
+          <Icon name="share" />下载推广海报
+        </button>
       </div>
     </div>
     <div class="panel">
