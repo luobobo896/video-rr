@@ -449,6 +449,92 @@ const UI_EN = {
   该分类暂无内容: 'This category has no titles',
   暂无可用支付渠道: 'No payment method available',
   暂无可用渠道: 'No channel available',
+
+  // Redesign C-end shell and pages
+  片库: 'Library',
+  成人: 'Adult',
+  发现: 'Discover',
+  片单: 'Collections',
+  午夜场: 'Midnight',
+  影巢放映厅: 'Yingchao Screening Room',
+  进入成人专区: 'Enter adult zone',
+  浏览片库: 'Browse library',
+  '搜索片名、类型、标签': 'Search titles, genres, tags',
+  全部记录: 'All history',
+  去片库看看: 'Explore the library',
+  编辑片单: 'Curated titles',
+  本周榜单: 'Weekly rankings',
+  完整榜单: 'Full rankings',
+  按服务端热播数据排序: 'Ranked by server trending data',
+  会员套餐: 'Membership plans',
+  会员已生效: 'Membership active',
+  '会员套餐，随时入场': 'A plan for every visit',
+  '月卡 / 季卡 / 年卡可选，成人专区同权。': 'Monthly, quarterly and annual plans · Adult channel included',
+  '全站剧集免费看（不含单片付费内容）': 'All series included (excluding separately sold titles)',
+  '全站剧集免费看，折合 22.7 元/月': 'All series included · about ¥22.7/month',
+  '全站剧集免费看，折合 19.8 元/月': 'All series included · about ¥19.8/month',
+  选择会员套餐: 'Choose a plan',
+  查看套餐: 'View plans',
+  在售套餐: 'Available plans',
+  支付说明: 'Payment notes',
+  立即续费: 'Renew now',
+  立即开通: 'Subscribe now',
+  登录后开通: 'Log in to subscribe',
+  当前价格: 'Current price',
+  管理会员: 'Manage membership',
+  我的片单: 'My list',
+  近期收藏: 'Recent favorites',
+  收藏的片子会出现在这里: 'Saved titles will appear here',
+  '最近 7 天': 'Last 7 days',
+  最近记录: 'Recent records',
+  热门搜索: 'Popular searches',
+  '输入片名、类型或标签': 'Enter a title, genre, or tag',
+  没有找到匹配的片子: 'No matching titles',
+  '换个关键词再试。': 'Try another keyword.',
+  成人频道暂未开放: 'Adult channel is closed',
+  '运营已关闭该频道入口。': 'This channel has been disabled by operations.',
+  仅限成年用户: 'Adults only',
+  '已满 18 岁': 'I am 18 or older',
+  '未满 18 岁': 'I am under 18',
+  成人内容筹备中: 'Adult content coming soon',
+  '内容分级 · 请勿向未成年人传播': 'Content rating · Not for minors',
+  全部内容: 'All content',
+  影片信息: 'Title information',
+  内容简介: 'Overview',
+  立即播放: 'Play now',
+  按集权限: 'Episode access',
+  已解锁: 'Unlocked',
+  正在加载片库: 'Loading library',
+  内容正在上架: 'Content is being added',
+  首页加载失败: 'Home failed to load',
+  片库加载失败: 'Library failed to load',
+  没有匹配的内容: 'No matching content',
+  换一个筛选条件看看: 'Try different filters',
+  更多筛选: 'More filters',
+  收起筛选: 'Fewer filters',
+  正在加载观看记录: 'Loading watch history',
+  正在加载收藏: 'Loading favorites',
+  正在加载播放信息: 'Loading playback',
+  会员套餐已生效: 'Membership active',
+  会员剩余天数: 'Membership days left',
+  会员到期: 'Membership expires',
+  选择购买方式: 'Choose a purchase option',
+  去支付: 'Continue to payment',
+  创建订单中: 'Creating order',
+  订单已创建: 'Order created',
+  打开支付页: 'Open payment page',
+  '全站畅看 · 4K 原画': 'All titles · 4K',
+  '全站畅看 · 成人专区同权': 'All titles · Adult channel included',
+  '登录后同步观看记录。': 'Log in to sync watch history.',
+  '开始播放后会自动记录进度。': 'Progress is saved automatically once playback starts.',
+  还没有观看记录: 'No watch history yet',
+  影片: 'Movies',
+  剧集: 'Series',
+  会员畅看: 'Included with membership',
+  '深夜才开的放映厅。成人影片与短剧，更成熟的题材、更克制的界面，以及只对成年用户开放的内容分级。':
+    'A late-night screening room for adult films and short dramas, with mature themes, a restrained interface, and age-gated access.',
+  '精选电影、剧集与短剧。浏览片库，登录后同步观看记录、收藏与会员权益。':
+    'Featured films, series and short dramas. Browse the library and sign in to sync history, favorites and membership.',
 }
 
 const REPLACE_PAIRS = [
@@ -500,6 +586,9 @@ const PATTERNS = [
   [/^(\d+) 级$/, (_, n) => `Level ${n}`],
   [/^(\d+) 天$/, (_, n) => `${n} days`],
   [/^剩 (\d+) 天$/, (_, n) => `${n} days left`],
+  [/^会员剩余 (\d+) 天$/, (_, n) => `${n} membership days left`],
+  [/^会员套餐 ¥([\d.]+) 起$/, (_, price) => `Plans from ¥${price}`],
+  [/^¥([\d.]+) \/ (\d+) 天$/, (_, price, days) => `¥${price} / ${days} days`],
   [/^(\d+) 秒$/, (_, n) => `${n}s`],
   [/^(\d+) 分钟$/, (_, n) => `${n} min`],
   [/^有效期至 (.+) · 全站畅看$/, (_, value) => `Valid until ${value} · All titles included`],
@@ -622,6 +711,14 @@ export function initI18n() {
     queueMicrotask(() => {
       scheduled = false
       for (const mutation of mutations) {
+        if (mutation.type === 'characterData') {
+          const parent = mutation.target.parentElement
+          if (parent && !parent.closest(SKIP_SELECTOR)) {
+            const next = translateText(mutation.target.nodeValue, parent)
+            if (next !== mutation.target.nodeValue) mutation.target.nodeValue = next
+          }
+          continue
+        }
         for (const node of mutation.addedNodes) {
           if (node.nodeType === Node.ELEMENT_NODE) translateDom(node)
         }
@@ -629,5 +726,5 @@ export function initI18n() {
       document.title = translateText(document.title)
     })
   })
-  observer.observe(document.body, { childList: true, subtree: true })
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true })
 }

@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue';
 import Icon from './Icon.vue';
 import LoginDialog from './LoginDialog.vue';
+import { getLang, setLang } from '../i18n.js';
 import { go, href, route } from '../router.js';
 import { isVip, state, ui } from '../authState.js';
 
@@ -10,6 +11,7 @@ const props = defineProps({
 });
 
 const query = ref('');
+const lang = ref(getLang());
 const focusedRoute = computed(
   () => route.path.startsWith('/detail/') || route.path.startsWith('/play/')
 );
@@ -72,6 +74,15 @@ function submitSearch() {
   const value = query.value.trim();
   if (value) go(`/search?q=${encodeURIComponent(value)}`);
 }
+
+function toggleLang() {
+  const next = lang.value === 'en' ? 'zh' : 'en';
+  const url = new URL(window.location.href);
+  url.searchParams.set('lang', next);
+  window.history.replaceState(null, '', url);
+  setLang(next);
+  window.location.reload();
+}
 </script>
 
 <template>
@@ -106,11 +117,20 @@ function submitSearch() {
 
       <div class="sidebar-foot">
         <div class="side-card">
-          <strong>{{ isVip ? '会员已生效' : `月度会员 ¥${vipPrice}` }}</strong>
-          <p>{{ isVip ? '全站畅看，成人专区同权。' : '全站畅看，成人专区同权，4K 原画。' }}</p>
-          <a class="btn btn--primary btn--sm btn--block" :href="href('/vip')">查看权益</a>
+          <strong>
+            {{ isVip
+              ? (lang === 'en' ? 'Membership active' : '会员已生效')
+              : (lang === 'en' ? `Plans from ¥${vipPrice}` : `会员套餐 ¥${vipPrice} 起`) }}
+          </strong>
+          <p>
+            {{ isVip
+              ? (lang === 'en' ? 'All titles · Adult channel included' : '全站畅看，成人专区同权。')
+              : (lang === 'en' ? 'Monthly, quarterly and annual plans · Adult channel included' : '月卡 / 季卡 / 年卡可选，成人专区同权。') }}
+          </p>
+          <a class="btn btn--primary btn--sm btn--block" :href="href('/vip')">
+            {{ lang === 'en' ? 'View plans' : '查看套餐' }}
+          </a>
         </div>
-        <a class="section-link" :href="href('/admin/overview')">运营后台<Icon name="chevron" /></a>
         <p class="meta">© 2026 影巢</p>
       </div>
     </aside>
@@ -141,7 +161,14 @@ function submitSearch() {
           <a class="icon-btn" :href="href('/vip')" aria-label="会员权益">
             <Icon name="crown" />
           </a>
-          <a class="btn btn--ghost btn--sm admin-link" :href="href('/admin/overview')">运营后台</a>
+          <button
+            class="icon-btn lang-switch"
+            type="button"
+            :aria-label="lang === 'en' ? '切换到中文' : 'Switch to English'"
+            @click="toggleLang"
+          >
+            {{ lang === 'en' ? '中' : 'EN' }}
+          </button>
           <div class="account">
             <a
               v-if="state.user"

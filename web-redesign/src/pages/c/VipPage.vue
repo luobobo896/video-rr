@@ -72,7 +72,7 @@ function openCheckout() {
       </div>
       <div class="panel">
         <div class="panel-head"><h3>在售套餐</h3><span class="meta">{{ plans.length }} 个</span></div>
-        <div class="plan-grid" style="grid-template-columns: 1fr">
+        <div class="plan-grid">
           <div v-for="plan in plans" :key="plan.id" class="plan">
             <strong>{{ plan.name }}</strong>
             <span>{{ plan.description }}</span>

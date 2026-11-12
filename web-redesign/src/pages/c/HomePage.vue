@@ -5,6 +5,7 @@ import Icon from '../../components/Icon.vue';
 import PosterCard from '../../components/PosterCard.vue';
 import RankRow from '../../components/RankRow.vue';
 import { mediaUrl, publicApi } from '../../api.js';
+import { t } from '../../i18n.js';
 import { formatCount, normalizeCard, normalizedSection } from '../../models.js';
 import { href } from '../../router.js';
 import { loadConstants, loadPlans, refreshMe, requireLogin, state } from '../../authState.js';
@@ -95,7 +96,7 @@ function openCheckout() {
     </div>
     <div class="hero-body">
       <div class="hero-kicker"><span class="line"></span>影巢 · {{ adultEnabled ? '午夜场' : '精选' }}</div>
-      <h1 class="hero-title">{{ adultEnabled ? '午夜场' : '影巢放映厅' }}</h1>
+      <h1 class="hero-title">{{ adultEnabled ? t('午夜场') : t('影巢放映厅') }}</h1>
       <div class="hero-meta">
         <span v-if="adultEnabled" class="badge badge--18">18+</span>
         <span>影片</span><span>剧集</span><span>会员畅看</span>
@@ -180,11 +181,11 @@ function openCheckout() {
     <section>
       <div class="member-strip">
         <div class="member-copy">
-          <h3>午夜场，随时入场</h3>
-          <p>月度会员全站畅看，4K 原画、双端同步，成人专区同权。</p>
+          <h3>会员套餐，随时入场</h3>
+          <p>月卡 / 季卡 / 年卡可选，全站畅看、4K 原画、成人专区同权。</p>
         </div>
         <div class="member-price"><strong>¥{{ vipPrice }}</strong><span>/ 月</span></div>
-        <button class="btn btn--primary" type="button" @click="openCheckout">开通月度会员</button>
+        <button class="btn btn--primary" type="button" @click="openCheckout">选择会员套餐</button>
       </div>
     </section>
 

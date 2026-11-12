@@ -1,3 +1,5 @@
+import { getLang } from './i18n.js';
+
 const runtimePath = window.location.pathname.replace(/\/index\.html$/, '').replace(/\/$/, '');
 const runtimeBase = /^\/(video|video-admin)$/.test(runtimePath) ? runtimePath : '';
 const siteBaseValue = window.__MH_BASE || runtimeBase;
@@ -34,11 +36,7 @@ export class ApiError extends Error {
 }
 
 function langHeader() {
-  try {
-    return localStorage.getItem('mh-lang') === 'en' ? 'en' : 'zh';
-  } catch {
-    return 'zh';
-  }
+  return getLang();
 }
 
 function buildQuery(path) {

@@ -227,7 +227,7 @@ onMounted(load);
 
     <section class="admin-grid">
       <div class="panel">
-        <div class="panel-head"><h3>简介</h3></div>
+        <div class="panel-head"><h3>内容简介</h3></div>
         <p class="body">{{ detail.description }}</p>
         <div v-if="detail.tags?.length" class="toolbar" style="margin-top: 16px">
           <span v-for="tag in detail.tags" :key="tag.id" class="chip">{{ tag.label || tag.name }}</span>
