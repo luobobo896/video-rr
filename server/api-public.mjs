@@ -100,7 +100,10 @@ export function send(res, data, code = '0000', msg = 'Success', status = 200, ca
 /** 公开聚合接口允许浏览器短缓存：返回箭头时不用再等一个来回，10 秒内的内容变化对观众无感。
  *  private：这些响应里带登录态字段（owned/access），不能被共享缓存复用。 */
 const PUBLIC_CACHE = 'private, max-age=10, stale-while-revalidate=30'
-const sendPublic = (res, data) => send(res, data, '0000', 'Success', 200, PUBLIC_CACHE)
+const sendPublic = (res, data) => {
+  res.setHeader('vary', 'x-mh-lang')
+  return send(res, data, '0000', 'Success', 200, PUBLIC_CACHE)
+}
 
 const fail = (res, code, msg, status = 400, extra = {}) => send(res, extra, code, msg, status)
 
@@ -728,7 +731,9 @@ export async function handlePublic(pathname, url, req, res) {
       return sendPublic(res, {
         list: listTags({ withCount: true, publicOnly: true, scope }).map((tag) => ({
           ...tag,
-          label: scope === 'adult' ? tag.name : enumLabel(lang, 'genre', tag.name, tag.name),
+          label: scope === 'adult'
+            ? enumLabel(lang, 'adultTag', tag.name, tag.name)
+            : enumLabel(lang, 'genre', tag.name, tag.name),
         })),
       })
     }
@@ -769,7 +774,13 @@ export async function handlePublic(pathname, url, req, res) {
             note: rule.note ?? '',
           })),
         },
-        tags: tagsOfDrama(drama.id).map((tag) => ({ id: tag.id, name: tag.name })),
+        tags: tagsOfDrama(drama.id).map((tag) => ({
+          id: tag.id,
+          name: tag.name,
+          label: tag.scope === 'adult'
+            ? enumLabel(lang, 'adultTag', tag.name, tag.name)
+            : enumLabel(lang, 'genre', tag.name, tag.name),
+        })),
         hasSubscription: Boolean(context.subscription),
         favorited: Boolean(favorite),
         resumeEpisodeNo: resume?.episode_no ?? null,

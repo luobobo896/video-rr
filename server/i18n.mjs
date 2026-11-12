@@ -1,3 +1,5 @@
+import { ADULT_TAG_LABELS_EN } from './adult-taxonomy.mjs'
+
 const ZH = {
   category: {
     ALL: '全部', MOVIE: '电影', TV: '电视剧', PLAYLET: '短剧', ANIME: '动漫',
@@ -43,6 +45,7 @@ const ZH = {
     犯罪: '犯罪', 传记: '传记', 历史: '历史', 战争: '战争', 灾难: '灾难', 美食: '美食',
     真人秀: '真人秀', 脱口秀: '脱口秀',
   },
+  adultTag: {},
 }
 
 const EN = {
@@ -91,6 +94,7 @@ const EN = {
     犯罪: 'Crime', 传记: 'Biography', 历史: 'History', 战争: 'War', 灾难: 'Disaster', 美食: 'Food',
     真人秀: 'Reality', 脱口秀: 'Talk Show',
   },
+  adultTag: ADULT_TAG_LABELS_EN,
 }
 
 export function normalizeLang(value = '') {

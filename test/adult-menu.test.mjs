@@ -221,6 +221,9 @@ test('成人内容只进入成人列表，普通分类、搜索与标签计数�
   assert.equal(adultTags.data.list.filter((tag) => !tag.parent_id).length, 8)
   assert.equal(adultTags.data.list.filter((tag) => tag.parent_id).length, 111)
   assert.ok(adultTags.data.list.some((tag) => tag.name === 'Cosplay' && tag.dramaCount === 1))
+  const adultTagsEn = await callPublic('/api/tags?scope=adult', '', 'en')
+  assert.equal(adultTagsEn.data.list.find((tag) => tag.name === '衣著')?.label, 'Clothing')
+  assert.equal(adultTagsEn.data.list.find((tag) => tag.name === '漁網')?.label, 'Fishnet')
 
   const adultTagFiltered = await callPublic(`/api/category?audience=adult&tag=${adultTagId}&pageSize=60`)
   assert.deepEqual(adultTagFiltered.data.list.map((item) => item.dramaId), [adultDramaId])
@@ -252,6 +255,8 @@ test('成人内容只进入成人列表，普通分类、搜索与标签计数�
   assert.ok(detail.data.stats.monthViews >= 2)
   assert.equal(detail.data.stats.totalViews, 4)
   assert.ok(detail.data.similar.every((item) => item.dramaId !== generalDramaId && item.isAdult))
+  const detailEn = await callPublic(`/api/drama/${adultDramaId}`, '', 'en')
+  assert.equal(detailEn.data.tags.find((tag) => tag.name === 'Cosplay')?.label, 'Cosplay')
 
   const posterIds = posterWall.posterWallCandidates().map((item) => item.dramaId)
   assert.ok(posterIds.includes(posterGeneralId))
@@ -263,6 +268,28 @@ test('成人内容只进入成人列表，普通分类、搜索与标签计数�
 
   const adminStats = await callAdmin('GET', '/admin/api/adult-stats')
   assert.ok(adminStats.data.list.some((row) => row.dramaId === adultDramaId && row.totalViews === 4))
+})
+
+test('默认成人标签全部有英文名，语言响应带缓存区分头', async () => {
+  const { ADULT_TAG_GROUPS } = await import('../server/adult-taxonomy.mjs')
+  const { enumLabel } = await import('../server/i18n.mjs')
+  const missing = []
+  for (const group of ADULT_TAG_GROUPS) {
+    if (enumLabel('en', 'adultTag', group.name, null) === null) missing.push(group.name)
+    for (const tag of group.tags) {
+      if (enumLabel('en', 'adultTag', tag, null) === null) missing.push(tag)
+    }
+  }
+  assert.deepEqual(missing, [])
+
+  const res = fakeResponse()
+  const url = new URL('http://localhost/api/home')
+  await publicApi.handlePublic(url.pathname, url, {
+    method: 'GET',
+    headers: { 'user-agent': 'node-test', 'x-mh-lang': 'en' },
+    socket: { remoteAddress: '127.0.0.1' },
+  }, res)
+  assert.equal(res.getHeader('vary'), 'x-mh-lang')
 })
 
 test('个人历史与收藏保留成人记录', async () => {

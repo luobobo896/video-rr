@@ -211,6 +211,7 @@ function observeImpressions() {
 async function api(path, options = {}) {
   const { timeoutMs = 15000, signal: externalSignal, ...fetchOptions } = options
   const headers = { ...(fetchOptions.headers ?? {}), 'x-mh-lang': getLang() }
+  const url = `${path}${path.includes('?') ? '&' : '?'}lang=${getLang()}`
   const blobBody = fetchOptions.body instanceof Blob
   if (VISITOR_ID) headers['x-mh-visitor'] = VISITOR_ID
   if (state.token) headers.authorization = `Bearer ${state.token}`
@@ -225,7 +226,7 @@ async function api(path, options = {}) {
   try {
     let res
     try {
-      res = await fetch(BASE + path, { ...fetchOptions, headers, signal: controller.signal })
+      res = await fetch(BASE + url, { ...fetchOptions, headers, signal: controller.signal })
     } catch (error) {
       if (error?.name === 'AbortError') {
         if (timedOut) throw Object.assign(new Error('请求超时，请检查网络后重试'), { code: 'timeout' })
@@ -797,7 +798,11 @@ function posterCard(item, options = {}) {
   const meta = (item.labels ?? []).slice(0, 2).join(' · ')
   const sub = `${plays}${escapeHtml(item.subTitle || meta)}`
   const adultMeta = item.isAdult && item.stats
-    ? [item.releaseDate ? `发行 ${item.releaseDate}` : '', `收藏 ${fmtCount(item.stats.favoriteCount ?? 0)}`, `浏览 ${fmtCount(item.stats.totalViews ?? 0)}`].filter(Boolean).join(' · ')
+    ? [
+      item.releaseDate ? `${t('发行')} ${item.releaseDate}` : '',
+      `${t('收藏数')} ${fmtCount(item.stats.favoriteCount ?? 0)}`,
+      `${t('浏览')} ${fmtCount(item.stats.totalViews ?? 0)}`,
+    ].filter(Boolean).join(' · ')
     : ''
   return `
     <div class="card" data-drama-id="${escapeHtml(item.dramaId)}">
@@ -1480,7 +1485,7 @@ async function renderCategory(type, params = new URLSearchParams(), audience = '
     const adultTagRows = adultMode
       ? adultTags.filter((tag) => !tag.parent_id).map((group) => {
         const children = adultTags.filter((tag) => Number(tag.parent_id) === Number(group.id))
-        return row(group.name, 'tag', children.map((tag) => ({
+        return row(group.label ?? group.name, 'tag', children.map((tag) => ({
           value: tag.id,
           label: tag.label ?? tag.name,
           count: tag.dramaCount,
@@ -1525,7 +1530,7 @@ async function renderCategory(type, params = new URLSearchParams(), audience = '
     grid.innerHTML = items.length
       ? items.map((item) => posterCard(item, { plays: true })).join('')
       : `<div class="empty" style="grid-column:1 / -1">
-           ${hasFilter() ? `没有符合条件的内容 · <button class="btn-ghost sm" id="cat-reset-2">清空筛选</button>` : (adultMode ? '成人分类暂无内容' : '这个分类暂时还没有内容')}
+           ${hasFilter() ? `没有符合条件的内容 · <button class="btn-ghost sm" id="cat-reset-2">清空筛选</button>` : (adultMode ? t('成人分类暂无内容') : '这个分类暂时还没有内容')}
          </div>`
     observeImpressions()
     const reset2 = $('#cat-reset-2')
@@ -2028,18 +2033,18 @@ async function renderDrama(id) {
           <span>${escapeHtml(detail.dramaTypeLabel ?? categoryLabel(detail.dramaType))}</span>
           <span>全 ${detail.episodes.length} 集</span>
           <span>${detail.freeEpisodes > 0 ? `首 ${detail.freeEpisodes} 集免费` : (canSingle ? '单片付费' : '会员专享')}</span>
-          ${detail.isAdult ? `<span>发行 ${escapeHtml(dateOnly(detail.releaseDate))}</span><span>最近更新 ${escapeHtml(dateOnly(detail.updatedAt))}</span>` : ''}
+          ${detail.isAdult ? `<span>${t('发行')} ${escapeHtml(dateOnly(detail.releaseDate))}</span><span>${t('最近更新')} ${escapeHtml(dateOnly(detail.updatedAt))}</span>` : ''}
         </div>
         <div class="detail-desc">${escapeHtml(detail.subTitle ?? '')}<br/>${escapeHtml(detail.description ?? '')}</div>
-        ${adultStats ? `<div class="adult-stat-grid" aria-label="成人内容统计">
-          <div><span>收藏</span><strong>${fmtCount(adultStats.favoriteCount ?? 0)}</strong></div>
-          <div><span>今日浏览</span><strong>${fmtCount(adultStats.todayViews ?? 0)}</strong></div>
-          <div><span>本周浏览</span><strong>${fmtCount(adultStats.weekViews ?? 0)}</strong></div>
-          <div><span>本月浏览</span><strong>${fmtCount(adultStats.monthViews ?? 0)}</strong></div>
-          <div><span>总浏览</span><strong>${fmtCount(adultStats.totalViews ?? 0)}</strong></div>
+        ${adultStats ? `<div class="adult-stat-grid" aria-label="${t('成人内容统计')}">
+          <div><span>${t('收藏数')}</span><strong>${fmtCount(adultStats.favoriteCount ?? 0)}</strong></div>
+          <div><span>${t('今日浏览')}</span><strong>${fmtCount(adultStats.todayViews ?? 0)}</strong></div>
+          <div><span>${t('本周浏览')}</span><strong>${fmtCount(adultStats.weekViews ?? 0)}</strong></div>
+          <div><span>${t('本月浏览')}</span><strong>${fmtCount(adultStats.monthViews ?? 0)}</strong></div>
+          <div><span>${t('总浏览')}</span><strong>${fmtCount(adultStats.totalViews ?? 0)}</strong></div>
         </div>` : ''}
         ${(detail.tags ?? []).length > 0
-          ? `<div class="subtabs">${detail.tags.map((tag) => `<a class="pill" href="${detail.isAdult ? '#/adult' : '#/search'}?tag=${tag.id}">${escapeHtml(tag.name)}</a>`).join('')}</div>`
+          ? `<div class="subtabs">${detail.tags.map((tag) => `<a class="pill" href="${detail.isAdult ? '#/adult' : '#/search'}?tag=${tag.id}">${escapeHtml(tag.label ?? tag.name)}</a>`).join('')}</div>`
           : ''}
         <div class="detail-actions">
           ${cta}
@@ -2048,7 +2053,7 @@ async function renderDrama(id) {
         </div>
       </div>
     </div>
-    <div class="section-head"><h2 class="section-title">选集</h2><div class="section-hint">${(detail.priceInfo?.rules ?? []).length > 0 ? '部分集数单独定价，点开可见具体规则' : detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费，其余需${canSingle ? '购买' : '会员'}` : '需开通权益后观看'}</div></div>
+    <div class="section-head"><h2 class="section-title">选集</h2><div class="section-hint">${(detail.priceInfo?.rules ?? []).length > 0 ? '部分集数单独定价，点开可见具体规则' : detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费，其余需${canSingle ? '购买' : '会员'}` : t('需开通权益后观看')}</div></div>
     <div class="episodes">
       ${episodes.map((episode) => {
         // 可试看的集必须带 ?trial=1，服务端只认这个参数（否则直接 402）
@@ -2059,15 +2064,18 @@ async function renderDrama(id) {
         const rulePrice = Number(episode.rule?.price ?? 0)
         const flatPrice = Number(episode.price ?? 0)
         const hint = episode.allow ? ''
-          : episode.reason === 'vip_required' ? '需会员'
+          : episode.reason === 'vip_required' ? t('需会员')
             : rulePrice > 0 ? `¥${rulePrice.toFixed(2)}`
-              : flatPrice > 0 ? `¥${flatPrice.toFixed(2)}` : '需开通'
-        return `<a class="ep ${episode.allow ? '' : 'locked'}" data-no="${episode.no}" title="${escapeHtml(`第 ${episode.no} 集${hint ? ` · ${hint}` : ''}`)}" href="#/play/${detail.dramaId}/${episode.no}${trial || guest}">
-        ${episode.no}${episode.allow ? '' : ` ${icon('lock', 12)}`}${episode.trialSeconds > 0 ? ' · 试看' : ''}
+              : flatPrice > 0 ? `¥${flatPrice.toFixed(2)}` : t('需开通')
+        const episodeLabel = getLang() === 'en'
+          ? `Episode ${episode.no}${hint ? ` · ${hint}` : ''}`
+          : `第 ${episode.no} 集${hint ? ` · ${hint}` : ''}`
+        return `<a class="ep ${episode.allow ? '' : 'locked'}" data-no="${episode.no}" title="${escapeHtml(episodeLabel)}" href="#/play/${detail.dramaId}/${episode.no}${trial || guest}">
+        ${episode.no}${episode.allow ? '' : ` ${icon('lock', 12)}`}${episode.trialSeconds > 0 ? ` · ${t('试看')}` : ''}
       </a>`
       }).join('')}
     </div>
-    <div class="footer"><span>${escapeHtml(detail.title)} · 共 ${detail.episodes.length} 集</span><span>${detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费` : '需开通权益后观看'}</span></div>`
+    <div class="footer"><span>${escapeHtml(detail.title)} · 共 ${detail.episodes.length} 集</span><span>${detail.freeEpisodes > 0 ? `前 ${detail.freeEpisodes} 集免费` : t('需开通权益后观看')}</span></div>`
 
   $('#play-first')?.addEventListener('click', () => {
     const target = episodes.find((episode) => episode.no === resumeNo)
