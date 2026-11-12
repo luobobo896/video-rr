@@ -5534,7 +5534,7 @@ async function pageMenus() {
           <button class="btn primary" id="menu-new">＋ 新增菜单</button>
         </div>
       </div>
-      <p class="muted">菜单结构不影响角色权限。</p>
+      <p class="muted">目录来自后台数据，新增菜单时可选择已有目录或直接新建；菜单结构不影响角色权限。</p>
       <div class="menu-tree">
         ${groups.map((group) => `
           <details class="menu-tree-group" open>
@@ -5656,36 +5656,67 @@ function openMenuGroupForm(group) {
 }
 
 function openMenuForm({ groups, permOptions, item, group }) {
-  const groupKeys = [...new Set(groups.map((group) => group.key))]
+  const selectedGroupKey = item?.groupKey ?? group?.key ?? groups[0]?.key ?? '__new__'
+  const groupOptions = groups.map((entry) => `
+    <option value="${esc(entry.key)}" ${entry.key === selectedGroupKey ? 'selected' : ''}>
+      ${esc(entry.label)} · ${entry.items.length} 项
+    </option>`).join('')
+  const creatingGroup = selectedGroupKey === '__new__'
   openOverlay(item ? `编辑菜单 · ${item.label}` : '新增菜单', `
     <div class="grid-2">
       <label>菜单名称<input id="mf-label" value="${esc(item?.label ?? '')}" placeholder="如 内容审核" /></label>
       <label>路由<input id="mf-route" value="${esc(item?.route ?? '/')}" placeholder="/review" /></label>
-      <label>所属分组（键）<input id="mf-group-key" value="${esc(item?.groupKey ?? group?.key ?? '')}" list="mf-groups" placeholder="system" /></label>
-      <label>分组名称<input id="mf-group-label" value="${esc(item?.groupLabel ?? group?.label ?? '')}" placeholder="系统设置" /></label>
-      <label>分组排序<input id="mf-group-sort" type="number" value="${item?.groupSort ?? group?.sort ?? 90}" /></label>
+      <label>所属目录
+        <select id="mf-group-select" aria-describedby="mf-group-hint">
+          ${groupOptions}
+          <option value="__new__" ${creatingGroup ? 'selected' : ''}>＋ 新建目录…</option>
+        </select>
+      </label>
       <label>菜单内排序<input id="mf-sort" type="number" value="${item?.sort ?? 10}" /></label>
-      <label>所需权限<select id="mf-perm">
+      <label class="span-2">所需权限<select id="mf-perm">
         <option value="">登录即可见</option>
         ${permOptions.map((perm) => `<option value="${esc(perm.code)}" ${item?.permCode === perm.code ? 'selected' : ''}>${esc(perm.code)} · ${esc(perm.name)}</option>`).join('')}
       </select></label>
     </div>
-    <datalist id="mf-groups">${groupKeys.map((key) => `<option value="${esc(key)}"></option>`).join('')}</datalist>
-    <p class="muted small">侧栏菜单只显示文字，不显示图标。</p>
+    <div id="mf-new-group" class="grid-2 ${creatingGroup ? '' : 'hidden'}">
+      <label>新目录名称<input id="mf-new-label" value="${esc(item?.groupLabel ?? group?.label ?? '')}" placeholder="如 客服工具" /></label>
+      <label>目录排序<input id="mf-new-sort" type="number" value="${item?.groupSort ?? group?.sort ?? 90}" /></label>
+    </div>
+    <p class="muted small" id="mf-group-hint">目录由后台数据动态生成，可在此新建；保存首个子菜单后目录即生效，侧栏会显示图标与名称。</p>
     <label class="check-item" style="margin-top:10px"><input type="checkbox" id="mf-visible" ${item?.visible === false ? '' : 'checked'} /><span>在侧栏显示</span></label>
   `, (body) => {
+    const groupSelect = body.querySelector('#mf-group-select')
+    const newGroupFields = body.querySelector('#mf-new-group')
+    const syncGroupMode = () => {
+      const creating = groupSelect.value === '__new__'
+      newGroupFields.classList.toggle('hidden', !creating)
+      if (creating) body.querySelector('#mf-new-label')?.focus()
+    }
+    groupSelect.addEventListener('change', syncGroupMode)
     const foot = document.createElement('div')
     foot.className = 'modal-foot'
     foot.innerHTML = '<button class="btn" data-cancel>取消</button><button class="btn primary" id="mf-save">保存</button>'
     body.appendChild(foot)
     foot.querySelector('[data-cancel]').addEventListener('click', () => body.closest('.modal-mask').remove())
     foot.querySelector('#mf-save').addEventListener('click', async () => {
+      const selectedGroup = groups.find((entry) => entry.key === groupSelect.value)
+      const creating = groupSelect.value === '__new__'
+      const groupLabel = creating
+        ? body.querySelector('#mf-new-label').value.trim()
+        : selectedGroup?.label
+      if (!creating && !selectedGroup) return toast('请选择所属目录')
+      if (creating && !groupLabel) return toast('请填写新目录名称')
+      if (creating && groups.some((entry) => entry.label === groupLabel)) {
+        return toast('已有同名目录，请直接选择')
+      }
       const payload = {
         label: body.querySelector('#mf-label').value.trim(),
         route: body.querySelector('#mf-route').value.trim(),
-        groupKey: body.querySelector('#mf-group-key').value.trim(),
-        groupLabel: body.querySelector('#mf-group-label').value.trim(),
-        groupSort: Number(body.querySelector('#mf-group-sort').value) || 0,
+        groupKey: creating ? `custom-${Date.now().toString(36)}` : selectedGroup.key,
+        groupLabel,
+        groupSort: creating
+          ? Number(body.querySelector('#mf-new-sort').value) || 0
+          : selectedGroup.sort,
         sort: Number(body.querySelector('#mf-sort').value) || 0,
         icon: item?.icon ?? '',
         permCode: body.querySelector('#mf-perm').value,

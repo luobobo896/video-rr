@@ -378,6 +378,9 @@ textarea {
   background: transparent;
 }
 #nav.admin-menu .el-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   height: 38px;
   min-width: 0;
   margin: 1px 0;
@@ -402,6 +405,9 @@ textarea {
   height: 16px;
   flex: 0 0 16px;
   color: var(--text-3);
+}
+#nav.admin-menu .el-menu-item > span {
+  min-width: 0;
 }
 #nav.admin-menu .el-menu-item:hover .nav-icon {
   color: var(--text-2);
@@ -924,6 +930,9 @@ table select:focus {
   flex-wrap: wrap;
   margin-bottom: 16px;
 }
+.modal-body .grid-2 > .span-2 {
+  grid-column: 1 / -1;
+}
 table input,
 table select {
   height: 32px;
@@ -1139,6 +1148,7 @@ table select {
     gap: 4px;
   }
   #nav.admin-menu .el-menu-item {
+    gap: 8px;
     width: auto;
     height: 40px;
     min-height: 40px;
