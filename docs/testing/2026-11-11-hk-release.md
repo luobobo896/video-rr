@@ -193,3 +193,50 @@ systemctl start video-rr
 ```
 
 回滚后检查 `/video/`、`/video-admin/`、`/video/api/constants`、成人标签接口与未签名 HLS 403。
+
+---
+
+## 10:44 成人页中英文切换修复发布（2026-11-12）
+
+### 发布信息
+
+- Git 提交：`a56e61b`（`codex/adult-menu`）
+- 时间：2026-11-12 10:44 CST
+- 发布包：`mh-deploy-20261112-104212.tgz`
+- SHA256：`5a7c9cbf5a783370da7b0289aebf419b30f92c1244a03e03ad74e9deee145c6f`
+- 远端上传：`/tmp/mh-deploy-20261112-104212.tgz`，SHA256 与本地一致。
+- 发布前源码备份：`/opt/video-rr/storage/backup/source-20261112-104325.tgz`
+- 发布前数据库备份：`/opt/video-rr/storage/backup/app.db.20261112-104325`；安装脚本另备份 `app.db.20261112-104445`。
+
+### 变更
+
+- 前端 API 请求追加 `lang` 参数，公开缓存响应增加 `Vary: x-mh-lang`，修复切换语言后复用中文缓存。
+- 补全 8 个成人标签分组和 111 个默认标签的英文名，标签接口和剧集详情返回当前语言的 `label`。
+- 成人卡片统计、详情统计、发行/更新时间、选集提示和剧集悬停文案改为显式翻译。
+
+### 验收结果
+
+- `video-rr`：`active`，`NRestarts=0`，启动时间 `2026-11-12 10:44:58 CST`。
+- `/video/`、`/video-admin/`、`/video/api/constants`：200；未签名 HLS：403。
+- `/video/api/home?lang=en`：`Vary: Accept-Encoding, x-mh-lang`，横幅返回 `Anime / Netherlands` 等英文标签。
+- `/video/api/tags?scope=adult&lang=en`：`衣著 -> Clothing`、`漁網 -> Fishnet`、`Cosplay -> Cosplay`、`雜項 -> Misc`。
+- 线上 C 端资源：`index-ClPYrlmk.js`、`index-D4OzJIxu.css`，与本地构建一致。
+- `journalctl -u video-rr --since '5 min ago' -p err`：无记录。
+- 磁盘：76% 使用，剩余约 12G。
+
+### 发布备注
+
+- Windows 工作区检出的 `deploy/*.sh`、`*.conf`、`*.service` 带 CRLF，远端首次执行时报 `set: pipefail` 非法；已在服务器转换为 LF 后重新执行安装脚本。发布后补 `.gitattributes` 固定这三类文件为 LF，避免下次发布重复处理。
+
+### 回滚
+
+```bash
+cd /opt/video-rr
+systemctl stop video-rr
+tar -xzf storage/backup/source-20261112-104325.tgz
+cp storage/backup/app.db.20261112-104325 storage/app.db
+cp storage/backup/app.db.20261112-104325-wal storage/app.db-wal 2>/dev/null || true
+systemctl start video-rr
+```
+
+回滚后检查 `/video/`、`/video-admin/`、`/video/api/constants`、`/video/api/tags?scope=adult&lang=en` 与未签名 HLS 403。
