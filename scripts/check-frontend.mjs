@@ -5,7 +5,7 @@
  * 不是完整 AST 检查器：忽略字符串/注释/模板文本，覆盖函数声明、变量、
  * import 与常见参数形态；动态构造函数调用若无法静态确认，会给出显式告警。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -24,14 +24,36 @@ const FILES = [
 ]
 const VERSION_FILES = [...FILES, 'public/index.html', 'admin/index.html']
 const STYLE_FILES = ['public/styles.css', 'public/poster-wall.css', 'admin/styles.css']
-const VUE_FILES = [
-  'public/LegacyHost.vue',
-  'public/components/AppSidebar.vue',
-  'public/components/AppTopbar.vue',
-  'admin/LegacyHost.vue',
-  'admin/components/AdminLogin.vue',
-  'admin/components/AdminNav.vue',
-]
+const VUE_FILES = []
+function collectVueFiles(dir) {
+  for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist') continue
+    const relative = join(dir, entry.name)
+    if (entry.isDirectory()) collectVueFiles(relative)
+    else if (entry.name.endsWith('.vue')) VUE_FILES.push(relative)
+  }
+}
+collectVueFiles('.')
+/** Element Plus 受控输入组件：没有 v-model/:model-value 时，用户输入会被组件重置。 */
+const MODEL_REQUIRED = new Set([
+  'el-input',
+  'el-input-number',
+  'el-autocomplete',
+  'el-select',
+  'el-cascader',
+  'el-date-picker',
+  'el-time-picker',
+  'el-time-select',
+  'el-color-picker',
+  'el-slider',
+  'el-rate',
+  'el-switch',
+  'el-checkbox-group',
+  'el-radio-group',
+  'el-segmented',
+  'el-upload',
+  'el-transfer',
+])
 
 const KEYWORDS = new Set([
   'if', 'for', 'while', 'switch', 'catch', 'with', 'function', 'return', 'typeof', 'void',
@@ -102,6 +124,27 @@ function stripCommentsAndStrings(source) {
 
 function identifiersIn(text) {
   return [...String(text).matchAll(/[A-Za-z_$][\w$]*/g)].map((match) => match[0])
+}
+
+function openingElementTags(source) {
+  const tags = []
+  for (const match of source.matchAll(/<(el-[a-z0-9-]+)\b/g)) {
+    let i = match.index + match[0].length
+    let quote = ''
+    while (i < source.length) {
+      const ch = source[i]
+      if (quote) {
+        if (ch === quote) quote = ''
+      } else if (ch === '"' || ch === "'") {
+        quote = ch
+      } else if (ch === '>') {
+        break
+      }
+      i += 1
+    }
+    tags.push({ tag: match[1], attrs: source.slice(match.index + match[0].length, i) })
+  }
+  return tags
 }
 
 function collectDeclared(source, code) {
@@ -204,6 +247,12 @@ for (const file of VUE_FILES) {
     if (imported.has(component)) continue
     failed = true
     console.error(`${file}: 模板使用 <${tag}> 但未从 element-plus 导入 ${component}`)
+  }
+  for (const { tag, attrs } of openingElementTags(source)) {
+    if (!MODEL_REQUIRED.has(tag)) continue
+    if (/(^|\s)(v-model(?::[\w-]+)?|:model-value|model-value)\s*=/.test(attrs)) continue
+    failed = true
+    console.error(`${file}: <${tag}> 缺少 v-model 或 :model-value 绑定，用户输入会被重置`)
   }
   if (file === 'public/components/AppSidebar.vue') {
     const groups = source.match(/const groups = computed\(\(\) => \{[\s\S]*?\n\}\)/)
