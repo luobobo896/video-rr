@@ -75,12 +75,13 @@ npm test
 
 ## HK 发布记录
 
-- 发布包：`mh-deploy-20261112-175834.tgz`
-- SHA256：`94c6b2b2cd4b6373071c61bc21aca7cb68c7c4b7e1df8f2b7af1c5ce8f211f94`
+- Git 提交：`c9255d7`
+- 发布包：`mh-deploy-20261112-180257.tgz`
+- SHA256：`b9665ef3d8c666f6dbd3dc741d8c0233196d5d86771b1a1822afe04db701af68`
 - 线上 C 端：`assets/index-BjxoIXDY.js`、`assets/index-Cy93oXEe.css`
 - 线上后台：`assets/index-CWkBn2x1.js`、`assets/index-B-sl00SF.css`
 - 发布前源码备份：`/opt/video-rr/storage/backup/source-20261112-175122.tgz`
-- 发布前数据库备份：`/opt/video-rr/storage/backup/app.db.20261112-175858`
+- 发布前数据库备份：`/opt/video-rr/storage/backup/app.db.20261112-180344`
 - 服务：`video-rr` 为 `active`，`NRestarts=0`
 - `/video/`、`/video-admin/`、浏览器 UA 下的 `/video/api/constants`：200
 - 未签名 HLS：403
