@@ -921,7 +921,9 @@ export async function handlePublic(pathname, url, req, res) {
       }
       const danmu = all("SELECT time_ms, content FROM danmus WHERE episode_id = ? AND status = 'approved' ORDER BY time_ms", episode.id)
       // 续播：该用户在该集的已看进度；连播：下一集集号（同剧存在即给）
-      const resume = one('SELECT position FROM history WHERE user_id = ? AND drama_id = ? AND episode_no = ?', userId, dramaId, no)
+      const resume = userId
+        ? one('SELECT position FROM history WHERE user_id = ? AND drama_id = ? AND episode_no = ?', userId, dramaId, no)
+        : undefined
       const nextEp = one("SELECT no FROM episodes WHERE drama_id = ? AND no > ? AND status != 'merged' ORDER BY no LIMIT 1", dramaId, no)
       return send(res, {
         dramaId, title: drama.title, episodeId: episode.id, episodeStatus: episode.status,

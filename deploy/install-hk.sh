@@ -39,8 +39,10 @@ else
   exit 1
 fi
 npm run build
+npm run build:redesign
 [ -s dist/client/index.html ] || { echo "C 端构建产物缺失"; exit 1; }
 [ -s dist/admin/index.html ] || { echo "后台构建产物缺失"; exit 1; }
+[ -s dist/redesign/index.html ] || { echo "改版前端构建产物缺失"; exit 1; }
 
 # Redis：限流滑动窗口。未安装则装上并只监听回环；装不上也不阻塞（服务自动降级为进程内内存）
 if command -v redis-server >/dev/null; then
@@ -167,12 +169,17 @@ for path in /video/ /video-admin/ /video/api/constants; do
   code=$(curl -sk -A "$BROWSER_UA" -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN$path")
   printf '  %-24s %s\n' "$path" "$code"
 done
+for path in /video-redesign/; do
+  code=$(curl -sk -A "$BROWSER_UA" -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN$path")
+  printf '  %-24s %s\n' "$path" "$code"
+done
 curl -fsS -A "$BROWSER_UA" "http://127.0.0.1:$APP_PORT/" | grep -q 'id="vue-root"' || { echo "C 端未加载 Vue 构建产物"; exit 1; }
 curl -fsS -A "$BROWSER_UA" "http://127.0.0.1:$APP_PORT/admin/" | grep -q 'id="vue-root"' || { echo "后台未加载 Vue 构建产物"; exit 1; }
 unsigned=$(curl -sk -A "$BROWSER_UA" -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/video/media/hls/1/index.m3u8")
 printf '  %-24s %s（应为 403）\n' 'unsigned hls' "$unsigned"
 echo
 echo "完成：C 端 https://$DOMAIN/video/   后台 https://$DOMAIN/video-admin/"
+echo "改版审核：https://$DOMAIN/video-redesign/"
 CRED="$APP/storage/admin-initial-passwords.txt"
 if [ -f "$CRED" ]; then
   echo "后台初始口令：$CRED（0600，首次登录强制改密；改完请删除该文件）"

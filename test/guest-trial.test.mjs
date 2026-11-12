@@ -12,6 +12,7 @@ process.env.MH_LINK_SECRET = 'test-link-secret-0123456789'
 let db
 let api
 let dramaId
+let freeDramaId
 
 function fakeResponse() {
   const headers = new Map()
@@ -46,6 +47,10 @@ before(async () => {
   db.prepare("INSERT INTO episodes (drama_id, no, title, duration, status, hls_path) VALUES (?, 1, '第 1 集', 60, 'ready', ?)")
     .run(dramaId, `/media/hls/${dramaId}/index.m3u8`)
   db.prepare("INSERT INTO content_policies (drama_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours) VALUES (?, 'paid', 0, 300, 6, 'single', 72)").run(dramaId)
+  freeDramaId = Number(db.prepare("INSERT INTO dramas (title, category, status) VALUES ('游客免费集测试', 'TV', 'published')").run().lastInsertRowid)
+  db.prepare("INSERT INTO episodes (drama_id, no, title, duration, status, hls_path) VALUES (?, 1, '第 1 集', 60, 'ready', ?)")
+    .run(freeDramaId, `/media/hls/${freeDramaId}/index.m3u8`)
+  db.prepare("INSERT INTO content_policies (drama_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours) VALUES (?, 'free', 1, 0, 0, 'single', 72)").run(freeDramaId)
 })
 
 after(() => { try { db?.close() } catch { /* ignore */ } })
@@ -71,4 +76,18 @@ test('游客试看缺少访客标识时拒绝', async () => {
   const result = await callTrial('')
   assert.equal(result.status, 400)
   assert.match(result.msg, /访客/)
+})
+
+test('游客播放免费集不再查空用户观看进度', async () => {
+  const res = fakeResponse()
+  const req = {
+    method: 'GET',
+    headers: { 'user-agent': 'node-test', 'x-mh-visitor': 'visitor-free-test' },
+    socket: { remoteAddress: '127.0.0.1' },
+  }
+  await api.handlePublic(`/api/play/${freeDramaId}/1`, new URL(`http://localhost/api/play/${freeDramaId}/1?trial=1`), req, res)
+  const body = JSON.parse(res.rawBody)
+  assert.equal(res.status, 200, body.msg)
+  assert.equal(body.data.source, 'free')
+  assert.equal(body.data.resumePosition, 0)
 })

@@ -92,6 +92,22 @@ nginx：`/video/` 静态、`/video/api/` 反代、`/video/media/hls/` 走 `secur
 播放签名密钥在 `.env` 的 `MH_LINK_SECRET`，安装脚本注入 nginx。
 不要直接 `git pull` 发布：当前修复可能仍在工作区，远程 HEAD 不一定包含它们。
 
+## Vue 视觉改版（真实接口）
+
+`web-redesign/` 是独立 Vue 入口，直接复用现有 `/api` 与 `/admin/api`：
+
+```bash
+npm run dev:redesign      # http://127.0.0.1:5175
+npm run build:redesign    # 输出 dist/redesign
+npm run preview:redesign  # http://127.0.0.1:4175
+```
+
+本地开发需要同时运行 `npm run start:server`。登录态沿用 `mh-token` /
+`mh-admin-token`；生产环境沿用 `window.__MH_BASE` 或
+`VITE_PUBLIC_API_BASE`、`VITE_ADMIN_API_BASE`、`VITE_MEDIA_BASE` 覆盖接口与媒体前缀。
+HK 审核入口：<https://hk.hsddns.com/video-redesign/>，现有 `/video/` 与
+`/video-admin/` 不受影响；后台改版入口为同一路径下的 `#/admin/login`。
+
 ## 容量
 
 实测出口 **19 Mbps**（1000 人 480p 需 850 Mbps），单机约 22 人 480p。软件并发已验证 1000/3000 连接 0 错误。
