@@ -240,3 +240,46 @@ systemctl start video-rr
 ```
 
 回滚后检查 `/video/`、`/video-admin/`、`/video/api/constants`、`/video/api/tags?scope=adult&lang=en` 与未签名 HLS 403。
+
+---
+
+## 11:52 后台登录输入修复发布（2026-11-12）
+
+### 发布信息
+
+- Git 提交：`5a8a09f`（`main`）
+- 时间：2026-11-12 11:53 CST
+- 发布包：`mh-deploy-20261112-115221.tgz`
+- SHA256：`94839e1c43bb8d91053114a08f94ac513e38dec29498a459e221510fd3d9bf5b`
+- 远端上传：`/tmp/mh-deploy-20261112-115221.tgz`，SHA256 与本地一致。
+- 发布前源码备份：`/opt/video-rr/storage/backup/source-20261112-115251.tgz`
+- 发布前数据库备份：`/opt/video-rr/storage/backup/app.db.20261112-115303`
+
+### 变更
+
+- 后台登录/改密输入框改回原生 `input`，修复 Element Plus 受控组件未绑定 `v-model` 导致输入值被重置。
+- `check-frontend` 自动扫描全部 `.vue`，对 Element Plus 受控输入组件强制检查 `v-model` / `:model-value`，漏绑直接失败。
+- `main` 已合并 `codex/adult-menu` 全部已发布提交，并删除该分支（本地与远端）。
+
+### 验收结果
+
+- `video-rr`：`active/running`，`NRestarts=0`，启动时间 `2026-11-12 11:53:16 CST`。
+- `/video/`、`/video-admin/`、`/video/api/constants`：200；未签名 HLS：403。
+- 后台资源为 `index-Ch4dnKji.js`，与本地构建一致。
+- 线上后台实测账号框输入 `inputcheck`、密码框输入 10 位均保留，无 JS error（未提交登录）。
+- `journalctl -u video-rr --since '10 min ago'`：未发现 error/exception/failed/panic。
+- 磁盘：76% 使用，剩余约 12G。
+- `READONLY=1 bash deploy/verify-hk.sh` 第 1–2 节通过；第 3 节因线上 `admin` 口令已非初始口令而停止，未继续执行写操作。
+
+### 回滚
+
+```bash
+cd /opt/video-rr
+systemctl stop video-rr
+tar -xzf storage/backup/source-20261112-115251.tgz
+cp storage/backup/app.db.20261112-115303 storage/app.db
+cp storage/backup/app.db.20261112-115303-wal storage/app.db-wal 2>/dev/null || true
+systemctl start video-rr
+```
+
+回滚后检查 `/video/`、`/video-admin/`、`/video/api/constants` 与未签名 HLS 403。
