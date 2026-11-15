@@ -1277,7 +1277,6 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
   color: #fff;
 }
 .hero-arrow .icon { width: 14px; height: 14px; }
-.hero-arrow.prev .icon { transform: rotate(180deg); }
 .hero-arrow:hover { background: rgba(8, 9, 12, 0.72); border-color: rgba(255, 255, 255, 0.38); }
 
 .poster-toolbar {

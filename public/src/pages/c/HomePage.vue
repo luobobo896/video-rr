@@ -140,6 +140,7 @@ function selectBanner(index) {
 
 function togglePause() {
   paused.value = !paused.value;
+  if (!paused.value) interactionPaused.value = false;
   syncCarousel();
 }
 
