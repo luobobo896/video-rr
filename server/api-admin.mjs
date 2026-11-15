@@ -66,6 +66,13 @@ const paging = (url, fallbackSize = 20) => {
   return { page, pageSize, offset: (page - 1) * pageSize }
 }
 
+const pageWindow = (url, total, fallbackSize = 20) => {
+  const { page, pageSize } = paging(url, fallbackSize)
+  const pages = Math.max(1, Math.ceil(total / pageSize))
+  const safePage = Math.min(page, pages)
+  return { page: safePage, pageSize, offset: (safePage - 1) * pageSize }
+}
+
 const MISSING_LABEL = {
   title: '标题', category: '内容类型', coverUrl: '封面', year: '年份',
   area: '地区', score: '评分', accessMode: '付费模式',
@@ -1352,12 +1359,15 @@ const deny = (perm) => {
   /* ---------- 订单 / 退款 / 对账 ---------- */
   if (pathname === '/admin/api/orders' && method === 'GET') {
     if (!guard(PERM.orders)) return deny(PERM.orders)
-    const { page, pageSize, offset } = paging(url, 20)
     const status = url.searchParams.get('status') || undefined
     const q = url.searchParams.get('q') || undefined
+    const sort = url.searchParams.get('sort') || 'id'
+    const dir = url.searchParams.get('dir') === 'asc' ? 'asc' : 'desc'
+    const total = countOrders({ status, q })
+    const { page, pageSize, offset } = pageWindow(url, total, 20)
     return send(res, {
-      list: listOrders({ status, q, limit: pageSize, offset }),
-      page, pageSize, total: countOrders({ status, q }),
+      list: listOrders({ status, q, sort, dir, limit: pageSize, offset }),
+      page, pageSize, total,
     })
   }
 
@@ -1539,8 +1549,37 @@ const deny = (perm) => {
   /* ---------- 用户 / 客服 ---------- */
   if (pathname === '/admin/api/users' && method === 'GET') {
     if (!guard(PERM.users)) return deny(PERM.users)
-    const { page, pageSize, offset } = paging(url, 20)
-    const total = Number(one('SELECT COUNT(*) AS n FROM users')?.n ?? 0)
+    const keyword = String(url.searchParams.get('q') ?? '').trim()
+    const status = String(url.searchParams.get('status') ?? '')
+    if (status && !['active', 'banned'].includes(status)) return send(res, {}, '0400', '无效用户状态', 400)
+    const sortColumns = {
+      id: 'u.id',
+      email: 'u.email',
+      nickname: 'u.nickname',
+      status: 'u.status',
+      created_at: 'u.created_at',
+      last_login_at: 'u.last_login_at',
+      vip_until: 'vip_until',
+      order_count: 'order_count',
+      paid_total: 'paid_total',
+    }
+    const sortKey = url.searchParams.get('sort')
+    const sort = sortKey && Object.hasOwn(sortColumns, sortKey) ? sortColumns[sortKey] : sortColumns.id
+    const direction = url.searchParams.get('dir') === 'asc' ? 'ASC' : 'DESC'
+    const clauses = []
+    const args = []
+    if (keyword) {
+      clauses.push('(u.email LIKE ? OR u.nickname LIKE ?)')
+      const like = `%${keyword}%`
+      args.push(like, like)
+    }
+    if (status) {
+      clauses.push('u.status = ?')
+      args.push(status)
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const total = Number(one(`SELECT COUNT(*) AS n FROM users u ${where}`, ...args)?.n ?? 0)
+    const { page, pageSize, offset } = pageWindow(url, total, 20)
     return send(res, {
       page, pageSize, total,
       list: all(`SELECT u.id, u.email, u.nickname, u.avatar, u.birthday, u.gender, u.bio,
@@ -1548,7 +1587,7 @@ const deny = (perm) => {
         (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS order_count,
         (SELECT COALESCE(SUM(amount_cny),0) FROM orders o WHERE o.user_id = u.id AND o.status IN ('paid','fulfilled')) AS paid_total,
         (SELECT datetime(valid_to) FROM subscriptions s WHERE s.user_id = u.id AND s.status = 'active' ORDER BY datetime(valid_to) DESC LIMIT 1) AS vip_until
-        FROM users u ORDER BY u.id DESC LIMIT ? OFFSET ?`, pageSize, offset)
+        FROM users u ${where} ORDER BY ${sort} ${direction}, u.id DESC LIMIT ? OFFSET ?`, ...args, pageSize, offset)
         .map((row) => ({ ...row, kind: 'user', kindLabel: 'C 端用户' })),
     })
   }

@@ -566,12 +566,22 @@ export function commerceStats() {
   }
 }
 
-export function listOrders({ limit = 100, offset = 0, status, userId, q } = {}) {
+export function listOrders({ limit = 100, offset = 0, status, userId, q, sort = 'id', dir = 'desc' } = {}) {
   const { where, args } = orderWhere({ status, userId, q })
+  const sortColumns = {
+    id: 'o.id',
+    out_trade_no: 'o.out_trade_no',
+    amount_cny: 'o.amount_cny',
+    status: 'o.status',
+    created_at: 'o.created_at',
+    paid_at: 'o.paid_at',
+  }
+  const orderBy = Object.hasOwn(sortColumns, sort) ? sortColumns[sort] : sortColumns.id
+  const direction = dir === 'asc' ? 'ASC' : 'DESC'
   return all(`SELECT o.*, u.nickname, u.phone, p.name AS plan_name, d.title AS drama_title
     FROM orders o LEFT JOIN users u ON u.id = o.user_id
     LEFT JOIN plans p ON p.id = o.plan_id LEFT JOIN dramas d ON d.id = o.drama_id
-    ${where} ORDER BY o.id DESC LIMIT ? OFFSET ?`,
+    ${where} ORDER BY ${orderBy} ${direction}, o.id DESC LIMIT ? OFFSET ?`,
   ...args, Math.min(300, Number(limit) || 100), Math.max(0, Number(offset) || 0))
 }
 

@@ -762,15 +762,6 @@ table input:focus, table select:focus {
     height: 44px;
   }
   .panel { overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
-  .panel table td.row-actions {
-    position: sticky;
-    right: 0;
-    z-index: 3;
-    padding-left: 12px;
-    background: var(--panel);
-    box-shadow: -12px 0 18px color-mix(in oklab, var(--bg) 70%, transparent);
-  }
-  .panel table tr:hover td.row-actions { background: var(--panel); }
   .pager { flex-wrap: wrap; align-items: flex-start; }
   .pager-summary { flex: 1 1 100%; }
   .pager-pages { width: 100%; }

@@ -21,6 +21,7 @@
     "check:tokens": "node scripts/sync-tokens.mjs --check",
     "check:frontend": "node --check public/base.js && node --check public/main.js && node --check public/app.js && node --check public/i18n.js && node --check public/track-match.js && node --check public/poster-wall-view.js && node --check public/qr-code.js && node --check admin/base.js && node --check admin/main.js && node --check admin/app.js && node scripts/check-frontend.mjs",
     "check": "npm run check:tokens && npm run check:frontend",
+    "test:admin:browser": "node scripts/admin-smoke.mjs",
     "test": "npm run check:tokens && node --test \"test/*.test.mjs\"",
     "seed": "node server/index.mjs"
   },

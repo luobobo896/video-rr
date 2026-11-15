@@ -87,10 +87,12 @@
 | POST | `/admin/api/comments/:id/approve|reject` | 审核评论 |
 
 ## 用户与订单
-| GET | `/admin/api/users?page=1&pageSize=20` | 用户分页（邮箱/昵称/VIP/到期），返回 `{list,page,pageSize,total}` |
-| GET | `/admin/api/orders?page=1&pageSize=20&status=` | 订单分页，返回 `{list,page,pageSize,total}` |
+| GET | `/admin/api/users?page=1&pageSize=20&q=&status=&sort=&dir=` | 用户分页（邮箱/昵称/VIP/到期），`q` 搜邮箱或昵称，`status=active|banned`；`sort` 只接受白名单字段，`dir=asc|desc` |
+| GET | `/admin/api/orders?page=1&pageSize=20&q=&status=&sort=&dir=` | 订单分页；`q` 搜单号/用户/商品，`sort` 支持 `id/out_trade_no/amount_cny/status/created_at/paid_at` |
 | POST | `/admin/api/orders` | 新建订单 `{userId,sku,amount}` |
 | POST | `/admin/api/orders/:id/pay` | 标记已支付并给用户开 365 天 VIP |
+
+两个列表都在服务端计算 `total` 并夹紧越界页码，返回 `{list,page,pageSize,total}`。
 
 ## 审计
 | GET | `/admin/api/audit?page=1&pageSize=20&action=` | 审计分页，返回 `{list,page,pageSize,total}` |

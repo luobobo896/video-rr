@@ -1,5 +1,10 @@
 /** 影巢运营后台（原生 ESM，无构建）。 */
+import { createApp } from 'vue'
 import { adminUi } from './ui.js'
+import { pageNumbers } from './table-state.js'
+import AdminOrdersPage from './components/AdminOrdersPage.vue'
+import AdminProfilePage from './components/AdminProfilePage.vue'
+import AdminUsersPage from './components/AdminUsersPage.vue'
 
 const BASE = window.__MH_BASE || ''
 const SITE_BASE = BASE.replace(/-admin$/, '')
@@ -113,6 +118,7 @@ const state = { token: localStorage.getItem('mh-admin-token') ?? '', page: 'dash
 let apiSignal = null
 let routeSeq = 0
 let routeController = null
+let pageApp = null
 
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
 const fmt = (n) => (typeof n === 'number' ? n.toLocaleString('zh-CN') : n ?? '—')
@@ -185,6 +191,47 @@ async function api(path, options = {}) {
 function clearTimers() {
   for (const timer of state.timers) clearInterval(timer)
   state.timers = []
+}
+
+function unmountPageApp() {
+  if (!pageApp) return
+  pageApp.unmount()
+  pageApp = null
+}
+
+function mountPageApp(component, props) {
+  unmountPageApp()
+  view.innerHTML = ''
+  pageApp = createApp(component, props)
+  pageApp.mount(view)
+}
+
+function setFieldError(input, message) {
+  if (!input) return
+  const id = input.id ? `err-${input.id}` : ''
+  let node = id
+    ? document.getElementById(id)
+    : (input.nextElementSibling?.classList.contains('field-error') ? input.nextElementSibling : null)
+  if (!node) {
+    node = document.createElement('p')
+    if (id) node.id = id
+    node.className = 'field-error'
+    node.setAttribute('role', 'alert')
+    input.insertAdjacentElement('afterend', node)
+  }
+  node.textContent = message
+  input.setAttribute('aria-invalid', 'true')
+  if (id) input.setAttribute('aria-describedby', id)
+}
+
+const isStrongBasicPassword = (value) => value.length >= 8 && /[A-Za-z]/.test(value) && /\d/.test(value)
+
+function clearFieldError(input) {
+  if (!input) return
+  input.removeAttribute('aria-invalid')
+  input.removeAttribute('aria-describedby')
+  const node = input.nextElementSibling
+  if (node?.classList.contains('field-error')) node.remove()
 }
 
 const OVERLAY_FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
@@ -479,6 +526,7 @@ async function logout() {
   routeController?.abort()
   clearTimers()
   closeAllOverlays()
+  unmountPageApp()
   state.token = ''
   state.me = undefined
   localStorage.removeItem('mh-admin-token')
@@ -581,9 +629,64 @@ function closeAllOverlays() {
   syncOverlayInert()
 }
 
+function finishRoute(seq) {
+  if (seq !== routeSeq) return
+  if (!pageApp) apiSignal = null
+  setRouteBusy(false)
+}
+
+function skeletonMarkup() {
+  return `<div class="skeleton-page" role="status" aria-live="polite">
+    <span class="sr-only">正在加载页面</span>
+    <div class="skeleton-title"></div>
+    <div class="skeleton-subtitle"></div>
+    <div class="skeleton-cards">
+      <span></span><span></span><span></span><span></span>
+    </div>
+    <div class="skeleton-panel">
+      <span></span><span></span><span></span><span></span><span></span>
+    </div>
+  </div>`
+}
+
+function renderErrorPage({ code, title, message, retry }) {
+  const topRight = $('#top-right')
+  if (topRight) topRight.innerHTML = ''
+  view.innerHTML = `<section class="error-page" role="alert">
+    <span class="error-code">${esc(code)}</span>
+    <h2>${esc(title)}</h2>
+    <p>${esc(message)}</p>
+    <div class="error-actions">
+      ${retry ? '<button class="btn primary" type="button" id="retry-page">重试</button>' : ''}
+      <a class="btn" href="#/dashboard">返回数据概览</a>
+    </div>
+  </section>`
+  if (retry) $('#retry-page')?.addEventListener('click', retry)
+}
+
+function mountAdminDataPage(component) {
+  mountPageApp(component, {
+    api,
+    toast,
+    fmt,
+    fmtTs,
+    permissions: state.me?.permissions ?? [],
+    openUserPasswordEditor,
+    askText,
+    showNotice,
+    openOrderDetail,
+    askConfirm,
+  })
+}
+
+const STANDALONE_PAGES = {
+  profile: { label: '个人设置' },
+}
+
 async function route() {
   // 页面级导航必须收掉上一页的弹层，否则弹窗会悬浮在新页面上并可能提交到错误上下文。
   closeAllOverlays()
+  unmountPageApp()
   const seq = ++routeSeq
   routeController?.abort()
   const controller = new AbortController()
@@ -603,10 +706,23 @@ async function route() {
   if (window.scrollY > 0) window.scrollTo(0, 0)
   const flat = navFlat()
   const navItem = flat.find(([id]) => id === state.page)
-  const key = navItem ? state.page : 'dashboard'
-  const perm = (flat.find(([id]) => id === key) ?? [])[2]
+  const standalone = STANDALONE_PAGES[state.page]
+  const key = (navItem || standalone) ? state.page : ''
+  const perm = navItem?.[2] ?? ''
   const perms = new Set(state.me?.permissions ?? [])
-  $('#page-title').textContent = flat.find(([id]) => id === key)?.[1] ?? key
+  $('#page-title').textContent = navItem?.[1] ?? standalone?.label ?? '页面不存在'
+  if (!key) {
+    highlightNav()
+    adminUi.active = ''
+    renderErrorPage({
+      code: '404',
+      title: '页面不存在',
+      message: `没有找到“${state.page || '空地址'}”对应的后台页面，请从侧栏重新进入。`,
+    })
+    finishRoute(seq)
+    return
+  }
+  if (standalone && topRight) topRight.innerHTML = ''
   // 切页只更新高亮；目标页在折叠分组里时才重绘一次展开状态（避免每次导航都重建侧栏）
   const activeGroup = navGroups().find((group) => group.items.some(([id]) => id === key))
   const open = readOpenGroups()
@@ -618,15 +734,15 @@ async function route() {
   highlightNav()
   // 页面级权限守卫：菜单已经按权限隐藏，手改 hash 时也不发请求、不渲染空表
   if (!hasPerm(perm, perms)) {
-    view.innerHTML = `<div class="card empty-card"><h3>无权限访问</h3>
-      <p>当前账号缺少 <code>${esc(perm)}</code> 权限，请联系超级管理员分配角色。</p>
-      <a class="btn sm" href="#/dashboard">返回数据概览</a></div>`
-    if (seq === routeSeq) {
-      apiSignal = null
-      setRouteBusy(false)
-    }
+    renderErrorPage({
+      code: '403',
+      title: '无权限访问',
+      message: `当前账号缺少 ${perm} 权限，请联系超级管理员分配角色。`,
+    })
+    finishRoute(seq)
     return
   }
+  view.innerHTML = skeletonMarkup()
   try {
     if (key === 'dashboard') await pageDashboard()
     else if (key === 'dramas') await pageDramas()
@@ -634,12 +750,13 @@ async function route() {
     else if (key === 'policies') await pagePolicies()
     else if (key === 'plans') await pagePlans()
     else if (key === 'coupons') await pageCoupons()
-    else if (key === 'orders') await pageOrders()
+    else if (key === 'orders') mountAdminDataPage(AdminOrdersPage)
     else if (key === 'refunds') await pageRefunds()
     else if (key === 'ops') await pageOps()
     else if (key === 'ranks') await pageRanks()
     else if (key === 'review') await pageReview()
-    else if (key === 'users') await pageUsers()
+    else if (key === 'users') mountAdminDataPage(AdminUsersPage)
+    else if (key === 'profile') mountPageApp(AdminProfilePage, { me: state.me, onChangePassword: () => $('#change-pass')?.click() })
     else if (key === 'roles') await pageRoles()
     else if (key === 'audit') await pageAudit()
     else if (key === 'pay') await pagePay()
@@ -657,19 +774,14 @@ async function route() {
     if (error?.name === 'AbortError' || seq !== routeSeq) return
     // 单页渲染失败不影响其它页面：给出错误、页面名与重试入口
     console.error('[admin]', key, error)
-    view.innerHTML = `<div class="panel">
-      <h3>${esc(key)} 加载失败</h3>
-      <p class="muted">${esc(error.message)}</p>
-      <button class="btn primary" id="retry-page">重试</button>
-      <button class="btn" data-home>回到概览</button>
-    </div>`
-    $('#retry-page')?.addEventListener('click', () => route())
-    view.querySelector('[data-home]')?.addEventListener('click', () => { location.hash = '#/dashboard' })
+    renderErrorPage({
+      code: '500',
+      title: `${navItem?.[1] ?? standalone?.label ?? key} 加载失败`,
+      message: error.message,
+      retry: () => route(),
+    })
   } finally {
-    if (seq === routeSeq) {
-      apiSignal = null
-      setRouteBusy(false)
-    }
+    finishRoute(seq)
   }
 }
 
@@ -2009,71 +2121,7 @@ const reviewButtons = (table, row) => `
   <button class="btn sm danger" data-review="${table}:${row.id}:reject">驳回</button>`
 
 /* ---------------- 用户 ---------------- */
-async function pageUsers() {
-  const data = await api(`/admin/api/users?page=${listPages.users}&pageSize=20`)
-  listPages.users = Number(data.page ?? 1)
-  const perms = new Set(state.me?.permissions ?? [])
-  const canPassword = perms.has('user.password')
-  const canManage = perms.has('user.manage')
-  const canAssist = perms.has('user.login.assist')
-  const rows = data.list.map((row) => `<tr>
-    <td>${row.id}</td>
-    <td class="mono">${esc(row.email ?? row.phone ?? '')}</td>
-    <td>${esc(row.nickname)}</td>
-    <td>${row.avatar ? '<span class="pill ok">有</span>' : '<span class="pill">无</span>'}</td>
-    <td>${row.status === 'banned' ? '<span class="pill bad">已禁用</span>' : '<span class="pill ok">正常</span>'}</td>
-    <td>${esc(fmtTs(row.vip_until))}</td>
-    <td>${row.order_count}</td>
-    <td>¥${Number(row.paid_total).toFixed(2)}</td>
-    <td class="row-actions">${canManage ? `<button class="btn sm" data-toggle="${row.id}" data-status="${row.status === 'banned' ? 'active' : 'banned'}">${row.status === 'banned' ? '解禁' : '禁用'}</button>` : ''}
-        ${canPassword ? `<button class="btn sm" data-user-password="${row.id}" data-mode="set">改密</button>
-        ${row.email ? `<button class="btn sm" data-user-password="${row.id}" data-mode="reset">重置密码</button>` : ''}` : ''}
-        ${canAssist && row.email ? `<button class="btn sm ghost" data-code="${row.id}">登录码</button>` : ''}
-        ${!canManage && !canPassword && !canAssist ? '<span class="muted">—</span>' : ''}</td>
-  </tr>`)
-  view.innerHTML = `<div class="panel">
-    <h3>用户<span class="spacer"></span><span class="muted small">共 ${fmt(data.total ?? data.list.length)} 人</span></h3>
-    <table><thead><tr><th>ID</th><th>邮箱</th><th>昵称</th><th>头像</th><th>状态</th><th>会员到期</th><th>订单数</th><th>累计付费</th><th>操作</th></tr></thead>
-    <tbody>${rows.join('')}</tbody></table>
-    ${pager('users', listPages.users, data.pageSize, data.total, '人')}
-    <p class="muted">C 端使用邮箱验证码登录。</p>
-  </div>`
-  bindPager('users', pageUsers)
-  view.querySelectorAll('[data-code]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const reason = await askText({ title: '签发一次性登录码', label: '签发原因', hint: '原因会写入审计日志。', minLength: 2, confirmText: '生成' })
-      if (reason === null) return
-      try {
-        const result = await api(`/admin/api/users/${button.dataset.code}/login-code`, { method: 'POST', body: { reason } })
-        await showNotice({
-          title: '一次性登录码已生成',
-          message: `${result.email}\n${Math.round(result.expiresIn / 60)} 分钟内有效，仅可使用一次。请通过可靠渠道转交用户，关闭后无法再次查看。`,
-          code: result.code,
-        })
-        await pageUsers()
-      } catch (error) {
-        toast(error.message)
-      }
-    })
-  })
-  view.querySelectorAll('[data-user-password]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const user = data.list.find((row) => Number(row.id) === Number(button.dataset.userPassword))
-      if (user) openUserPasswordEditor(user, button.dataset.mode)
-    })
-  })
-  view.querySelectorAll('[data-toggle]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const reason = await askText({ title: button.dataset.status === 'banned' ? '禁用用户' : '恢复用户', label: '操作原因', hint: '原因会写入审计日志。', minLength: 2, confirmText: '提交' })
-      if (reason === null) return
-      await api(`/admin/api/users/${button.dataset.toggle}/status`, { method: 'POST', body: { status: button.dataset.status, reason } })
-      toast('已更新用户状态')
-      await pageUsers()
-    })
-  })
-}
-
-function openUserPasswordEditor(user, mode) {
+function openUserPasswordEditor(user, mode, onSaved) {
   const reset = mode === 'reset'
   openOverlay(reset ? '重置用户密码' : '修改用户密码', `
     <p class="muted">${esc(user.email ?? user.phone ?? `#${user.id}`)}</p>
@@ -2092,8 +2140,21 @@ function openUserPasswordEditor(user, mode) {
       const button = event.currentTarget
       let password
       if (!reset) {
-        password = body.querySelector('#up-pass').value
-        if (password !== body.querySelector('#up-pass2').value) return toast('两次密码不一致')
+        const passwordInput = body.querySelector('#up-pass')
+        const confirmInput = body.querySelector('#up-pass2')
+        clearFieldError(passwordInput)
+        clearFieldError(confirmInput)
+        password = passwordInput.value
+        if (!isStrongBasicPassword(password)) {
+          setFieldError(passwordInput, '至少 8 位，并同时包含字母和数字')
+          passwordInput.focus()
+          return
+        }
+        if (password !== confirmInput.value) {
+          setFieldError(confirmInput, '两次输入的新密码不一致')
+          confirmInput.focus()
+          return
+        }
       }
       button.disabled = true
       try {
@@ -2103,7 +2164,7 @@ function openUserPasswordEditor(user, mode) {
         })
         close()
         toast(reset ? `临时密码已发送至 ${result.email}` : '密码已更新')
-        await pageUsers()
+        await onSaved?.()
       } catch (error) {
         toast(error.message)
         button.disabled = false
@@ -2119,27 +2180,13 @@ function panel(title, body, extra = '') {
 function table(headers, rows, className = '') {
   return `<table${className ? ` class="${className}"` : ''}><thead><tr>${headers.map((header) => `<th>${header}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
 }
-const listPages = { dramas: 1, users: 1, orders: 1, audit: 1, refunds: 1, reviewDanmu: 1, reviewComments: 1 }
-
-function pagerNumbers(page, pages) {
-  if (pages <= 7) return Array.from({ length: pages }, (_, index) => index + 1)
-  const values = new Set([1, pages, page - 1, page, page + 1])
-  if (page <= 4) [2, 3, 4, 5].forEach((value) => values.add(value))
-  if (page >= pages - 3) [pages - 4, pages - 3, pages - 2, pages - 1].forEach((value) => values.add(value))
-  const sorted = [...values].filter((value) => value >= 1 && value <= pages).sort((a, b) => a - b)
-  const result = []
-  for (const value of sorted) {
-    if (result.length && value - result[result.length - 1] > 1) result.push('…')
-    result.push(value)
-  }
-  return result
-}
+const listPages = { dramas: 1, audit: 1, refunds: 1, reviewDanmu: 1, reviewComments: 1 }
 
 function pager(key, page, pageSize, total, unit = '条') {
   const count = Math.max(0, Number(total ?? 0))
   const pages = Math.max(1, Math.ceil(count / Math.max(1, Number(pageSize) || 20)))
   const current = Math.min(Math.max(1, Number(page) || 1), pages)
-  const numbers = pagerNumbers(current, pages)
+  const numbers = pageNumbers(current, pages)
   return `<nav class="pager" aria-label="分页">
     <span class="pager-summary">共 <b>${fmt(count)}</b> ${unit} · 第 <b>${current}</b> / ${pages} 页</span>
     <div class="pager-pages">
@@ -2548,103 +2595,6 @@ async function pageCoupons() {
 }
 
 /* ---------------- 订单 ---------------- */
-async function pageOrders() {
-  // 筛选条件写进 hash，刷新/回退后保持；不依赖全局 state，避免串到其它页面。
-  const hashParams = new URLSearchParams(location.hash.split('?')[1] ?? '')
-  const status = hashParams.get('status') ?? ''
-  const q = hashParams.get('q') ?? ''
-  const query = new URLSearchParams({ page: listPages.orders, pageSize: 20 })
-  if (status) query.set('status', status)
-  if (q) query.set('q', q)
-  const data = await api(`/admin/api/orders?${query.toString()}`)
-  listPages.orders = Number(data.page ?? 1)
-  const total = data.list.filter((order) => ['paid', 'fulfilled'].includes(order.status)).reduce((sum, order) => sum + order.amount_cny, 0)
-  const rows = data.list.map((order) => `<tr>
-    <td class="mono">${esc(order.out_trade_no)}</td>
-    <td>${esc(order.nickname ?? '')}<div class="muted" style="font-size:11px">${esc(order.phone ?? '')}</div></td>
-    <td>${order.product_type === 'subscription' ? '会员 · ' + esc(order.plan_name ?? '') : '单片 · ' + esc(order.drama_title ?? '')}</td>
-    <td>¥${Number(order.amount_cny).toFixed(2)}</td>
-    <td>${esc(order.channel)}</td>
-    <td>${pillOf(order.status)}</td>
-    <td class="muted">${esc(fmtTs(order.paid_at ?? order.created_at))}</td>
-    <td class="row-actions">
-      <button class="btn sm" data-detail="${order.id}">详情</button>
-      ${['paid', 'fulfilled'].includes(order.status)
-        ? `<button class="btn sm danger" data-refund="${order.id}">发起退款</button>`
-        : ['created', 'pending'].includes(order.status)
-          ? `<button class="btn sm" data-confirm="${order.id}">确认到账</button>`
-          : ''}
-    </td>
-  </tr>`)
-  const statusOptions = [['', '全部状态'], ['created', '待支付'], ['pending', '待支付'], ['paid', '已支付'], ['fulfilled', '已完成'], ['refunded', '已退款'], ['closed', '已关闭']]
-  view.innerHTML = panel('订单', `
-    <div class="form-row" style="margin-bottom:10px">
-      <select id="order-status" aria-label="订单状态">
-        ${statusOptions.map(([value, label]) => `<option value="${value}" ${status === value ? 'selected' : ''}>${label}</option>`).join('')}
-      </select>
-      <input id="order-q" aria-label="搜索订单" placeholder="单号 / 用户 / 商品" value="${esc(q)}" style="max-width:260px" />
-      <button class="btn" id="order-search">搜索</button>
-      <button class="btn" id="order-reset">重置</button>
-    </div>
-    <p class="muted">共 ${fmt(data.total ?? data.list.length)} 笔 · 本页已支付合计 ¥${total.toFixed(2)}</p>
-    ${table(['单号', '用户', '商品', '金额', '渠道', '状态', '时间', '操作'], rows.length ? rows : ['<tr><td colspan="8" class="muted">没有匹配的订单</td></tr>'])}
-    ${pager('orders', listPages.orders, data.pageSize, data.total, '笔')}`,
-  '<button class="btn" id="close-expired">关闭超时订单</button>')
-  const applyOrderFilters = async (resetPage = true) => {
-    const next = new URLSearchParams()
-    const nextStatus = $('#order-status').value
-    const nextQ = $('#order-q').value.trim()
-    if (nextStatus) next.set('status', nextStatus)
-    if (nextQ) next.set('q', nextQ)
-    const suffix = next.toString()
-    history.replaceState(null, '', `#/orders${suffix ? `?${suffix}` : ''}`)
-    if (resetPage) listPages.orders = 1
-    await pageOrders()
-  }
-  $('#order-search').addEventListener('click', () => applyOrderFilters())
-  $('#order-q').addEventListener('keydown', (event) => { if (event.key === 'Enter') applyOrderFilters() })
-  $('#order-status').addEventListener('change', () => applyOrderFilters())
-  $('#order-reset').addEventListener('click', async () => {
-    history.replaceState(null, '', '#/orders')
-    listPages.orders = 1
-    await pageOrders()
-  })
-  bindPager('orders', pageOrders)
-  $('#close-expired').addEventListener('click', async () => {
-    const result = await api('/admin/api/close-expired', { method: 'POST', body: {} })
-    toast(`已关闭 ${result.closed} 笔`)
-    await pageOrders()
-  })
-  view.querySelectorAll('[data-detail]').forEach((button) => button.addEventListener('click', () => openOrderDetail(Number(button.dataset.detail))))
-  view.querySelectorAll('[data-confirm]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const orderId = Number(button.dataset.confirm)
-      const txid = await askText({
-        title: '确认订单到账',
-        label: '链上 txid / 流水号',
-        hint: 'USDT 建议填写；留空将记为人工补单。',
-        required: false,
-        confirmText: '确认到账',
-      })
-      if (txid === null) return
-      try {
-        await api(`/admin/api/orders/${orderId}/confirm`, { method: 'POST', body: { txid: txid || undefined } })
-        toast('已确认到账并发放权益')
-        await pageOrders()
-      } catch (error) { toast(error.message) }
-    })
-  })
-  view.querySelectorAll('[data-refund]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const reason = await askText({ title: '发起退款', label: '退款原因', hint: '至少 4 个字，提交后需另一位管理员审批。', minLength: 4, confirmText: '提交退款' })
-      if (reason === null) return
-      await api('/admin/api/refunds', { method: 'POST', body: { orderId: Number(button.dataset.refund), reason } })
-      toast('退款单已创建，需另一位管理员审批')
-      await pageOrders()
-    })
-  })
-}
-
 async function openOrderDetail(id) {
   const data = await api(`/admin/api/orders/${id}`)
   const order = data.order ?? {}
@@ -5443,6 +5393,7 @@ function openAdminForm(roles, existing) {
     ${isEdit ? '' : `<label style="display:block;margin-top:10px">初始口令<input id="af-pass" type="password" autocomplete="new-password" placeholder="至少 8 位，含字母与数字" /></label>
       <p class="muted small">创建后口令只在此处显示一次；账号首次登录会被要求改密。</p>`}
     <div style="margin-top:12px"><div class="muted small" style="margin-bottom:6px">角色（至少一个）</div>${roleChecks(roles, checked)}</div>
+    <p class="field-error" id="af-roles-error" role="alert"></p>
   `, (body) => {
     body.querySelector('#af-save')?.remove()
     const foot = document.createElement('div')
@@ -5451,15 +5402,32 @@ function openAdminForm(roles, existing) {
     body.appendChild(foot)
     foot.querySelector('[data-cancel]').addEventListener('click', () => body.closest('.modal-mask').remove())
     foot.querySelector('#af-save').addEventListener('click', async () => {
+      const usernameInput = body.querySelector('#af-username')
+      const passwordInput = body.querySelector('#af-pass')
+      const rolesError = body.querySelector('#af-roles-error')
+      clearFieldError(usernameInput)
+      clearFieldError(passwordInput)
+      rolesError.textContent = ''
+      let firstInvalid = null
+      const invalid = (input, message) => {
+        setFieldError(input, message)
+        if (!firstInvalid) firstInvalid = input
+      }
       const payload = {
         displayName: body.querySelector('#af-name').value.trim(),
         roles: [...body.querySelectorAll('input[name="roles"]:checked')].map((input) => input.value),
       }
-      if (!payload.roles.length) return toast('请至少选择一个角色')
       if (!isEdit) {
-        payload.username = body.querySelector('#af-username').value.trim()
-        payload.password = body.querySelector('#af-pass').value
+        payload.username = usernameInput.value.trim()
+        payload.password = passwordInput.value
+        if (!/^[A-Za-z0-9._-]{2,32}$/.test(payload.username)) invalid(usernameInput, '账号需为 2–32 位字母、数字、点、下划线或短横线')
+        if (!isStrongBasicPassword(payload.password)) {
+          invalid(passwordInput, '至少 8 位，并同时包含字母和数字')
+        }
       }
+      if (!payload.roles.length) rolesError.textContent = '请至少选择一个角色'
+      if (firstInvalid) return firstInvalid.focus()
+      if (!payload.roles.length) return rolesError.scrollIntoView({ block: 'nearest' })
       try {
         if (isEdit) await api(`/admin/api/admins/${existing.id}`, { method: 'PUT', body: payload })
         else await api('/admin/api/admins', { method: 'POST', body: payload })
@@ -5507,10 +5475,18 @@ function openPasswordReset(admin) {
     body.appendChild(foot)
     foot.querySelector('[data-cancel]').addEventListener('click', () => body.closest('.modal-mask').remove())
     foot.querySelector('#pr-save').addEventListener('click', async () => {
+      const passwordInput = body.querySelector('#pr-pass')
+      clearFieldError(passwordInput)
+      const password = passwordInput.value
+      if (!isStrongBasicPassword(password)) {
+        setFieldError(passwordInput, '至少 8 位，并同时包含字母和数字')
+        passwordInput.focus()
+        return
+      }
       try {
         const result = await api(`/admin/api/admins/${admin.id}/password`, {
           method: 'POST',
-          body: { password: body.querySelector('#pr-pass').value, mustChange: body.querySelector('#pr-must').checked },
+          body: { password, mustChange: body.querySelector('#pr-must').checked },
         })
         body.closest('.modal-mask').remove()
         toast(`口令已重置${result.revokedSessions ? `，吊销 ${result.revokedSessions} 个会话` : ''}`)
