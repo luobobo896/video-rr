@@ -47,6 +47,12 @@ watch(() => props.search, (value) => {
   clearTimeout(searchTimer)
   searchDraft.value = next
 })
+// 翻页后上一页的搜索草稿和隐藏列不能带过去：草稿会和 URL 里的新关键词打架，隐藏列按旧表头算也会错位
+watch(() => props.page, () => {
+  clearTimeout(searchTimer)
+  searchDraft.value = props.search ?? ''
+  hiddenKeys.value = new Set()
+})
 onBeforeUnmount(() => clearTimeout(searchTimer))
 
 function onSearchInput(event) {

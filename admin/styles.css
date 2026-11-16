@@ -337,6 +337,11 @@ table input:focus, table select:focus {
 .chart-legend-item i { width: 8px; height: 8px; border-radius: 50%; }
 .chart-legend-total { margin-left: auto; color: var(--text-3); }
 .chart-empty { padding: 48px 12px; text-align: center; color: var(--text-3); font-size: 13px; }
+.chart-data { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 6px; }
+.chart-data summary { cursor: pointer; color: var(--text-3); font-size: 12px; }
+.chart-data table { margin-top: 6px; width: 100%; border-collapse: collapse; font-size: 12px; }
+.chart-data th, .chart-data td { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+.chart-data th { color: var(--text-2); font-weight: 600; }
 
 .funnel-chart { display: grid; gap: 10px; margin-top: 8px; }
 .funnel-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) 48px; align-items: center; gap: 10px; }

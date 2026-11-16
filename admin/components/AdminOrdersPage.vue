@@ -32,6 +32,7 @@ const permissions = computed(() => new Set(props.permissions ?? []))
 const canConfirm = computed(() => permissions.value.has('finance.order.confirm'))
 const canRefund = computed(() => permissions.value.has('finance.refund.create'))
 let loadSeq = 0
+const closing = ref(false)
 
 const columns = [
   { key: 'out_trade_no', label: '单号', sortable: true, width: '190px' },
@@ -40,7 +41,7 @@ const columns = [
   { key: 'amount_cny', label: '金额', sortable: true, width: '100px' },
   { key: 'channel', label: '渠道', sortable: false, width: '92px' },
   { key: 'status', label: '状态', sortable: true, width: '100px' },
-  { key: 'created_at', label: '时间', sortable: true, width: '160px' },
+  { key: 'created_at', label: '下单时间', sortable: true, width: '170px' },
 ]
 
 const filters = [{
@@ -48,11 +49,14 @@ const filters = [{
   label: '状态',
   options: [
     { value: 'created', label: '待支付' },
-    { value: 'pending', label: '待支付' },
+    { value: 'pending', label: '支付确认中' },
     { value: 'paid', label: '已支付' },
     { value: 'fulfilled', label: '已完成' },
-    { value: 'refunded', label: '已退款' },
     { value: 'closed', label: '已关闭' },
+    { value: 'failed', label: '支付失败' },
+    { value: 'refunded', label: '已退款' },
+    { value: 'refunding', label: '退款中' },
+    { value: 'refund_pending', label: '退款待审' },
   ],
 }]
 
@@ -60,10 +64,12 @@ const STATUS_LABEL = {
   fulfilled: ['ok', '已完成'],
   paid: ['ok', '已支付'],
   created: ['', '待支付'],
-  pending: ['', '待支付'],
+  pending: ['', '支付确认中'],
   closed: ['bad', '已关闭'],
+  failed: ['bad', '支付失败'],
   refunded: ['bad', '已退款'],
   refunding: ['', '退款中'],
+  refund_pending: ['', '退款待审'],
 }
 
 function syncHash() {
@@ -194,12 +200,16 @@ async function closeExpired() {
     message: '将关闭全部超过支付期限且未支付的订单，操作会立即生效。',
     confirmText: '关闭订单',
   }))) return
+  if (closing.value) return
+  closing.value = true
   try {
     const result = await props.api('/admin/api/close-expired', { method: 'POST', body: {} })
     props.toast(`已关闭 ${result.closed} 笔`)
     await load()
   } catch (requestError) {
     props.toast(requestError.message)
+  } finally {
+    closing.value = false
   }
 }
 
@@ -235,7 +245,7 @@ onMounted(load)
       @refresh="load"
     >
       <template #toolbar-actions>
-        <button class="btn sm" type="button" @click="closeExpired">关闭超时订单</button>
+        <button v-if="canConfirm" class="btn sm" type="button" :disabled="closing" :aria-busy="closing ? 'true' : 'false'" @click="closeExpired">关闭超时订单</button>
       </template>
       <template #cell-nickname="{ row }">
         <div>{{ row.nickname || '—' }}</div>
@@ -246,7 +256,10 @@ onMounted(load)
       <template #cell-status="{ row }">
         <span class="pill" :class="(STATUS_LABEL[row.status] ?? ['', row.status])[0]">{{ (STATUS_LABEL[row.status] ?? ['', row.status])[1] }}</span>
       </template>
-      <template #cell-created_at="{ row }">{{ fmtTs(row.paid_at ?? row.created_at) }}</template>
+      <template #cell-created_at="{ row }">
+        <div>{{ fmtTs(row.created_at) }}</div>
+        <div v-if="row.paid_at" class="muted small">支付 {{ fmtTs(row.paid_at) }}</div>
+      </template>
       <template #actions="{ row }">
         <div class="table-actions">
           <button class="btn sm" type="button" @click="openOrderDetail(row.id)">详情</button>

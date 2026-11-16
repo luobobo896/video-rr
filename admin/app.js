@@ -1,7 +1,21 @@
 /** 影巢运营后台（原生 ESM，无构建）。 */
 import { createApp } from 'vue'
 import { adminUi } from './ui.js'
-import { pageNumbers } from './table-state.js'
+import {
+  couponValidTo,
+  createSequencer,
+  episodesSignature,
+  formatClock,
+  hydrateListState,
+  nextTopPriority,
+  pageNumbers,
+  pickAllowedNumber,
+  readHashQuery,
+  selectionSummary,
+  toggleSelection,
+  validateCouponDraft,
+  writeHashQuery,
+} from './table-state.js'
 import AdminOrdersPage from './components/AdminOrdersPage.vue'
 import AdminProfilePage from './components/AdminProfilePage.vue'
 import AdminUsersPage from './components/AdminUsersPage.vue'
@@ -10,6 +24,26 @@ const BASE = window.__MH_BASE || ''
 const SITE_BASE = BASE.replace(/-admin$/, '')
 const mediaUrl = (url) => (!url ? '' : /^https?:/i.test(url) ? url : SITE_BASE + url)
 const $ = (selector, root = document) => root.querySelector(selector)
+
+/**
+ * 行内「更多」菜单：≤1199px 时 .panel 是 overflow-x:auto 的裁剪容器，绝对定位的菜单会被裁掉。
+ * 统一改成 position:fixed 按按钮视口坐标摆放，并在滚动/点击空白时收起。
+ */
+function closeRowMenus() {
+  document.querySelectorAll('.row-more.open').forEach((node) => {
+    node.classList.remove('open')
+    node.querySelector('.row-more-toggle')?.setAttribute('aria-expanded', 'false')
+    const menu = node.querySelector('.row-more-menu')
+    if (menu) {
+      menu.style.position = ''
+      menu.style.top = ''
+      menu.style.right = ''
+      menu.style.left = ''
+    }
+  })
+}
+document.addEventListener('click', closeRowMenus)
+window.addEventListener('scroll', closeRowMenus, { passive: true })
 const view = $('#view')
 const nav = $('#nav')
 const openSite = $('#open-site')
@@ -50,7 +84,7 @@ const NAV_GROUPS = [
       ['adult-settings', '成人菜单', 'content.drama.write'],
       ['policies', '付费策略', 'content.policy.write'],
       ['tags', '标签管理', 'tag.read'],
-      ['ops', '首页运营', 'ops.banner.write&ops.section.write'],
+      ['ops', '首页运营', 'ops.section.write'],
       ['ranks', '榜单', 'ops.rank.write'],
       ['content-stats', '内容统计', 'growth.content.read'],
       ['review', '内容审核', 'content.review'],
@@ -119,6 +153,11 @@ let apiSignal = null
 let routeSeq = 0
 let routeController = null
 let pageApp = null
+/** 请求序号守卫与「最新一次请求」的 promise：慢响应交给新结果，不覆盖页面。 */
+const apiSequencer = createSequencer()
+const apiTails = new Map()
+/** 命名 interval：同名 timer 进页面时先清旧的，重入不会叠出 N 个轮询。 */
+const pageTimers = new Map()
 
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
 const fmt = (n) => (typeof n === 'number' ? n.toLocaleString('zh-CN') : n ?? '—')
@@ -142,6 +181,21 @@ function toast(text) {
 }
 
 async function api(path, options = {}) {
+  // 同一接口只允许最新一次响应写状态：慢响应会被后发的请求取代，避免旧数据盖掉新结果。
+  const key = String(path).split('?')[0]
+  const token = apiSequencer.begin(key)
+  const task = request(path, options)
+  apiTails.set(key, task)
+  const data = await task
+  if (apiSequencer.isLatest(key, token)) return data
+  const latest = apiTails.get(key)
+  if (latest && latest !== task) {
+    try { return await latest } catch { /* 最新一次也失败：按取消处理，不重复报错 */ }
+  }
+  throw Object.assign(new Error('请求已被更新的结果取代'), { name: 'AbortError', code: 'stale' })
+}
+
+async function request(path, options = {}) {
   const { timeoutMs = 15000, signal: externalSignal, ...fetchOptions } = options
   const headers = { ...(fetchOptions.headers ?? {}) }
   if (state.token) headers.authorization = `Bearer ${state.token}`
@@ -188,8 +242,32 @@ async function api(path, options = {}) {
   }
 }
 
+/** 页面级 interval 唯一入口：同名先清旧的，再登记新的。 */
+function startPageTimer(name, callback, intervalMs) {
+  stopTimers(name)
+  const id = setInterval(callback, intervalMs)
+  pageTimers.set(name, id)
+  state.timers.push(id)
+  return id
+}
+
+/** 停指定 timer（幂等收口：重复调用、传不存在的名字都无副作用）。 */
+function stopTimers(name) {
+  if (name === undefined) {
+    for (const id of pageTimers.values()) clearInterval(id)
+    pageTimers.clear()
+    return
+  }
+  const id = pageTimers.get(name)
+  if (id === undefined) return
+  clearInterval(id)
+  pageTimers.delete(name)
+  state.timers = state.timers.filter((timer) => timer !== id)
+}
+
 function clearTimers() {
   for (const timer of state.timers) clearInterval(timer)
+  pageTimers.clear()
   state.timers = []
 }
 
@@ -697,7 +775,7 @@ async function route() {
   const hash = location.hash.replace(/^#\/?/, '') || 'dashboard'
   state.page = hash.split('?')[0].split('/')[0]
   const topRight = $('#top-right')
-  if (topRight) topRight.innerHTML = `<span class="muted">更新于 ${new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}</span>`
+  if (topRight) topRight.innerHTML = `<span class="muted">更新于 ${formatClock()}（北京时间）</span>`
   if (state.page === 'permissions') {
     history.replaceState(null, '', '#/roles')
     state.page = 'roles'
@@ -770,6 +848,12 @@ async function route() {
     else if (key === 'distribution-config') await pageDistributionConfig()
     else if (key === 'admins') await pageAdmins()
     else if (key === 'menus') await pageMenus()
+    // 兜底：菜单里挂上了、但这里没有渲染分支的路由，绝不能停在骨架屏上
+    else renderErrorPage({
+      code: '501',
+      title: `${navItem?.[1] ?? key} 尚未实现`,
+      message: `路由「${key}」已经挂进菜单，但后台还没有对应的渲染逻辑，请联系开发补齐；其它页面不受影响。`,
+    })
   } catch (error) {
     if (error?.name === 'AbortError' || seq !== routeSeq) return
     // 单页渲染失败不影响其它页面：给出错误、页面名与重试入口
@@ -799,7 +883,7 @@ async function pageDashboard() {
     { label: '待审评论', value: Number(stats.pendingComments ?? 0) },
     { label: '草稿剧集', value: Number(stats.draftDramas ?? 0) },
   ]
-  $('#top-right').innerHTML = `<span class="muted">更新于 ${new Date().toLocaleTimeString('zh-CN')}</span>
+  $('#top-right').innerHTML = `<span class="muted">更新于 ${formatClock()}（北京时间）</span>
     ${perms.has('growth.distribution.write') ? '<a class="btn sm" href="#/distribution-config">分销配置 →</a>' : ''}
     <a class="btn sm" href="#/analytics">看经营数据 →</a>`
   // 概览只讲平台资产与内容健康度；收款/订阅/退款一律在「经营数据」里看。
@@ -868,6 +952,26 @@ const policyGroupSummary = (group) => {
   return parts.join(' · ')
 }
 
+/** 剧集列表页地址栏状态：翻页/筛选后回写，刷新或后退都不会丢。 */
+function persistDramaListHash() {
+  const size = Number(state.params.dramaPageSize ?? 20)
+  writeHashQuery('dramas', {
+    page: Number(listPages.dramas ?? 1) > 1 ? Number(listPages.dramas) : '',
+    size: size !== 20 ? size : '',
+    q: String(state.params.dramaQ ?? '').trim(),
+    cat: state.params.dramaCat && state.params.dramaCat !== 'all' ? state.params.dramaCat : '',
+    status: state.params.dramaStatus && state.params.dramaStatus !== 'all' ? state.params.dramaStatus : '',
+  })
+}
+
+/** 剧集列表的跨页选中集合：按 id 存，翻页后仍保留，批量分配作用于整份集合。 */
+const dramaSelection = new Set()
+
+function setDramaSelection(next) {
+  dramaSelection.clear()
+  for (const id of next ?? []) dramaSelection.add(Number(id))
+}
+
 async function pageDramas() {
   const idMatch = /^#\/dramas\/(\d+)(?:\/episodes)?$/.exec(location.hash)
   if (idMatch) {
@@ -875,6 +979,18 @@ async function pageDramas() {
     return pageDramaEdit(Number(idMatch[1]))
   }
 
+  const restored = hydrateListState(readHashQuery(), {
+    page: Number(listPages.dramas ?? 1),
+    size: Number(state.params.dramaPageSize ?? 20),
+    q: String(state.params.dramaQ ?? ''),
+    cat: String(state.params.dramaCat ?? 'all'),
+    status: String(state.params.dramaStatus ?? 'all'),
+  })
+  listPages.dramas = Number(restored.page) > 0 ? Number(restored.page) : 1
+  state.params.dramaPageSize = [10, 20, 50].includes(Number(restored.size)) ? Number(restored.size) : 20
+  state.params.dramaQ = String(restored.q ?? '')
+  state.params.dramaCat = String(restored.cat ?? 'all')
+  state.params.dramaStatus = String(restored.status ?? 'all')
   const page = Number(listPages.dramas ?? 1)
   const pageSize = Number(state.params.dramaPageSize ?? 20)
   const category = state.params.dramaCat ?? 'all'
@@ -934,7 +1050,7 @@ async function pageDramas() {
         <button class="btn" type="button" id="drama-reset">重置</button>
       </form>
       <div class="bulk-assign-bar" id="drama-bulk-assign" hidden>
-        <span class="muted">已选 <strong id="drama-selected-count">0</strong> 部</span>
+        <span class="muted">已选 <strong id="drama-selected-count">0</strong> 部<span id="drama-selected-hint"></span></span>
         <select id="drama-bulk-group" aria-label="批量分配付费策略组">
           <option value="">选择策略组</option>
           ${policyGroups.map((group) => `<option value="${group.id}" title="${esc(policyGroupSummary(group))}">${esc(group.name)}</option>`).join('')}
@@ -944,7 +1060,7 @@ async function pageDramas() {
       </div>
       <table class="drama-table">
         <thead><tr>
-          <th class="select-col"><input id="drama-select-all" type="checkbox" aria-label="选择本页全部剧集" /></th>
+          <th class="select-col" title="只选中当前页；已选项在翻页后保留"><input id="drama-select-all" type="checkbox" aria-label="选择本页全部剧集（不跨页）" /></th>
           <th>封面</th><th>标题</th><th>类型 / 分集</th><th>策略组</th><th>状态</th><th>操作</th>
         </tr></thead>
         <tbody>
@@ -952,7 +1068,7 @@ async function pageDramas() {
             const missing = (row.completeness?.missing ?? []).map((key) => MISSING_LABEL[key] ?? key)
             const policyGroupId = Number(row.policy?.policy_group_id ?? 0)
             return `<tr data-drama-row="${row.id}">
-              <td class="select-col col-select"><input class="drama-select" type="checkbox" value="${row.id}" aria-label="选择 ${esc(row.title)}" /></td>
+              <td class="select-col col-select"><input class="drama-select" type="checkbox" value="${row.id}" ${dramaSelection.has(Number(row.id)) ? 'checked' : ''} aria-label="选择 ${esc(row.title)}" /></td>
               <td class="cover-cell col-cover" data-cover-for="${row.id}">${row.cover_url ? `<img class="mini" loading="lazy" src="${esc(mediaUrl(row.cover_url))}" alt="" data-img-fallback="hide" />` : '<span class="pill warn">缺</span>'}</td>
               <td class="table-title col-title" title="${esc(row.title)}"><strong>${esc(row.title)}</strong>
                 ${row.isAdult ? '<span class="pill warn">成人</span>' : ''}
@@ -992,6 +1108,9 @@ async function pageDramas() {
     state.params.dramaStatus = $('#drama-status')?.value ?? 'all'
     state.params.dramaPageSize = Number($('#drama-size')?.value ?? 20)
     listPages.dramas = 1
+    // 换了筛选条件，之前跨页选中的剧集可能已经不在结果里，先清空
+    setDramaSelection(new Set())
+    persistDramaListHash()
     await pageDramas()
     const input = $('#drama-q')
     if (input) {
@@ -1011,9 +1130,15 @@ async function pageDramas() {
     state.params.dramaCat = 'all'
     state.params.dramaStatus = 'all'
     listPages.dramas = 1
+    setDramaSelection(new Set())
+    persistDramaListHash()
     await pageDramas()
   })
-  bindPager('dramas', pageDramas)
+  // 翻页保留跨页选中，只把页码写进地址栏
+  bindPager('dramas', async () => {
+    persistDramaListHash()
+    await pageDramas()
+  })
   const setArtworkStatus = (text, tone = '') => {
     const status = $('#artwork-status')
     if (!status) return
@@ -1031,29 +1156,44 @@ async function pageDramas() {
     }
   }
   $('#new-drama').addEventListener('click', () => dramaWizard(options, policyGroups))
-  const selectedRows = () => [...view.querySelectorAll('.drama-select:checked')]
+  const pageIds = rows.map((row) => Number(row.id))
+  const selectedIds = () => [...dramaSelection]
   const updateBulkBar = () => {
-    const count = selectedRows().length
+    const summary = selectionSummary(dramaSelection, pageIds)
     const bar = $('#drama-bulk-assign')
     const countNode = $('#drama-selected-count')
-    if (countNode) countNode.textContent = String(count)
-    if (bar) bar.hidden = count === 0
-    const all = view.querySelectorAll('.drama-select').length
+    const hint = $('#drama-selected-hint')
+    if (countNode) countNode.textContent = String(summary.total)
+    // 文案写清「本页 / 跨页」：跨页选中翻页后仍然保留，批量作用于整份集合
+    if (hint) {
+      hint.textContent = summary.total > summary.onPage
+        ? `（本页 ${summary.onPage} 部，其余为跨页选择，翻页后保留）`
+        : `（本页 ${summary.onPage} 部）`
+    }
+    if (bar) bar.hidden = summary.total === 0
     const selectAll = $('#drama-select-all')
     if (selectAll) {
-      selectAll.checked = all > 0 && count === all
-      selectAll.indeterminate = count > 0 && count < all
+      selectAll.checked = summary.allOnPage
+      selectAll.indeterminate = summary.onPage > 0 && !summary.allOnPage
+      selectAll.disabled = pageIds.length === 0
     }
   }
-  view.querySelectorAll('.drama-select').forEach((checkbox) => checkbox.addEventListener('change', updateBulkBar))
+  view.querySelectorAll('.drama-select').forEach((checkbox) => checkbox.addEventListener('change', (event) => {
+    setDramaSelection(toggleSelection(dramaSelection, [event.target.value], event.target.checked))
+    updateBulkBar()
+  }))
   $('#drama-select-all')?.addEventListener('change', (event) => {
+    // 表头只做「本页全选」，跨页累积靠逐页勾选（已选项翻页后不会被清掉）
+    setDramaSelection(toggleSelection(dramaSelection, pageIds, event.target.checked))
     view.querySelectorAll('.drama-select').forEach((checkbox) => { checkbox.checked = event.target.checked })
     updateBulkBar()
   })
   $('#drama-bulk-clear')?.addEventListener('click', () => {
+    setDramaSelection(new Set())
     view.querySelectorAll('.drama-select').forEach((checkbox) => { checkbox.checked = false })
     updateBulkBar()
   })
+  updateBulkBar()
   view.querySelectorAll('[data-policy-group]').forEach((select) => {
     select.addEventListener('change', async () => {
       if (!select.value || select.dataset.busy === '1') return
@@ -1079,7 +1219,7 @@ async function pageDramas() {
   $('#drama-bulk-apply')?.addEventListener('click', async (event) => {
     const button = event.currentTarget
     const groupId = Number($('#drama-bulk-group')?.value ?? 0)
-    const ids = selectedRows().map((checkbox) => Number(checkbox.value))
+    const ids = selectedIds()
     if (!groupId) return toast('请先选择策略组')
     if (!ids.length || button.disabled) return
     button.disabled = true
@@ -1089,15 +1229,29 @@ async function pageDramas() {
         method: 'POST',
         body: { dramaIds: ids },
       })
-      ids.forEach((id) => {
+      const idList = (value) => (Array.isArray(value) ? value.map((item) => Number(item?.id ?? item)).filter(Number.isFinite) : null)
+      const failedIds = new Set(idList(result.failed ?? result.failedIds) ?? [])
+      const updatedIds = idList(result.updatedIds ?? result.okIds ?? result.ids)
+      const reported = Number(result.updated ?? result.matched ?? NaN)
+      // 服务端只给了总数、且少于请求数：不猜哪几条成功，保持原值并让运营刷新核对
+      if (!updatedIds && failedIds.size === 0 && Number.isFinite(reported) && reported < ids.length) {
+        toast(`服务端只更新了 ${fmt(reported)}/${fmt(ids.length)} 部，请刷新后核对；未确认的行保留原策略组`)
+        return
+      }
+      const applied = ids.filter((id) => !failedIds.has(id) && (!updatedIds || updatedIds.has(id)))
+      // 逐条落 DOM：只改真正成功的行，失败项保留原策略组
+      for (const id of applied) {
         const select = view.querySelector(`[data-policy-group="${id}"]`)
-        if (!select) return
+        if (!select) continue
         select.value = String(groupId)
         select.dataset.previous = String(groupId)
-      })
-      toast(`已分配 ${fmt(result.updated ?? result.matched ?? ids.length)} 部剧集`)
-      view.querySelectorAll('.drama-select').forEach((checkbox) => { checkbox.checked = false })
+      }
+      const failedCount = ids.length - applied.length
+      if (applied.length) setDramaSelection(toggleSelection(dramaSelection, applied, false))
+      view.querySelectorAll('.drama-select').forEach((checkbox) => { checkbox.checked = dramaSelection.has(Number(checkbox.value)) })
       updateBulkBar()
+      if (failedCount) toast(`已分配 ${fmt(applied.length)} 部，${fmt(failedCount)} 部失败并保留原策略组`)
+      else toast(`已分配 ${fmt(applied.length)} 部剧集`)
     } catch (error) {
       toast(error.message)
     } finally {
@@ -1110,12 +1264,18 @@ async function pageDramas() {
       event.stopPropagation()
       const current = button.closest('.row-more')
       const open = !current.classList.contains('open')
-      view.querySelectorAll('.row-more.open').forEach((node) => {
-        node.classList.remove('open')
-        node.querySelector('.row-more-toggle')?.setAttribute('aria-expanded', 'false')
-      })
+      closeRowMenus()
       current.classList.toggle('open', open)
       button.setAttribute('aria-expanded', open ? 'true' : 'false')
+      if (!open) return
+      // 用 fixed 定位绕开 .panel 的 overflow 裁剪（移动端删除/刮削按钮点得到）
+      const menu = current.querySelector('.row-more-menu')
+      if (!menu) return
+      const rect = button.getBoundingClientRect()
+      menu.style.position = 'fixed'
+      menu.style.top = `${Math.round(rect.bottom + 6)}px`
+      menu.style.right = `${Math.round(Math.max(8, window.innerWidth - rect.right))}px`
+      menu.style.left = 'auto'
     })
   })
   $('#scrape-artwork').addEventListener('click', async () => {
@@ -1191,14 +1351,27 @@ async function pageDramas() {
     })
   })
   view.querySelectorAll('[data-toggle-publish]').forEach((button) => {
-    button.addEventListener('click', async () => {
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation()
+      // 请求期间锁死按钮：双击会先上架再下架，状态直接翻回去
+      if (button.dataset.busy === '1') return
       const id = Number(button.dataset.togglePublish)
-      const next = button.dataset.status === 'published' ? 'draft' : 'published'
+      const previous = button.dataset.status
+      const next = previous === 'published' ? 'draft' : 'published'
+      button.dataset.busy = '1'
+      button.disabled = true
+      button.setAttribute('aria-busy', 'true')
       try {
         await api(`/admin/api/dramas/${id}/publish`, { method: 'POST', body: { status: next } })
+        button.dataset.status = next
         toast(next === 'published' ? '已上架' : '已下架')
       } catch (error) {
+        button.dataset.status = previous
         toast(error.message)
+      } finally {
+        delete button.dataset.busy
+        button.disabled = false
+        button.setAttribute('aria-busy', 'false')
       }
       await pageDramas()
     })
@@ -1206,8 +1379,21 @@ async function pageDramas() {
   view.querySelectorAll('[data-del]').forEach((button) => {
     button.addEventListener('click', async () => {
       if (!(await askConfirm({ title: '删除剧集', message: '将同时删除该剧集下的全部分集，操作不可撤销。', confirmText: '删除', danger: true }))) return
-      await api(`/admin/api/dramas/${button.dataset.del}`, { method: 'DELETE' })
-      toast('已删除')
+      if (button.dataset.busy === '1') return
+      button.dataset.busy = '1'
+      button.disabled = true
+      button.setAttribute('aria-busy', 'true')
+      try {
+        await api(`/admin/api/dramas/${button.dataset.del}`, { method: 'DELETE' })
+        toast('已删除')
+      } catch (error) {
+        toast(error.message)
+        return
+      } finally {
+        delete button.dataset.busy
+        button.disabled = false
+        button.setAttribute('aria-busy', 'false')
+      }
       await pageDramas()
     })
   })
@@ -1610,6 +1796,9 @@ async function pageDramaEdit(id) {
 const field = (key, label, value, type = 'text') =>
   `<label>${esc(label)}<input id="f-${key}" type="${type}" value="${esc(value ?? '')}" /></label>`
 
+/** 分集表格刷新后要恢复焦点的按钮属性（重建 innerHTML 会丢焦点）。 */
+const EPISODE_FOCUS_ATTRS = ['delep', 'tracks', 'remote', 'importUrl', 'uploadTrigger', 'sample']
+
 async function pageEpisodes(dramaId) {
   const data = await api(`/admin/api/dramas/${dramaId}/episodes`)
   const isMovie = data.category === 'MOVIE'
@@ -1632,19 +1821,49 @@ async function pageEpisodes(dramaId) {
     </div>`
   wireEpisodeActions(dramaId)
 
-  $('#add-episode')?.addEventListener('click', async () => {
-    await api(`/admin/api/dramas/${dramaId}/episodes`, { method: 'POST', body: {} })
+  $('#add-episode')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget
+    if (button.disabled) return
+    button.disabled = true
+    button.setAttribute('aria-busy', 'true')
+    try {
+      await api(`/admin/api/dramas/${dramaId}/episodes`, { method: 'POST', body: {} })
+    } catch (error) {
+      toast(error.message)
+      return
+    } finally {
+      button.disabled = false
+      button.setAttribute('aria-busy', 'false')
+    }
     await pageEpisodes(dramaId)
   })
 
-  state.timers.push(setInterval(async () => {
+  let signature = episodesSignature(data.list)
+  // 幂等收口：先清同名 interval，同页重入（新增集、上传后重渲染）不会叠出多个轮询
+  startPageTimer('episodes', async () => {
     if (state.episodeImporting) return
     try {
       const fresh = await api(`/admin/api/dramas/${dramaId}/episodes`)
-      $('#ep-body').innerHTML = fresh.list.map((row) => episodeRow(row, isMovie)).join('')
+      const next = episodesSignature(fresh.list)
+      // 内容没变就不重建：重建 innerHTML 会把滚动位置和焦点都重置掉
+      if (next === signature) return
+      signature = next
+      const body = $('#ep-body')
+      if (!body) return
+      const scrollTop = view.scrollTop
+      const active = document.activeElement
+      const focused = active && body.contains(active)
+        ? EPISODE_FOCUS_ATTRS.map((key) => (active.dataset?.[key] ? { key, value: active.dataset[key] } : null)).find(Boolean)
+        : null
+      body.innerHTML = fresh.list.map((row) => episodeRow(row, isMovie)).join('')
       wireEpisodeActions(dramaId)
-    } catch { /* 页面已切走 */ }
-  }, 2500))
+      view.scrollTop = scrollTop
+      if (focused) {
+        const attr = { delep: 'data-delep', tracks: 'data-tracks', remote: 'data-remote', importUrl: 'data-import-url', uploadTrigger: 'data-upload-trigger', sample: 'data-sample' }[focused.key]
+        if (attr) body.querySelector(`[${attr}="${focused.value}"]`)?.focus({ preventScroll: true })
+      }
+    } catch { /* 页面已切走，或请求被更新的结果取代 */ }
+  }, 2500)
 }
 
 function episodeRow(row, isMovie = false) {
@@ -1782,7 +2001,21 @@ function wireEpisodeActions(dramaId) {
   view.querySelectorAll('[data-delep]').forEach((button) => {
     button.addEventListener('click', async () => {
       if (!(await askConfirm({ title: '删除分集', message: '删除后该集片源与观看入口会一并移除。', confirmText: '删除', danger: true }))) return
-      await api(`/admin/api/episodes/${button.dataset.delep}`, { method: 'DELETE' })
+      if (button.dataset.busy === '1') return
+      button.dataset.busy = '1'
+      button.disabled = true
+      button.setAttribute('aria-busy', 'true')
+      try {
+        await api(`/admin/api/episodes/${button.dataset.delep}`, { method: 'DELETE' })
+        toast('已删除分集')
+      } catch (error) {
+        toast(error.message)
+        return
+      } finally {
+        delete button.dataset.busy
+        button.disabled = false
+        button.setAttribute('aria-busy', 'false')
+      }
       await pageEpisodes(dramaId)
     })
   })
@@ -1924,11 +2157,15 @@ function openTrackForm(episodeId, track = null) {
 
 /* ---------------- 首页运营 ---------------- */
 async function pageOps() {
+  const perms = new Set(state.me?.permissions ?? [])
+  // 菜单键是 ops.section.write（首页楼层），Banner 的接口由 ops.banner.write 单独 guard
+  const canBanner = perms.has('ops.banner.write')
+  const canSection = perms.has('ops.section.write')
   const [banners, sections] = await Promise.all([api('/admin/api/banners'), api('/admin/api/sections')])
   const bannerPage = clientPage('opsBanners', banners.list ?? [], 20)
   view.innerHTML = `
     <div class="panel">
-      <h3>首页 Banner<span class="spacer"></span><button class="btn primary" id="add-banner">新增 Banner</button></h3>
+      <h3>首页 Banner<span class="spacer"></span>${canBanner ? '<button class="btn primary" id="add-banner">新增 Banner</button>' : '<span class="muted small">只读：需要 ops.banner.write</span>'}</h3>
       <table><thead><tr><th>图</th><th>名称/标题</th><th>跳转剧集</th><th>排序</th><th>启用</th><th>操作</th></tr></thead><tbody>
         ${bannerPage.items.map((row) => `<tr>
           <td><img class="mini" loading="lazy" src="${esc(mediaUrl(row.image))}" alt="" data-img-fallback="hide" /></td>
@@ -1937,27 +2174,27 @@ async function pageOps() {
           <td>${row.sort}</td>
           <td>${row.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill">停用</span>'}</td>
           <td class="row-actions">
-            <button class="btn sm" data-toggle-banner="${row.id}" data-enabled="${row.enabled ? 0 : 1}">${row.enabled ? '停用' : '启用'}</button>
-            <button class="btn sm danger" data-del-banner="${row.id}">删除</button>
+            ${canBanner ? `<button class="btn sm" data-toggle-banner="${row.id}" data-enabled="${row.enabled ? 0 : 1}">${row.enabled ? '停用' : '启用'}</button>
+            <button class="btn sm danger" data-del-banner="${row.id}">删除</button>` : '<span class="muted">—</span>'}
           </td></tr>`).join('')}
       </tbody></table>
       ${pager('opsBanners', bannerPage.page, bannerPage.pageSize, bannerPage.total, '个')}
     </div>
     <div class="panel">
-      <h3>首页楼层<span class="spacer"></span><button class="btn primary" id="add-section">新增楼层</button></h3>
+      <h3>首页楼层<span class="spacer"></span>${canSection ? '<button class="btn primary" id="add-section">新增楼层</button>' : '<span class="muted small">只读：需要 ops.section.write</span>'}</h3>
       ${sections.list.map((section) => `
         <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px">
           <div style="display:flex;gap:10px;align-items:center">
             <strong>${esc(section.title)}</strong><span class="muted">#${section.id} · 排序 ${section.sort} · ${section.items.length} 部</span>
             <span class="spacer" style="flex:1"></span>
-            <button class="btn sm" data-attach-section="${section.id}">挂剧集</button>
-            <button class="btn sm danger" data-del-section="${section.id}">删除</button>
+            ${canSection ? `<button class="btn sm" data-attach-section="${section.id}">挂剧集</button>
+            <button class="btn sm danger" data-del-section="${section.id}">删除</button>` : ''}
           </div>
           <div class="muted" style="margin-top:6px">${section.items.map((item) => `#${item.drama_id} ${esc(item.title)}`).join(' · ') || '（空）'}</div>
         </div>`).join('')}
     </div>`
 
-  $('#add-banner').addEventListener('click', async () => {
+  $('#add-banner')?.addEventListener('click', async () => {
     const name = await askText({ title: '新增 Banner', label: 'Banner 名称', confirmText: '下一步' })
     if (name === null) return
     const image = await askText({ title: '新增 Banner', label: '图片地址', placeholder: 'https://…', required: false, confirmText: '下一步' })
@@ -1979,7 +2216,7 @@ async function pageOps() {
       await pageOps()
     })
   })
-  $('#add-section').addEventListener('click', async () => {
+  $('#add-section')?.addEventListener('click', async () => {
     const title = await askText({ title: '新增首页楼层', label: '楼层标题', confirmText: '创建' })
     if (title === null) return
     await api('/admin/api/sections', { method: 'POST', body: { title } })
@@ -2158,9 +2395,14 @@ async function pageReview() {
 }
 
 const statusPill = (status) => status === 'approved' ? '<span class="pill ok">已通过</span>' : status === 'rejected' ? '<span class="pill bad">已驳回</span>' : '<span class="pill warn">待审</span>'
-const reviewButtons = (table, row) => `
-  <button class="btn sm" data-review="${table}:${row.id}:approve">通过</button>
+const reviewButtons = (table, row) => {
+  // 服务端审核接口要 content.review.write；只读审核员点按钮只会 403，这里直接不出操作
+  const canReview = hasPerm('content.review.write', new Set(state.me?.permissions ?? []))
+  return canReview
+    ? `<button class="btn sm" data-review="${table}:${row.id}:approve">通过</button>
   <button class="btn sm danger" data-review="${table}:${row.id}:reject">驳回</button>`
+    : '<span class="muted">—</span>'
+}
 
 /* ---------------- 用户 ---------------- */
 function openUserPasswordEditor(user, mode, onSaved) {
@@ -2267,8 +2509,8 @@ function bindPager(key, rerender) {
 }
 const pillOf = (status) => {
   const map = {
-    fulfilled: ['ok', '已支付'], paid: ['ok', '已支付'], created: ['', '待支付'], pending: ['', '待支付'],
-    closed: ['bad', '已关闭'], refunded: ['bad', '已退款'], refunding: ['', '退款中'],
+    fulfilled: ['ok', '已完成'], paid: ['ok', '已支付'], created: ['', '待支付'], pending: ['', '支付确认中'],
+    closed: ['bad', '已关闭'], failed: ['bad', '支付失败'], refunded: ['bad', '已退款'], refunding: ['', '退款中'], refund_pending: ['', '退款待审'],
     active: ['ok', '启用'], disabled: ['', '停用'], draft: ['', '草稿'], published: ['ok', '已上架'],
     approved: ['ok', '已通过'], rejected: ['bad', '已驳回'], done: ['ok', '已完成'],
   }
@@ -2658,19 +2900,39 @@ async function pageCoupons() {
       <select id="c-type" aria-label="优惠券类型"><option value="amount">立减</option><option value="percent">折扣(%)</option></select>
       <input id="c-value" aria-label="优惠面额或折扣" type="number" step="0.01" placeholder="面额/折扣" style="width:110px" />
       <input id="c-min" aria-label="使用门槛" type="number" step="0.01" placeholder="门槛" style="width:90px" />
+      <input id="c-valid" aria-label="有效期至" type="date" value="${couponValidTo()}" style="width:150px" />
       <button class="btn primary" id="c-add">新增</button>
     </div>
     ${table(['券码', '名称', '类型', '面额', '门槛', '已用/总量', '有效期', '状态', '操作'], couponPage.items)}
     ${pager('coupons', couponPage.page, couponPage.pageSize, couponPage.total, '张')}`)
-  $('#c-add').addEventListener('click', async () => {
-    await api('/admin/api/coupons', {
-      method: 'POST',
-      body: {
-        code: $('#c-code').value.trim(), name: $('#c-name').value.trim(),
-        discountType: $('#c-type').value, discountValue: Number($('#c-value').value || 0),
-        minAmount: Number($('#c-min').value || 0), total: 0, validTo: '2027-12-31',
-      },
-    })
+  $('#c-add').addEventListener('click', async (event) => {
+    const button = event.currentTarget
+    const name = $('#c-name').value.trim()
+    const discountType = $('#c-type').value
+    const discountValue = Number($('#c-value').value)
+    const minAmount = Number($('#c-min').value || 0)
+    const check = validateCouponDraft({ discountType, discountValue, minAmount })
+    if (!name) return toast('请填优惠券名称')
+    // 面额 0 会落成一张 0 元券，折扣超过 100 等于白送，先在提交前挡住
+    if (!check.ok) return toast(check.message)
+    button.disabled = true
+    try {
+      await api('/admin/api/coupons', {
+        method: 'POST',
+        body: {
+          code: $('#c-code').value.trim(), name, discountType, discountValue,
+          minAmount, total: 0,
+          // 默认「今天 + 30 天」，不再写死某个年份
+          validTo: $('#c-valid')?.value || couponValidTo(),
+        },
+      })
+      toast('优惠券已创建')
+    } catch (error) {
+      toast(error.message)
+      return
+    } finally {
+      button.disabled = false
+    }
     await pageCoupons()
   })
   view.querySelectorAll('[data-c-status]').forEach((button) => {
@@ -2817,19 +3079,31 @@ function renderTreeNode(node, state, depth = 0) {
 }
 
 async function pageRoles() {
-  const [roleData, adminData] = await Promise.all([
+  // 角色列表与后台用户是两套权限：只有「角色查看权」的账号不该因为 /admins 403 整页崩
+  const [roleResult, adminResult] = await Promise.allSettled([
     api('/admin/api/roles'),
     api('/admin/api/admins'),
   ])
+  if (roleResult.status === 'rejected') throw roleResult.reason
+  const roleData = roleResult.value ?? {}
   const roles = roleData.roles ?? []
-  const admins = adminData.list ?? []
-  const canWrite = new Set(state.me?.permissions ?? []).has('admin.write')
-  const userCount = (code) => admins.filter((admin) => (admin.roles ?? []).some((role) => role.code === code)).length
+  const adminsReady = adminResult.status === 'fulfilled'
+  const admins = adminsReady ? (adminResult.value?.list ?? []) : []
+  const perms = new Set(state.me?.permissions ?? [])
+  // 页面门是菜单键 admin.read，写操作才额外要 admin.write：两者对齐，不再只认写权限
+  const canRead = perms.has('admin.read')
+  const canWrite = canRead && perms.has('admin.write')
+  const adminsNote = adminsReady
+    ? ''
+    : `<p class="muted">后台用户列表无权查看（${esc(adminResult.reason?.message ?? '403')}），成员数按不可见处理。</p>`
+  const userCount = (code) => (adminsReady
+    ? `${fmt(admins.filter((admin) => (admin.roles ?? []).some((role) => role.code === code)).length)} 人`
+    : '—')
   const rolePage = clientPage('roles', roles, 20)
   const rows = rolePage.items.map((role) => `<tr>
     <td data-label="角色"><strong>${esc(role.name)}</strong><div class="muted small">${esc(role.description || '—')}</div></td>
     <td data-label="编码" class="mono">${esc(role.code)}</td>
-    <td data-label="成员">${fmt(userCount(role.code))} 人</td>
+    <td data-label="成员">${userCount(role.code)}</td>
     <td data-label="权限">${fmt((role.permissions ?? []).length)} 个</td>
     <td data-label="类型"><span class="pill ${role.is_system ? '' : 'ok'}">${role.is_system ? '内置角色' : '自定义角色'}</span></td>
     <td class="row-actions settings-row-actions">${canWrite ? `
@@ -2841,10 +3115,11 @@ async function pageRoles() {
   view.innerHTML = panel('角色管理', `
     <div class="rbac-summary">
       <span><b>${fmt(roles.length)}</b> 个角色</span>
-      <span><b>${fmt(admins.length)}</b> 个后台用户</span>
+      <span><b>${adminsReady ? fmt(admins.length) : '—'}</b> 个后台用户</span>
       <span><b>${fmt(roleData.permissions?.length ?? 0)}</b> 个权限点</span>
       <span class="muted">角色只负责分组；权限通过「分配权限」单独配置。</span>
     </div>
+    ${adminsNote}
     <p class="muted">内置角色不可删除；自定义角色仍分配给账号时也不能删除。成员分配在「用户管理」完成。</p>
     <div class="settings-table-wrap"><table class="settings-table role-table">
       <thead><tr><th>角色</th><th>编码</th><th>成员</th><th>权限</th><th>类型</th><th>操作</th></tr></thead>
@@ -3017,6 +3292,9 @@ async function pageRoles() {
 
 /* ---------------- 审计日志 ---------------- */
 async function pageAudit() {
+  // 页码进地址栏：刷新/后退回到同一页，不再永远跳回第一页
+  const restored = hydrateListState(readHashQuery(), { page: Number(listPages.audit ?? 1) })
+  listPages.audit = Number(restored.page) > 0 ? Number(restored.page) : 1
   const data = await api(`/admin/api/audit?page=${listPages.audit}&pageSize=20`)
   listPages.audit = Number(data.page ?? 1)
   const rows = data.list.map((log) => `<tr>
@@ -3031,7 +3309,10 @@ async function pageAudit() {
     <p class="muted">共 ${fmt(data.total ?? data.list.length)} 条</p>
     ${table(['ID', '时间', '操作人', '动作', '对象', '原因', '结果', 'IP'], rows)}
     ${pager('audit', listPages.audit, data.pageSize, data.total, '条')}`)
-  bindPager('audit', pageAudit)
+  bindPager('audit', async () => {
+    writeHashQuery('audit', { page: Number(listPages.audit) > 1 ? Number(listPages.audit) : '' })
+    await pageAudit()
+  })
 }
 
 /* ---------------- 支付渠道（多渠道 + 加密配置） ---------------- */
@@ -3390,7 +3671,11 @@ async function pageEmail() {
     if (!channel) return
     const isHttp = channel.type === 'http'
     const isOauth = channel.type === 'oauth2'
-    openOverlay(`${channel.id ? '编辑邮件通道' : '新增邮件通道'} · ${channel.name}`, `
+    // 轮询控制器要在 openOverlay 之前声明：弹层的 onClose（Esc/点遮罩/关闭按钮）也用它收口
+    let deviceCode = null
+    let timer = null
+    const stop = () => { if (timer) { clearInterval(timer); timer = null } }
+    const closeOverlay = openOverlay(`${channel.id ? '编辑邮件通道' : '新增邮件通道'} · ${channel.name}`, `
       <div class="settings-ui" id="em-form">
         <p class="settings-modal-copy">邮件通道按优先级回退；验证码等关键邮件需要保持至少一条可用通道。</p>
         <div class="settings-form-grid modal-settings-grid">
@@ -3554,17 +3839,15 @@ async function pageEmail() {
           <button class="btn" id="ch-cancel" type="button">取消</button>
           <button class="btn primary" id="ch-save" type="button">保存通道</button>
         </div>
-      </div>`)
+      </div>`, null, { onClose: stop })
 
-    const closeForm = () => document.querySelector('#em-form')?.closest('.modal-mask')?.remove()
-
-    let deviceCode = null
-    let timer = null
-    const stop = () => { if (timer) { clearInterval(timer); timer = null } }
+    const closeForm = () => closeOverlay()
 
     $('#ch-cancel').addEventListener('click', () => { stop(); editing = null; closeForm() })
 
     $('#ch-type').addEventListener('change', () => {
+      // 换类型会换掉 OAuth 区块，先停掉旧轮询再重绘，避免弹层关掉后还在轮询
+      stop()
       collect()
       editing.type = $('#ch-type').value
       closeForm()
@@ -3654,6 +3937,8 @@ async function pageEmail() {
     })
 
     $('#ch-oauth-start')?.addEventListener('click', async () => {
+      // 重复点「生成授权码」会再挂一个 interval，先把上一次收掉
+      stop()
       collect()
       try {
         await api('/admin/api/email-channels', { method: 'POST', body: { id: editing.id || undefined, name: editing.name, type: 'oauth2', enabled: editing.enabled !== false, priority: editing.priority, from: editing.from, fromName: editing.fromName, smtp: { host: editing.smtp.host, port: editing.smtp.port, secure: editing.smtp.secure, user: editing.from }, oauth2: { tokenUrl: editing.oauth2.tokenUrl, deviceUrl: editing.oauth2.deviceUrl, clientId: editing.oauth2.clientId, scope: editing.oauth2.scope, ...(editing.oauth2.clientSecretInput ? { clientSecret: editing.oauth2.clientSecretInput } : {}) } } })
@@ -3676,7 +3961,6 @@ async function pageEmail() {
         }, Math.max(5, started.interval ?? 5) * 1000)
       } catch (error) { $('#ch-msg').textContent = error.message }
     })
-
     $('#ch-oauth-check')?.addEventListener('click', async () => {
       if (!editing.id || !deviceCode) { $('#ch-msg').textContent = '请先生成授权码'; return }
       try {
@@ -3692,9 +3976,12 @@ async function pageEmail() {
 
   for (const button of view.querySelectorAll('[data-edit]')) {
     button.addEventListener('click', async () => {
-      const channel = (await api('/admin/api/email-channels')).channels.find((item) => item.id === button.dataset.edit)
-      editing = { ...channel, smtp: { ...channel.smtp }, oauth2: { ...channel.oauth2 }, http: { ...channel.http } }
-      renderForm()
+      try {
+        const channel = (await api('/admin/api/email-channels')).channels.find((item) => item.id === button.dataset.edit)
+        if (!channel) return toast('通道已不存在，请刷新页面')
+        editing = { ...channel, smtp: { ...channel.smtp }, oauth2: { ...channel.oauth2 }, http: { ...channel.http } }
+        renderForm()
+      } catch (error) { toast(error.message) }
     })
   }
   for (const button of view.querySelectorAll('[data-test]')) {
@@ -3713,23 +4000,86 @@ async function pageEmail() {
   }
   for (const button of view.querySelectorAll('[data-toggle]')) {
     button.addEventListener('click', async () => {
-      const channel = (await api('/admin/api/email-channels')).channels.find((item) => item.id === button.dataset.toggle)
-      await api('/admin/api/email-channels', { method: 'POST', body: { id: channel.id, enabled: channel.enabled === false } })
+      if (button.dataset.busy === '1') return
+      button.dataset.busy = '1'
+      button.disabled = true
+      button.setAttribute('aria-busy', 'true')
+      try {
+        const channel = (await api('/admin/api/email-channels')).channels.find((item) => item.id === button.dataset.toggle)
+        if (!channel) throw new Error('通道已不存在，请刷新页面')
+        const nextEnabled = channel.enabled === false
+        // 停用最后一条启用通道 = 全站验证码发不出去，先问一句
+        if (!nextEnabled && channels.filter((item) => item.enabled !== false).length <= 1) {
+          const ok = await askConfirm({
+            title: '停用最后一条启用通道',
+            message: '停用后没有任何可用发信通道，全站验证码与通知邮件都发不出去。确认停用吗？',
+            confirmText: '仍然停用',
+            danger: true,
+          })
+          if (!ok) return
+        }
+        await api('/admin/api/email-channels', { method: 'POST', body: { id: channel.id, enabled: nextEnabled } })
+        toast(nextEnabled ? '通道已启用' : '通道已停用')
+      } catch (error) {
+        toast(`操作失败：${error.message}`)
+        return
+      } finally {
+        delete button.dataset.busy
+        button.disabled = false
+        button.setAttribute('aria-busy', 'false')
+      }
       await pageEmail()
     })
   }
   for (const button of view.querySelectorAll('[data-del]')) {
     button.addEventListener('click', async () => {
-      await api(`/admin/api/email-channels/${button.dataset.del}`, { method: 'DELETE' })
-      toast('已删除')
+      if (button.dataset.busy === '1') return
+      const channel = channels.find((item) => item.id === button.dataset.del)
+      const enabledCount = channels.filter((item) => item.enabled !== false).length
+      const isLastEnabled = channel?.enabled !== false && enabledCount <= 1
+      const ok = await askConfirm({
+        title: '删除邮件通道',
+        message: isLastEnabled
+          ? '这是最后一条启用中的通道：删除后若没有其它启用通道，全站验证码将无法发送。确认删除吗？'
+          : '删除后若没有其它启用通道，全站验证码将无法发送。确认删除吗？',
+        confirmText: '删除',
+        danger: true,
+      })
+      if (!ok) return
+      button.dataset.busy = '1'
+      button.disabled = true
+      button.setAttribute('aria-busy', 'true')
+      try {
+        await api(`/admin/api/email-channels/${button.dataset.del}`, { method: 'DELETE' })
+        toast('已删除')
+      } catch (error) {
+        toast(`删除失败：${error.message}`)
+        return
+      } finally {
+        delete button.dataset.busy
+        button.disabled = false
+        button.setAttribute('aria-busy', 'false')
+      }
       await pageEmail()
     })
   }
   for (const button of view.querySelectorAll('[data-top]')) {
     button.addEventListener('click', async () => {
-      const channels2 = (await api('/admin/api/email-channels')).channels
-      const min = Math.min(...channels2.map((item) => item.priority))
-      await api('/admin/api/email-channels', { method: 'POST', body: { id: button.dataset.top, priority: min - 10 } })
+      if (button.dataset.busy === '1') return
+      button.dataset.busy = '1'
+      button.disabled = true
+      try {
+        const channels2 = (await api('/admin/api/email-channels')).channels
+        // 空列表 / 脏优先级不能再算出 Infinity 写进请求
+        const priority = nextTopPriority(channels2, 'priority', 100)
+        await api('/admin/api/email-channels', { method: 'POST', body: { id: button.dataset.top, priority } })
+      } catch (error) {
+        toast(`置顶失败：${error.message}`)
+        return
+      } finally {
+        delete button.dataset.busy
+        button.disabled = false
+      }
       await pageEmail()
     })
   }
@@ -3746,6 +4096,13 @@ const EVENT_LABEL = {
 }
 
 const CHART_COLORS = ['#5b86ff', '#22d3ee', '#f5b545', '#45d19a', '#a78bfa', '#ff5f7a']
+
+/** 图表的可展开数据表：只有 role="img" + aria-label 时，读屏器和键盘用户看不到具体数值。 */
+function chartDataTable(headers, rows) {
+  const head = headers.map((label) => `<th>${esc(label)}</th>`).join('')
+  const body = (rows ?? []).map((cells) => `<tr>${cells.map((cell) => `<td>${esc(String(cell ?? '—'))}</td>`).join('')}</tr>`).join('')
+  return `<details class="chart-data"><summary>数据表</summary><table><thead><tr>${head}</tr></thead><tbody>${body || `<tr><td colspan="${headers.length}" class="muted">该区间暂无数据</td></tr>`}</tbody></table></details>`
+}
 
 function svgLineChart(rows, series, { height = 220 } = {}) {
   if (!rows?.length) return '<div class="chart-empty">该区间暂无数据</div>'
@@ -3777,11 +4134,16 @@ function svgLineChart(rows, series, { height = 220 } = {}) {
       ${rows.map((row, index) => `<circle cx="${xOf(index)}" cy="${yOf(row[item.key])}" r="3.5" fill="${item.color}"><title>${esc(row.day ?? '')} ${esc(item.label)} ${fmt(row[item.key] ?? 0)}</title></circle>`).join('')}`
   }).join('')
   const legend = series.map((item) => `<span class="chart-legend-item"><i style="background:${item.color}"></i>${esc(item.label)}</span>`).join('')
+  const table = chartDataTable(
+    ['日期', ...series.map((item) => item.label)],
+    rows.map((row) => [row.day ?? '—', ...series.map((item) => fmt(row[item.key] ?? 0))]),
+  )
   return `<div class="chart-block">
     <div class="chart-legend">${legend}<span class="chart-legend-total">峰值 ${fmt(max)}</span></div>
     <svg class="analytics-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="趋势图">
       ${grid}${xLabels}${paths}
     </svg>
+    ${table}
   </div>`
 }
 
@@ -3790,19 +4152,20 @@ function funnelChart(stages) {
   if (!list.length) return '<div class="chart-empty">该区间暂无漏斗数据</div>'
   const values = list.map((stage) => Number(stage.value ?? 0))
   const base = Math.max(1, ...values)
-  return `<div class="funnel-chart">${list.map((stage, index) => {
+  const computed = list.map((stage, index) => {
     const value = Number(stage.value ?? 0)
-    const width = Math.max(2, Math.round((value / base) * 100))
     const previous = index === 0 ? value : Number(list[index - 1].value ?? 0)
     const rate = Number.isFinite(Number(stage.rate))
       ? Number(stage.rate)
       : (index === 0 ? 100 : (previous ? Number(((value / previous) * 100).toFixed(1)) : 0))
-    return `<div class="funnel-row">
-      <div class="funnel-label"><span>${esc(stage.label)}</span><b>${fmt(value)}</b></div>
-      <div class="funnel-track"><i style="width:${width}%;background:${CHART_COLORS[index % CHART_COLORS.length]}"></i></div>
-      <span class="funnel-rate">${rate}%</span>
-    </div>`
-  }).join('')}<p class="funnel-note">按同一访客逐级去重，只统计完成前序步骤的人；新数据按匿名访客 ID 归因，历史数据按用户/IP 回退。历史订单若缺 visitor_id，不会计入漏斗的「支付成功」，因此可能低于上方按订单统计的支付转化率。</p></div>`
+    return { label: stage.label, value, width: Math.max(2, Math.round((value / base) * 100)), rate }
+  })
+  return `<div class="funnel-chart">${computed.map((stage, index) => `<div class="funnel-row">
+      <div class="funnel-label"><span>${esc(stage.label)}</span><b>${fmt(stage.value)}</b></div>
+      <div class="funnel-track"><i style="width:${stage.width}%;background:${CHART_COLORS[index % CHART_COLORS.length]}"></i></div>
+      <span class="funnel-rate">${stage.rate}%</span>
+    </div>`).join('')}<p class="funnel-note">按同一访客逐级去重，只统计完成前序步骤的人；新数据按匿名访客 ID 归因，历史数据按用户/IP 回退。历史订单若缺 visitor_id，不会计入漏斗的「支付成功」，因此可能低于上方按订单统计的支付转化率。</p>
+    ${chartDataTable(['环节', '数值', '转化率'], computed.map((stage) => [stage.label, fmt(stage.value), `${stage.rate}%`]))}</div>`
 }
 
 function donutChart(segments, centerLabel = '总计') {
@@ -3815,16 +4178,24 @@ function donutChart(segments, centerLabel = '总计') {
     cursor += (Number(item.value) / total) * 100
     return `${item.color ?? CHART_COLORS[index % CHART_COLORS.length]} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`
   }).join(', ')
+  const table = chartDataTable(
+    ['分类', '数值', '占比'],
+    list.map((item) => [item.label, fmt(item.value), `${((Number(item.value) / total) * 100).toFixed(1)}%`]),
+  )
   return `<div class="donut-wrap">
     <div class="donut" style="background:conic-gradient(${stops})"><div class="donut-center"><b>${fmt(total)}</b><span>${esc(centerLabel)}</span></div></div>
     <div class="donut-legend">${list.map((item, index) => `<span><i style="background:${item.color ?? CHART_COLORS[index % CHART_COLORS.length]}"></i>${esc(item.label)}<b>${fmt(item.value)}</b></span>`).join('')}</div>
-  </div>`
+  </div>${table}`
 }
 
 function rankedBars(rows, key, labelKey, unit = '') {
   const list = (rows ?? []).filter(Boolean).slice(0, 8)
   if (!list.length) return '<div class="chart-empty">该区间暂无数据</div>'
   const max = Math.max(1, ...list.map((row) => Number(row[key] ?? 0)))
+  const table = chartDataTable(
+    ['名称', '数值'],
+    list.map((row) => [row[labelKey] ?? '—', `${fmt(row[key] ?? 0)}${unit}`]),
+  )
   return `<div class="ranked-bars">${list.map((row, index) => {
     const value = Number(row[key] ?? 0)
     return `<div class="ranked-row">
@@ -3832,13 +4203,29 @@ function rankedBars(rows, key, labelKey, unit = '') {
       <span class="ranked-track"><i style="width:${Math.max(2, Math.round((value / max) * 100))}%;background:${CHART_COLORS[index % CHART_COLORS.length]}"></i></span>
       <b>${fmt(value)}${unit}</b>
     </div>`
-  }).join('')}</div>`
+  }).join('')}</div>${table}`
 }
 
 async function pageAnalytics() {
-  const days = Number(localStorage.getItem('mh-analytics-days') ?? 7)
+  // localStorage 里的天数会被旧版本/手工改坏，先过白名单再进 query
+  const days = pickAllowedNumber(localStorage.getItem('mh-analytics-days'), [7, 14, 30], 7)
   const perms = new Set(state.me?.permissions ?? [])
   const data = await api(`/admin/api/analytics?days=${days}`)
+  // 后端某个区块缺字段时整页会抛错白屏，这里逐块兜底
+  const safeList = (value) => (Array.isArray(value) ? value : [])
+  const funnel = { orders: 0, paid: 0, closed: 0, refunded: 0, payRate: 0, ...(data.funnel ?? {}) }
+  const totals = { plays: 0, playsAllTime: 0, viewers: 0, playsPerViewer: 0, dramasPlayed: 0, ...(data.totals ?? {}) }
+  const money = { revenue: 0, aov: 0, pendingRefunds: 0, ...(data.money ?? {}) }
+  const range = { since: '—', ...(data.range ?? {}) }
+  const userStats = { newInRange: 0, total: 0, ...(data.users ?? {}) }
+  userStats.newByDay = safeList(userStats.newByDay)
+  const subs = { active: 0, ...(data.subscriptions ?? {}) }
+  subs.byPlan = safeList(subs.byPlan)
+  const playsByDay = safeList(data.playsByDay)
+  const ordersByDay = safeList(data.ordersByDay)
+  const sourceSplit = safeList(data.sourceSplit)
+  const byChannel = safeList(data.byChannel)
+  const topDramas = safeList(data.topDramas)
   const t = {
     upstream: {}, byType: [], completion: {}, searchTerms: [], topDetailViews: [],
     ...(data.tracking ?? {}),
@@ -3846,17 +4233,17 @@ async function pageAnalytics() {
   const u = { detailViews: 0, paywallViews: 0, paywallClicks: 0, detailToPaywall: 0, paywallToOrder: 0, orderToPaid: 0, ...t.upstream }
   const comp = { samples: 0, avgRate: 0, finished: 0, ...t.completion }
   const visitors = { total: 0, anonymous: 0, linked: 0, newByDay: [], ...(data.visitors ?? {}) }
-  const conversion = data.conversion ?? [
+  const conversion = safeList(data.conversion).length ? data.conversion : [
     { label: '访客', value: visitors.total },
     { label: '页面浏览', value: u.pageViews ?? 0 },
     { label: '详情页', value: u.detailViews },
     { label: '付费墙', value: u.paywallViews },
-    { label: '下单', value: data.funnel.orders },
-    { label: '支付成功', value: data.funnel.paid },
+    { label: '下单', value: funnel.orders },
+    { label: '支付成功', value: funnel.paid },
   ]
   const visitorDayMap = new Map()
   for (const row of visitors.newByDay ?? []) visitorDayMap.set(row.day, { day: row.day, visitors: row.n, users: 0 })
-  for (const row of data.users.newByDay ?? []) {
+  for (const row of userStats.newByDay ?? []) {
     const item = visitorDayMap.get(row.day) ?? { day: row.day, visitors: 0, users: 0 }
     item.users = row.n
     visitorDayMap.set(row.day, item)
@@ -3870,10 +4257,10 @@ async function pageAnalytics() {
   }
   const eventDays = [...eventDayMap.values()].sort((a, b) => String(a.day).localeCompare(String(b.day)))
   const sourceLabel = { play: '正常播放', trial: '试看' }
-  const sourceSegments = (data.sourceSplit ?? []).map((row, index) => ({
+  const sourceSegments = (sourceSplit ?? []).map((row, index) => ({
     label: sourceLabel[row.source] ?? row.source, value: row.n, color: CHART_COLORS[index % CHART_COLORS.length],
   }))
-  const channelRows = (data.byChannel ?? []).map((row) => ({ label: row.channel, revenue: row.revenue }))
+  const channelRows = (byChannel ?? []).map((row) => ({ label: row.channel, revenue: row.revenue }))
   const eventRows = (t.byType ?? []).map((row) => ({ label: EVENT_LABEL[row.type] ?? row.type, value: row.n }))
   const bars = (rows, key, label) => {
     const max = Math.max(1, ...rows.map((row) => Number(row[key] ?? 0)))
@@ -3888,20 +4275,20 @@ async function pageAnalytics() {
     <div class="form-row" style="margin-bottom:12px">
       ${[7, 14, 30].map((n) => `<button class="btn sm ${days === n ? 'primary' : ''}" data-days="${n}">近 ${n} 天</button>`).join('')}
       <span class="spacer" style="flex:1"></span>
-      <span class="muted">统计区间：${esc(data.range.since)} 起</span>
+      <span class="muted">统计区间：${esc(range.since)} 起</span>
       ${perms.has('growth.distribution.read') ? '<a class="btn sm" href="#/distribution">分销分析</a>' : ''}
       ${perms.has('growth.distribution.write') ? '<a class="btn sm primary" href="#/distribution-config">分销配置</a>' : ''}
     </div>
 
     <div class="cards">
-      ${card('播放量', fmt(data.totals.plays), `次（历史 ${fmt(data.totals.playsAllTime)}）`)}
-      ${card('独立观众', fmt(data.totals.viewers), '人')}
-      ${card('人均播放', String(data.totals.playsPerViewer), '次/人')}
-      ${card('被播放剧集', fmt(data.totals.dramasPlayed), '部')}
-      ${card('收入', `¥${fmt(data.money.revenue)}`, `客单价 ¥${data.money.aov}`)}
-      ${card('支付转化', `${data.funnel.payRate}%`, `${data.funnel.paid}/${data.funnel.orders} 单`)}
-      ${card('新增用户', fmt(data.users.newInRange), `累计 ${fmt(data.users.total)}`)}
-      ${card('活跃订阅', fmt(data.subscriptions.active), '个')}
+      ${card('播放量', fmt(totals.plays), `次（历史 ${fmt(totals.playsAllTime)}）`)}
+      ${card('独立观众', fmt(totals.viewers), '人')}
+      ${card('人均播放', String(totals.playsPerViewer), '次/人')}
+      ${card('被播放剧集', fmt(totals.dramasPlayed), '部')}
+      ${card('收入', `¥${fmt(money.revenue)}`, `客单价 ¥${money.aov}`)}
+      ${card('支付转化', `${funnel.payRate}%`, `${funnel.paid}/${funnel.orders} 单`)}
+      ${card('新增用户', fmt(userStats.newInRange), `累计 ${fmt(userStats.total)}`)}
+      ${card('活跃订阅', fmt(subs.active), '个')}
       ${card('新增访客', fmt(visitors.total), `匿名 ${fmt(visitors.anonymous)} · 已关联 ${fmt(visitors.linked)}`)}
       ${card('页面浏览', fmt(u.pageViews ?? 0), '次')}
     </div>
@@ -3909,7 +4296,7 @@ async function pageAnalytics() {
     <div class="split" style="margin-top:16px">
       <div class="panel">
         <h3>播放与访客趋势</h3>
-        ${svgLineChart(data.playsByDay, [
+        ${svgLineChart(playsByDay, [
           { key: 'plays', label: '播放量', color: CHART_COLORS[0] },
           { key: 'viewers', label: '独立观众', color: CHART_COLORS[1] },
         ])}
@@ -3937,7 +4324,7 @@ async function pageAnalytics() {
     <div class="split" style="margin-top:16px">
       <div class="panel">
         <h3>收入趋势</h3>
-        ${svgLineChart(data.ordersByDay, [{ key: 'revenue', label: '收入（元）', color: CHART_COLORS[3] }], { height: 190 })}
+        ${svgLineChart(ordersByDay, [{ key: 'revenue', label: '收入（元）', color: CHART_COLORS[3] }], { height: 190 })}
         <h3 style="margin-top:18px">收款渠道</h3>
         ${rankedBars(channelRows, 'revenue', 'label', ' 元')}
       </div>
@@ -3950,18 +4337,18 @@ async function pageAnalytics() {
     <div class="split" style="margin-top:16px">
       <div class="panel">
         <h3>播放趋势（按日）</h3>
-        ${bars(data.playsByDay, 'plays')}
+        ${bars(playsByDay, 'plays')}
         <h3 style="margin-top:18px">新增用户（按日）</h3>
-        ${bars(data.users.newByDay, 'n')}
+        ${bars(userStats.newByDay, 'n')}
       </div>
       <div class="panel">
         <h3>播放来源</h3>
         <table><thead><tr><th>来源</th><th>次数</th></tr></thead><tbody>
-          ${(data.sourceSplit.length ? data.sourceSplit : [{ source: '—', n: 0 }]).map((row) => `<tr><td>${row.source === 'trial' ? '试看' : row.source === 'play' ? '正常播放' : esc(row.source)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
+          ${(sourceSplit.length ? sourceSplit : [{ source: '—', n: 0 }]).map((row) => `<tr><td>${row.source === 'trial' ? '试看' : row.source === 'play' ? '正常播放' : esc(row.source)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
         </tbody></table>
         <h3 style="margin-top:18px">订阅分布</h3>
         <table><thead><tr><th>套餐</th><th>人数</th></tr></thead><tbody>
-          ${(data.subscriptions.byPlan.length ? data.subscriptions.byPlan : [{ name: '—', n: 0 }]).map((row) => `<tr><td>${esc(row.name)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
+          ${(subs.byPlan.length ? subs.byPlan : [{ name: '—', n: 0 }]).map((row) => `<tr><td>${esc(row.name)}</td><td>${fmt(row.n)}</td></tr>`).join('')}
         </tbody></table>
       </div>
     </div>
@@ -3970,21 +4357,21 @@ async function pageAnalytics() {
       <div class="panel">
         <h3>热门内容 Top 10</h3>
         <table><thead><tr><th>剧集</th><th>播放</th><th>观众</th></tr></thead><tbody>
-          ${(data.topDramas.length ? data.topDramas : [{ title: '—', plays: 0, viewers: 0 }]).map((row) => `<tr><td>${esc(row.title)}</td><td>${fmt(row.plays)}</td><td>${fmt(row.viewers)}</td></tr>`).join('')}
+          ${(topDramas.length ? topDramas : [{ title: '—', plays: 0, viewers: 0 }]).map((row) => `<tr><td>${esc(row.title)}</td><td>${fmt(row.plays)}</td><td>${fmt(row.viewers)}</td></tr>`).join('')}
         </tbody></table>
       </div>
       <div class="panel">
         <h3>收款渠道</h3>
         <table><thead><tr><th>渠道</th><th>订单</th><th>收入</th></tr></thead><tbody>
-          ${(data.byChannel.length ? data.byChannel : [{ channel: '—', orders: 0, revenue: 0 }]).map((row) => `<tr><td>${esc(row.channel)}</td><td>${fmt(row.orders)}</td><td>¥${fmt(row.revenue)}</td></tr>`).join('')}
+          ${(byChannel.length ? byChannel : [{ channel: '—', orders: 0, revenue: 0 }]).map((row) => `<tr><td>${esc(row.channel)}</td><td>${fmt(row.orders)}</td><td>¥${fmt(row.revenue)}</td></tr>`).join('')}
         </tbody></table>
         <h3 style="margin-top:18px">订单漏斗</h3>
         <table><tbody>
-          <tr><td>下单</td><td>${fmt(data.funnel.orders)}</td></tr>
-          <tr><td>已支付</td><td>${fmt(data.funnel.paid)}</td></tr>
-          <tr><td>超时关闭</td><td>${fmt(data.funnel.closed)}</td></tr>
-          <tr><td>已退款</td><td>${fmt(data.funnel.refunded)}</td></tr>
-          <tr><td>退款中</td><td>${fmt(data.money.pendingRefunds)}</td></tr>
+          <tr><td>下单</td><td>${fmt(funnel.orders)}</td></tr>
+          <tr><td>已支付</td><td>${fmt(funnel.paid)}</td></tr>
+          <tr><td>超时关闭</td><td>${fmt(funnel.closed)}</td></tr>
+          <tr><td>已退款</td><td>${fmt(funnel.refunded)}</td></tr>
+          <tr><td>退款中</td><td>${fmt(money.pendingRefunds)}</td></tr>
         </tbody></table>
       </div>
     </div>
@@ -3999,8 +4386,8 @@ async function pageAnalytics() {
           <tr><td>付费墙点击</td><td>${fmt(u.paywallClicks)}</td></tr>
           <tr><td>打开登录 / 登录成功</td><td>${fmt(u.loginOpens ?? 0)} / ${fmt(u.loginSuccesses ?? 0)}</td></tr>
           <tr><td>收藏</td><td>${fmt(u.favorites ?? 0)}</td></tr>
-          <tr><td>下单</td><td>${fmt(data.funnel.orders)} <span class="muted">付费墙→下单 ${u.paywallToOrder}%</span></td></tr>
-          <tr><td>支付成功</td><td>${fmt(data.funnel.paid)} <span class="muted">下单→支付 ${u.orderToPaid}%</span></td></tr>
+          <tr><td>下单</td><td>${fmt(funnel.orders)} <span class="muted">付费墙→下单 ${u.paywallToOrder}%</span></td></tr>
+          <tr><td>支付成功</td><td>${fmt(funnel.paid)} <span class="muted">下单→支付 ${u.orderToPaid}%</span></td></tr>
         </tbody></table>
         <h3 style="margin-top:18px">完播</h3>
         <table><tbody>
@@ -4318,6 +4705,9 @@ async function pageContentStats() {
 async function pageDistribution() {
   const days = Number(localStorage.getItem('mh-distribution-days') ?? 30)
   const canConfigure = new Set(state.me?.permissions ?? []).has('growth.distribution.write')
+  // 服务端把结算（含提现/结算单动作）和风控拆成了独立权限，前端按钮必须一一对应
+  const canSettle = new Set(state.me?.permissions ?? []).has('growth.distribution.settle')
+  const canRisk = new Set(state.me?.permissions ?? []).has('growth.distribution.risk')
   const pageQuery = (key) => `page=${listPages[key] ?? 1}&pageSize=20`
   const [configData, dashboard, overview, settlements, commissions, relations, withdrawals] = await Promise.all([
     api('/admin/api/distribution/config'),
@@ -4425,9 +4815,9 @@ async function pageDistribution() {
         <td>${esc(fmtTs(row.created_at))}</td><td>${esc(row.nickname ?? `#${row.distributor_user_id}`)}</td>
         <td>${esc(row.currency_symbol ?? '')}${Number(row.amount ?? 0).toFixed(2)}</td>
         <td>${esc(row.method_name ?? row.method_code)}</td><td>${esc(row.status)}</td>
-        <td><button class="btn sm" data-withdrawal-action="approve" data-withdrawal-id="${row.id}">批准</button>
+        <td>${canSettle ? `<button class="btn sm" data-withdrawal-action="approve" data-withdrawal-id="${row.id}">批准</button>
           <button class="btn sm" data-withdrawal-action="pay" data-withdrawal-id="${row.id}">打款</button>
-          <button class="btn sm" data-withdrawal-action="reject" data-withdrawal-id="${row.id}">驳回</button></td>
+          <button class="btn sm" data-withdrawal-action="reject" data-withdrawal-id="${row.id}">驳回</button>` : '<span class="muted">只读</span>'}</td>
       </tr>`))}
       ${pager('distributionWithdrawals', withdrawalPage.page, withdrawalPage.pageSize, withdrawalPage.total, '笔')}
     </div>
@@ -4451,7 +4841,7 @@ async function pageDistribution() {
         <td>${esc(row.nickname ?? row.email ?? `#${row.distributorUserId}`)}</td>
         <td>${fmt(row.directInvitees)}</td><td>${fmt(row.teamSize)}</td>
         <td>¥${(Number(row.netCommissionFen ?? 0) / 100).toFixed(2)}</td>
-        <td>¥${(Number(row.availableFen ?? 0) / 100).toFixed(2)} <button class="btn sm" data-create-settlement="${row.distributorUserId}">结算</button></td>
+        <td>¥${(Number(row.availableFen ?? 0) / 100).toFixed(2)} ${canSettle ? `<button class="btn sm" data-create-settlement="${row.distributorUserId}">结算</button>` : ''}</td>
       </tr>`))}
       ${pager('distributionDistributors', distributorPage.page, distributorPage.pageSize, distributorPage.total, '人')}
     </div>
@@ -4461,9 +4851,9 @@ async function pageDistribution() {
         ${table(['分销员', '周期', '金额', '状态', '操作'], settlementPage.items.map((row) => `<tr>
           <td>#${row.distributor_user_id}</td><td>${esc(row.period_start)} ~ ${esc(row.period_end)}</td>
           <td>¥${(Number(row.amount_fen ?? 0) / 100).toFixed(2)}</td><td>${esc(row.status)}</td>
-          <td><button class="btn sm" data-settle-action="approve" data-settle-id="${row.id}">批准</button>
+          <td>${canSettle ? `<button class="btn sm" data-settle-action="approve" data-settle-id="${row.id}">批准</button>
             <button class="btn sm" data-settle-action="pay" data-settle-id="${row.id}">打款</button>
-            <button class="btn sm" data-settle-action="reject" data-settle-id="${row.id}">驳回</button></td>
+            <button class="btn sm" data-settle-action="reject" data-settle-id="${row.id}">驳回</button>` : '<span class="muted">只读</span>'}</td>
         </tr>`))}
         ${pager('distributionSettlements', settlementPage.page, settlementPage.pageSize, settlementPage.total, '笔')}
       </div>
@@ -4481,8 +4871,8 @@ async function pageDistribution() {
       ${table(['上级', '下级', '深度', '状态', '风险', '操作'], relationPage.items.map((row) => `<tr>
         <td>#${row.ancestor_user_id}</td><td>${esc(row.nickname ?? row.email ?? `#${row.descendant_user_id}`)}</td>
         <td>${row.depth} 级</td><td>${esc(row.status)}</td><td>${esc(row.risk_status)}</td>
-        <td><button class="btn sm" data-risk-action="freeze" data-relation-id="${row.relationId}">冻结</button>
-          <button class="btn sm" data-risk-action="unfreeze" data-relation-id="${row.relationId}">解冻</button></td>
+        <td>${canRisk ? `<button class="btn sm" data-risk-action="freeze" data-relation-id="${row.relationId}">冻结</button>
+          <button class="btn sm" data-risk-action="unfreeze" data-relation-id="${row.relationId}">解冻</button>` : '<span class="muted">只读</span>'}</td>
       </tr>`))}
       ${pager('distributionRelations', relationPage.page, relationPage.pageSize, relationPage.total, '条')}
     </div>`)
@@ -4523,22 +4913,36 @@ async function pageDistribution() {
       const action = button.dataset.settleAction
       const id = Number(button.dataset.settleId)
       let payoutRef = ''
+      let reason = action
       if (action === 'pay') {
         const result = await askText({ title: '确认结算打款', label: '打款凭证', hint: '填写银行流水号或链上交易号。', confirmText: '确认打款' })
         if (result === null) return
         payoutRef = result
       }
+      if (action === 'reject') {
+        const result = await askText({ title: '驳回结算单', label: '驳回原因', value: '后台驳回', hint: '原因会写进操作日志。', confirmText: '确认驳回' })
+        if (result === null) return
+        reason = result
+      }
       try {
-        await api(`/admin/api/distribution/settlements/${id}/${action}`, { method: 'POST', body: { payoutRef, reason: action } })
+        await api(`/admin/api/distribution/settlements/${id}/${action}`, { method: 'POST', body: { payoutRef, reason } })
         toast('结算状态已更新'); await pageDistribution()
       } catch (error) { toast(error.message) }
     })
   }
   for (const button of view.querySelectorAll('[data-risk-action]')) {
     button.addEventListener('click', async () => {
+      const reason = await askText({
+        title: button.dataset.riskAction === 'freeze' ? '冻结分销关系' : '解冻分销关系',
+        label: '处理原因',
+        value: '后台风险处理',
+        hint: '会写进操作日志，便于事后追溯。',
+        confirmText: '确认',
+      })
+      if (reason === null) return
       try {
         await api(`/admin/api/distribution/relations/${button.dataset.relationId}/risk`, {
-          method: 'POST', body: { action: button.dataset.riskAction, reason: '后台风险处理' },
+          method: 'POST', body: { action: button.dataset.riskAction, reason },
         })
         toast('风险状态已更新'); await pageDistribution()
       } catch (error) { toast(error.message) }
@@ -4549,14 +4953,20 @@ async function pageDistribution() {
       const action = button.dataset.withdrawalAction
       const id = Number(button.dataset.withdrawalId)
       let payoutRef = ''
+      let reason = action
       if (action === 'pay') {
         const result = await askText({ title: '确认提现打款', label: '打款凭证', hint: '填写银行流水号或链上交易号。', confirmText: '确认打款' })
         if (result === null) return
         payoutRef = result
       }
+      if (action === 'reject') {
+        const result = await askText({ title: '驳回提现申请', label: '驳回原因', value: '后台驳回', hint: '原因会写进操作日志。', confirmText: '确认驳回' })
+        if (result === null) return
+        reason = result
+      }
       try {
         await api(`/admin/api/distribution/withdrawals/${id}/${action}`, {
-          method: 'POST', body: { payoutRef, reason: action },
+          method: 'POST', body: { payoutRef, reason },
         })
         toast('提现状态已更新')
         await pageDistribution()
@@ -5179,12 +5589,29 @@ const TAG_LEVELS = [['all', '全部'], ['top', '一级标签'], ['child', '二�
 const TAG_SCOPES = [['general', '普通标签'], ['adult', '成人标签']]
 
 async function pageTags() {
+  // 刷新/后退保留筛选与页码（AdminUsersPage 同款 hash 状态）
+  const restored = hydrateListState(readHashQuery(), {
+    page: Number(listPages.tags ?? 1),
+    scope: String(state.params.tagScope ?? 'general'),
+    level: String(state.params.tagLevel ?? 'all'),
+    q: String(state.params.tagQ ?? ''),
+  })
+  listPages.tags = Number(restored.page) > 0 ? Number(restored.page) : 1
+  state.params.tagScope = restored.scope === 'adult' ? 'adult' : 'general'
+  state.params.tagLevel = TAG_LEVELS.some(([key]) => key === restored.level) ? restored.level : 'all'
+  state.params.tagQ = String(restored.q ?? '')
   const page = Number(listPages.tags ?? 1)
   const scope = state.params.tagScope === 'adult' ? 'adult' : 'general'
   const level = state.params.tagLevel ?? 'all'
   const keyword = (state.params.tagQ ?? '').trim()
   const showDisabled = state.params.tagDisabled ? '1' : ''
   const canWrite = new Set(state.me?.permissions ?? []).has('tag.write')
+  const hashParams = {}
+  if (page > 1) hashParams.page = page
+  if (scope !== 'general') hashParams.scope = scope
+  if (level !== 'all') hashParams.level = level
+  if (keyword) hashParams.q = keyword
+  writeHashQuery('tags', hashParams)
   const query = new URLSearchParams({ page: String(page), pageSize: '20', level, includeDisabled: '1', scope })
   if (keyword) query.set('keyword', keyword)
   if (showDisabled) query.set('includeDisabled', '1')
@@ -5223,7 +5650,20 @@ async function pageTags() {
       ${pager('tags', page, data.pageSize, data.total, '个')}
     </div>`
 
-  const reload = () => pageTags()
+  // 改筛选/翻页必须先写回地址栏，否则 pageTags() 会从旧 hash 还原出旧筛选
+  const syncTagHash = () => {
+    const params = {}
+    if (Number(listPages.tags) > 1) params.page = Number(listPages.tags)
+    if ((state.params.tagScope ?? 'general') !== 'general') params.scope = state.params.tagScope
+    if ((state.params.tagLevel ?? 'all') !== 'all') params.level = state.params.tagLevel
+    const keyword = String(state.params.tagQ ?? '').trim()
+    if (keyword) params.q = keyword
+    writeHashQuery('tags', params)
+  }
+  const reload = () => {
+    syncTagHash()
+    return pageTags()
+  }
   view.querySelectorAll('[data-scope]').forEach((button) => button.addEventListener('click', () => {
     state.params.tagScope = button.dataset.scope
     listPages.tags = 1
@@ -5239,7 +5679,7 @@ async function pageTags() {
     listPages.tags = 1
     reload()
   })
-  bindPager('tags', pageTags)
+  bindPager('tags', reload)
   view.querySelectorAll('[data-status]').forEach((button) => button.addEventListener('click', async () => {
     const enabled = button.dataset.active !== '1'
     try {
@@ -5304,9 +5744,22 @@ async function pageTags() {
 
 /* ---------------- 埋点数据 ---------------- */
 async function pageEvents() {
+  const restored = hydrateListState(readHashQuery(), {
+    page: Number(listPages.events ?? 1),
+    days: Number(state.params.eventDays ?? 7),
+    type: String(state.params.eventType ?? ''),
+  })
+  listPages.events = Number(restored.page) > 0 ? Number(restored.page) : 1
+  state.params.eventDays = pickAllowedNumber(restored.days, [1, 7, 30], 7)
+  state.params.eventType = String(restored.type ?? '')
   const days = Number(state.params.eventDays ?? 7)
   const type = state.params.eventType ?? ''
   const page = Number(listPages.events ?? 1)
+  const hashParams = {}
+  if (page > 1) hashParams.page = page
+  if (days !== 7) hashParams.days = days
+  if (type) hashParams.type = type
+  writeHashQuery('events', hashParams)
   const query = new URLSearchParams({ days: String(days), page: String(page), pageSize: '20' })
   if (type) query.set('type', type)
   const data = await api(`/admin/api/events?${query.toString()}`)
@@ -5367,17 +5820,30 @@ async function pageEvents() {
       </tbody></table>
     </div>`
 
+  // 与 tags 同理：先写 hash 再从页面参数渲染，否则会读到上一轮的 days/type
+  const syncEventHash = () => {
+    const params = {}
+    if (Number(listPages.events) > 1) params.page = Number(listPages.events)
+    if (Number(state.params.eventDays ?? 7) !== 7) params.days = Number(state.params.eventDays)
+    if (state.params.eventType) params.type = state.params.eventType
+    writeHashQuery('events', params)
+  }
   view.querySelectorAll('[data-days]').forEach((button) => button.addEventListener('click', () => {
     state.params.eventDays = Number(button.dataset.days)
     listPages.events = 1
+    syncEventHash()
     pageEvents()
   }))
   $('#ev-type')?.addEventListener('change', (event) => {
     state.params.eventType = event.target.value
     listPages.events = 1
+    syncEventHash()
     pageEvents()
   })
-  bindPager('events', pageEvents)
+  bindPager('events', async () => {
+    syncEventHash()
+    await pageEvents()
+  })
 }
 
 /* ---------------- 用户管理（B 端后台账号，可增删改 + 分配角色） ---------------- */
