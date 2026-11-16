@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS dramas (
   score REAL,
   status TEXT NOT NULL DEFAULT 'published',
   sort INTEGER NOT NULL DEFAULT 0,
+  source_key TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT
 );
@@ -162,6 +163,10 @@ CREATE TABLE IF NOT EXISTS episodes (
   duration REAL,
   source_path TEXT,
   hls_path TEXT,
+  remote_url TEXT,
+  remote_referer TEXT,
+  remote_ua TEXT,
+  remote_cookie TEXT,
   status TEXT NOT NULL DEFAULT 'ready',
   progress INTEGER NOT NULL DEFAULT 0,
   error TEXT,
@@ -414,6 +419,16 @@ CREATE TABLE IF NOT EXISTS track_events (
   meta_json TEXT,
   ip TEXT,
   ua TEXT,
+  account TEXT,                              -- 用户账号快照（email/phone，游客为空）
+  device TEXT,                               -- 设备信息（机型 + 浏览器）
+  os TEXT,                                   -- 操作系统与版本
+  page_url TEXT,                             -- 完整页面地址（含 query/hash）
+  event_code TEXT,                           -- 事件 code（如 play:start / page:/detail/25）
+  event_type INTEGER NOT NULL DEFAULT 0,     -- 0 未知 / 1 页面 / 2 点击
+  event_op INTEGER NOT NULL DEFAULT 0,       -- 0 默认 / 1 进入或开启 / 2 关闭或退出
+  action TEXT,                               -- 事件动作（点击了什么、做了什么）
+  description TEXT,                          -- 事件描述（可读文案，含停留时长等）
+  stay_ms INTEGER,                           -- 页面停留毫秒
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_track_events_time ON track_events(created_at);
@@ -772,8 +787,20 @@ export function ensureOpsSchema() {
     if (!columns.includes('is_adult')) db.exec('ALTER TABLE dramas ADD COLUMN is_adult INTEGER NOT NULL DEFAULT 0')
     if (!columns.includes('release_date')) db.exec('ALTER TABLE dramas ADD COLUMN release_date TEXT')
     if (!columns.includes('updated_at')) db.exec('ALTER TABLE dramas ADD COLUMN updated_at TEXT')
+    // 外部源去重键（如 huangguo:12166），同一部片重跑导入只更新不新增
+    if (!columns.includes('source_key')) db.exec('ALTER TABLE dramas ADD COLUMN source_key TEXT')
     db.exec("UPDATE dramas SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''")
     db.exec('CREATE INDEX IF NOT EXISTS idx_dramas_adult_status ON dramas(is_adult, status, id DESC)')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_dramas_source_key ON dramas(source_key)')
+  }
+
+  if (has('episodes')) {
+    const columns = cols('episodes')
+    // 外部片源：整集直接指向上游播放页或 m3u8，由 /media/remote 网关代理，不做本地转码
+    if (!columns.includes('remote_url')) db.exec('ALTER TABLE episodes ADD COLUMN remote_url TEXT')
+    if (!columns.includes('remote_referer')) db.exec('ALTER TABLE episodes ADD COLUMN remote_referer TEXT')
+    if (!columns.includes('remote_ua')) db.exec('ALTER TABLE episodes ADD COLUMN remote_ua TEXT')
+    if (!columns.includes('remote_cookie')) db.exec('ALTER TABLE episodes ADD COLUMN remote_cookie TEXT')
   }
 
   if (has('tags')) {
@@ -782,6 +809,40 @@ export function ensureOpsSchema() {
     if (!columns.includes('parent_id')) db.exec('ALTER TABLE tags ADD COLUMN parent_id INTEGER REFERENCES tags(id) ON DELETE SET NULL')
     if (!columns.includes('updated_at')) db.exec('ALTER TABLE tags ADD COLUMN updated_at TEXT')
     db.exec('CREATE INDEX IF NOT EXISTS idx_tags_scope_parent ON tags(scope, parent_id, sort)')
+  }
+
+  if (has('track_events')) {
+    const columns = cols('track_events')
+    // 埋点明细字段：账号快照、设备/系统、完整页面地址、事件 code/类型/操作、动作、描述、停留时长
+    const trackColumns = [
+      ['account', 'TEXT'],
+      ['device', 'TEXT'],
+      ['os', 'TEXT'],
+      ['page_url', 'TEXT'],
+      ['event_code', 'TEXT'],
+      ['event_type', 'INTEGER NOT NULL DEFAULT 0'],
+      ['event_op', 'INTEGER NOT NULL DEFAULT 0'],
+      ['action', 'TEXT'],
+      ['description', 'TEXT'],
+      ['stay_ms', 'INTEGER']
+    ]
+    for (const [name, ddl] of trackColumns) {
+      if (!columns.includes(name)) db.exec(`ALTER TABLE track_events ADD COLUMN ${name} ${ddl}`)
+    }
+    // 老数据按类型回填一次，避免新列全是 0 看不出页面/点击
+    db.exec(`UPDATE track_events SET event_type = CASE
+        WHEN type IN ('page_view', 'session_start', 'detail_view', 'lp_view', 'rank_view', 'category_filter') THEN 1
+        WHEN type IN ('paywall_click', 'episode_click', 'lp_cta_click', 'login_open', 'login_success', 'favorite', 'share', 'track_change') THEN 2
+        ELSE 0 END,
+      event_op = CASE
+        WHEN type IN ('play_end', 'trial_end', 'paywall_click') THEN 2
+        WHEN type IN ('page_view', 'session_start', 'detail_view', 'lp_view', 'rank_view', 'category_filter',
+          'play_start', 'episode_click', 'login_open', 'login_success', 'favorite', 'share', 'track_change',
+          'lp_cta_click', 'trial_start') THEN 1
+        ELSE 0 END,
+      event_code = COALESCE(event_code, type)
+      WHERE event_code IS NULL`)
+    db.exec('CREATE INDEX IF NOT EXISTS idx_track_events_kind ON track_events(event_type, event_op, created_at)')
   }
 
   if (has('rank_lists')) {

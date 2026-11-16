@@ -22,6 +22,7 @@ const groups = [
     items: [
       { key: 'home', label: '精选', path: '/', icon: 'home' },
       { key: 'category', label: '片库', path: '/category', icon: 'grid' },
+      { key: 'short', label: '短剧', path: '/short', icon: 'film' },
       { key: 'adult', label: '成人', path: '/adult', icon: 'lock', badge: '18+' },
       { key: 'rank', label: '榜单', path: '/rank', icon: 'chart' },
       { key: 'content-rank', label: '内容数据榜', path: '/content-rank', icon: 'chart' }

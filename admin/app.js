@@ -1640,7 +1640,7 @@ async function pageEpisodes(dramaId) {
 }
 
 function episodeRow(row, isMovie = false) {
-  const badge = row.status === 'ready' && !row.hls_path ? '<span class="pill">无片源</span>'
+  const badge = row.status === 'ready' && !row.hls_path && !row.remote_url ? '<span class="pill">无片源</span>'
     : row.status === 'ready' ? '<span class="pill ok">就绪</span>'
     : row.status === 'transcoding' ? '<span class="pill warn">转码中</span>'
     : row.status === 'queued' ? '<span class="pill">排队</span>'
@@ -1651,9 +1651,10 @@ function episodeRow(row, isMovie = false) {
     <td>${esc(row.title ?? '')}${row.vip ? ' <span class="pill warn">VIP</span>' : ''}</td>
     <td>${badge}</td>
     <td style="width:160px"><div class="progress"><i style="width:${row.progress}%"></i></div><div class="muted">${row.progress}%</div></td>
-    <td class="mono">${row.hls_path ? esc(row.hls_path) : '—'}</td>
+    <td class="mono">${esc(row.remote_url ?? row.hls_path ?? '—')}</td>
     <td class="row-actions">
       <button class="btn sm" type="button" data-tracks="${row.id}">音轨/字幕</button>
+      <button class="btn sm" type="button" data-remote="${row.id}">外部片源</button>
       <button class="btn sm" type="button" data-import-url="${row.id}">URL 导入</button>
       <button class="btn sm" type="button" data-upload-trigger="${row.id}" aria-label="上传第 ${row.no} 集视频">上传</button>
       <input type="file" accept="video/*" data-upload="${row.id}" hidden />
@@ -1671,6 +1672,39 @@ function wireEpisodeActions(dramaId) {
     button.addEventListener('click', () => {
       const input = view.querySelector(`[data-upload="${button.dataset.uploadTrigger}"]`)
       input?.click()
+    })
+  })
+  view.querySelectorAll('[data-remote]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const url = await askText({
+        title: '外部片源',
+        label: '播放页或 m3u8 地址',
+        placeholder: 'https://example.com/videos/xxxx/ 或 https://cdn.example.com/x.m3u8',
+        hint: '整集由服务器代理取流，不占本地磁盘、不做转码；播放器看到的是本站域名。',
+        confirmText: '下一步',
+      })
+      if (!url) return
+      let defaultReferer = ''
+      try { defaultReferer = `${new URL(url).origin}/` } catch { defaultReferer = '' }
+      const referer = await askText({
+        title: '外部片源',
+        label: 'Referer（留空则用源站首页）',
+        value: defaultReferer,
+        placeholder: 'https://example.com/',
+        required: false,
+        confirmText: '保存',
+      })
+      if (referer === null) return
+      try {
+        await api(`/admin/api/episodes/${button.dataset.remote}/remote`, {
+          method: 'POST',
+          body: { url, referer: referer || undefined },
+        })
+        toast('已保存外部片源，播放时由服务器代理取流')
+      } catch (error) {
+        toast(`保存失败：${error.message}`)
+      }
+      await pageEpisodes(dramaId)
     })
   })
   view.querySelectorAll('[data-import-url]').forEach((button) => {
@@ -5228,7 +5262,11 @@ async function pageEvents() {
     episode_click: '选集点击', favorite: '收藏', search: '搜索', share: '分享',
     category_filter: '分类筛选', rank_view: '榜单浏览', login_open: '打开登录', login_success: '登录成功',
     play_error: '播放失败', order_created: '创建订单', payment_success: '支付成功',
+    track_change: '切换音轨', lp_view: '落地页浏览', lp_cta_click: '落地页点击',
+    trial_start: '试看开始', trial_end: '试看结束', click: '点击',
   }
+  const EVENT_TYPE_LABEL = { 0: '未知', 1: '页面', 2: '点击' }
+  const EVENT_OP_LABEL = { 0: '默认', 1: '进入/开启', 2: '关闭/退出' }
   const eventTypes = (data.byType ?? []).length
   const avgPerDay = data.byDay?.length ? Math.round((data.total ?? 0) / data.byDay.length) : 0
 
@@ -5252,18 +5290,20 @@ async function pageEvents() {
         </select>
       </div>
       <table style="margin-top:12px">
-        <thead><tr><th>时间</th><th>事件</th><th>用户</th><th>访客</th><th>剧集</th><th>路径</th><th>数值</th><th>明细</th></tr></thead>
+        <thead><tr><th>时间</th><th>事件</th><th>类型</th><th>操作</th><th>账号</th><th>IP</th><th>设备 / 系统</th><th>页面</th><th>停留</th><th>动作 / 明细</th></tr></thead>
         <tbody>
           ${(data.list ?? []).map((row) => `<tr>
             <td class="muted">${esc(fmtTs(row.created_at))}</td>
-            <td>${esc(EVENT_LABEL[row.type] ?? row.type)}</td>
-            <td>${row.userEmail ? esc(row.userEmail) : (row.user_id ? `#${row.user_id}` : '游客')}</td>
-            <td class="mono muted truncate" style="max-width:130px" title="${esc(row.visitor_id ?? '')}">${esc(row.visitor_id ?? '—')}</td>
-            <td>${row.dramaTitle ? esc(row.dramaTitle) : (row.drama_id ? `#${row.drama_id}` : '—')}</td>
-            <td class="muted" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${esc(row.path ?? '—')}</td>
-            <td>${row.value === null || row.value === undefined ? '—' : Number(row.value).toFixed(2)}</td>
-            <td class="muted">${esc(row.meta ? JSON.stringify(row.meta) : '—')}</td>
-          </tr>`).join('') || '<tr><td colspan="8" class="muted">还没有埋点数据：C 端产生浏览/播放后这里会实时出现</td></tr>'}
+            <td>${esc(EVENT_LABEL[row.type] ?? row.type)}<div class="mono muted" style="font-size:11px">${esc(row.event_code ?? '')}</div></td>
+            <td style="white-space:nowrap">${esc(EVENT_TYPE_LABEL[row.event_type ?? 0] ?? String(row.event_type ?? 0))}</td>
+            <td style="white-space:nowrap">${esc(EVENT_OP_LABEL[row.event_op ?? 0] ?? String(row.event_op ?? 0))}</td>
+            <td>${row.account ? esc(row.account) : (row.userEmail ? esc(row.userEmail) : (row.user_id ? `#${row.user_id}` : '游客'))}</td>
+            <td class="mono muted" style="white-space:nowrap">${esc(row.ip ?? '—')}</td>
+            <td class="muted" style="max-width:200px">${esc([row.device, row.os].filter(Boolean).join(' / ') || '—')}</td>
+            <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(row.page_url ?? row.path ?? '')}">${esc(row.path ?? '—')}</td>
+            <td class="mono" style="white-space:nowrap">${row.stay_ms === null || row.stay_ms === undefined ? '—' : `${(Number(row.stay_ms) / 1000).toFixed(1)}s`}</td>
+            <td class="muted" style="max-width:260px">${esc(row.action ?? '—')}${row.description ? `<div style="font-size:11px;opacity:.75">${esc(row.description)}</div>` : ''}</td>
+          </tr>`).join('') || '<tr><td colspan="10" class="muted">还没有埋点数据：C 端产生浏览/播放后这里会实时出现</td></tr>'}
         </tbody>
       </table>
       ${pager('events', page, data.pageSize, data.total, '条')}

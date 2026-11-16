@@ -40,7 +40,19 @@ async function attach() {
       element.src = props.src;
       return;
     }
-    hls = new Hls({ lowLatencyMode: false });
+    // 外部片源经香港服务器回源，单段要一秒上下：缓冲给足、重试放宽，
+    // 宁可多等一会也不要因为一次抖动就整片停住
+    hls = new Hls({
+      lowLatencyMode: false,
+      maxBufferLength: 30,
+      maxMaxBufferLength: 60,
+      maxBufferSize: 60 * 1000 * 1000,
+      fragLoadingMaxRetry: 8,
+      fragLoadingRetryDelay: 800,
+      fragLoadingMaxRetryTimeout: 20000,
+      manifestLoadingMaxRetry: 6,
+      levelLoadingMaxRetry: 6
+    });
     hls.loadSource(props.src);
     hls.attachMedia(element);
     hls.on(Hls.Events.ERROR, (_event, payload) => {

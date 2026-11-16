@@ -45,24 +45,113 @@ export const TRACK_TYPES = new Set([
   'impression', 'detail_view', 'paywall_view', 'paywall_click', 'play_end', 'search', 'share',
   'category_filter', 'rank_view', 'login_open', 'login_success', 'page_view', 'session_start',
   'play_start', 'play_error', 'episode_click', 'favorite', 'order_created', 'payment_success',
-  'track_change', 'lp_view', 'lp_cta_click', 'trial_start', 'trial_end',
+  'track_change', 'lp_view', 'lp_cta_click', 'trial_start', 'trial_end', 'click',
 ])
 
 const SERVER_ONLY_TRACK_TYPES = new Set(['order_created', 'payment_success'])
 export const isClientTrackType = (type) => TRACK_TYPES.has(String(type ?? '')) && !SERVER_ONLY_TRACK_TYPES.has(String(type ?? ''))
 
+/** 页面类事件（event_type=1），其余点击类为 2，无法归类为 0 */
+const PAGE_KINDS = new Set([
+  'page_view', 'session_start', 'detail_view', 'lp_view', 'rank_view', 'category_filter', 'impression',
+])
+const CLICK_KINDS = new Set([
+  'paywall_click', 'episode_click', 'lp_cta_click', 'login_open', 'login_success', 'favorite', 'share',
+  'track_change', 'search', 'play_start', 'click',
+])
+/** 关闭/退出类动作（event_op=2）；进入/开启类为 1 */
+const EXIT_KINDS = new Set(['play_end', 'trial_end'])
+const ENTER_KINDS = new Set([
+  'page_view', 'session_start', 'detail_view', 'lp_view', 'rank_view', 'category_filter', 'play_start',
+  'episode_click', 'login_open', 'login_success', 'favorite', 'share', 'track_change', 'lp_cta_click',
+  'trial_start', 'paywall_click', 'impression', 'search', 'click',
+])
+
+export const eventTypeOf = (kind) => (PAGE_KINDS.has(kind) ? 1 : CLICK_KINDS.has(kind) ? 2 : 0)
+export const eventOpOf = (kind) => (EXIT_KINDS.has(kind) ? 2 : ENTER_KINDS.has(kind) ? 1 : 0)
+
+/**
+ * 从 UA 里抠出「设备」与「系统」，够运营看清是什么机器就行，不做全量 UA 库。
+ * device 形如 `iPhone · Safari 17`、`SM-G991B · Chrome 131`；os 形如 `iOS 17.2`、`Windows 10/11`。
+ */
+export function parseUa(ua) {
+  const text = String(ua ?? '')
+  if (!text) return { device: '', os: '' }
+  const pick = (re) => String(text.match(re)?.[1] ?? '').trim()
+
+  let os = ''
+  if (/Windows NT 10/.test(text)) os = 'Windows 10/11'
+  else if (/Windows NT 6\.3/.test(text)) os = 'Windows 8.1'
+  else if (/Windows NT 6\.1/.test(text)) os = 'Windows 7'
+  else if (/Android ([\d.]+)/.test(text)) os = `Android ${pick(/Android ([\d.]+)/)}`
+  else if (/(?:iPhone|CPU) OS ([\d_]+)/.test(text)) os = `iOS ${pick(/(?:iPhone|CPU) OS ([\d_]+)/).replace(/_/g, '.')}`
+  else if (/Mac OS X ([\d_.]+)/.test(text)) os = `macOS ${pick(/Mac OS X ([\d_.]+)/).replace(/_/g, '.')}`
+  else if (/HarmonyOS/i.test(text)) os = 'HarmonyOS'
+  else if (/CrOS/.test(text)) os = 'ChromeOS'
+  else if (/Linux/.test(text)) os = 'Linux'
+
+  let model = ''
+  const androidModel = text.match(/Android [\d.]+;\s*([^;)]+?)(?:\s*Build|\))/)
+  if (androidModel) model = androidModel[1].trim()
+  if (!model && /iPhone/.test(text)) model = (text.match(/\((iPhone[^;)]*)/)?.[1] ?? 'iPhone').trim()
+  if (!model && /iPad/.test(text)) model = 'iPad'
+  if (!model) {
+    if (/Windows/.test(text)) model = 'Desktop'
+    else if (/Macintosh/.test(text)) model = 'Mac'
+    else if (/Linux/.test(text)) model = 'Linux'
+  }
+
+  let browser = ''
+  if (/MicroMessenger\/([\d.]+)/.test(text)) browser = `微信 ${pick(/MicroMessenger\/([\d.]+)/)}`
+  else if (/QQBrowser\/([\d.]+)/.test(text)) browser = `QQ浏览器 ${pick(/QQBrowser\/([\d.]+)/)}`
+  else if (/UCBrowser\/([\d.]+)/.test(text)) browser = `UC浏览器 ${pick(/UCBrowser\/([\d.]+)/)}`
+  else if (/Edg(?:A|iOS)?\/([\d.]+)/.test(text)) browser = `Edge ${pick(/Edg(?:A|iOS)?\/([\d.]+)/).split('.')[0]}`
+  else if (/OPR\/([\d.]+)/.test(text)) browser = `Opera ${pick(/OPR\/([\d.]+)/).split('.')[0]}`
+  else if (/Chrome\/([\d.]+)/.test(text)) browser = `Chrome ${pick(/Chrome\/([\d.]+)/).split('.')[0]}`
+  else if (/Firefox\/([\d.]+)/.test(text)) browser = `Firefox ${pick(/Firefox\/([\d.]+)/).split('.')[0]}`
+  else if (/Version\/([\d.]+).*Safari/.test(text)) browser = `Safari ${pick(/Version\/([\d.]+)/).split('.')[0]}`
+  else if (/curl\//.test(text)) browser = 'curl'
+  else if (/\bnode\b/i.test(text)) browser = 'Node'
+
+  return { device: [model, browser].filter(Boolean).join(' · '), os }
+}
+
+/** 用户账号快照：拿 email，没有就用手机号，都没有返回空串 */
+function accountOf(userId) {
+  if (!userId) return ''
+  try {
+    const row = one('SELECT email, phone FROM users WHERE id = ?', Number(userId))
+    if (!row) return ''
+    return String(row.email ?? '').trim() || String(row.phone ?? '').trim() || ''
+  } catch { return '' }
+}
+
 /**
  * 漏斗上游埋点。播放开始已有 play_events，这里补曝光/详情/付费墙/完播。
  * 完播用 value = 完播率（position/duration），方便算平均完播。
+ * 事件类型/操作缺省按事件名推导，调用方也可显式传（0 未知 / 1 页面 / 2 点击；0 默认 / 1 进入 / 2 退出）。
  */
-export function recordEvent({ type, userId, visitorId, dramaId, episodeId, path, value, position, duration, meta, ip, ua } = {}) {
+export function recordEvent({
+  type, userId, visitorId, dramaId, episodeId, path, value, position, duration, meta, ip, ua,
+  account, device, os, pageUrl, eventCode, eventType, eventOp, action, description, stayMs,
+} = {}) {
   const kind = String(type ?? '')
   if (!TRACK_TYPES.has(kind)) return false
   try {
     const visitor = touchVisitor({ visitorId, userId, path, ip, ua })
+    const parsed = parseUa(ua)
+    const stay = Number(stayMs)
+    const fullUrl = String(pageUrl ?? path ?? '').slice(0, 500)
+    const kindType = Number.isFinite(Number(eventType)) && eventType !== null && eventType !== undefined
+      ? Math.min(2, Math.max(0, Number(eventType)))
+      : eventTypeOf(kind)
+    const kindOp = Number.isFinite(Number(eventOp)) && eventOp !== null && eventOp !== undefined
+      ? Math.min(2, Math.max(0, Number(eventOp)))
+      : eventOpOf(kind)
     db.prepare(`INSERT INTO track_events
-      (type, user_id, visitor_id, drama_id, episode_id, path, value, position, duration, meta_json, ip, ua)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      (type, user_id, visitor_id, drama_id, episode_id, path, value, position, duration, meta_json, ip, ua,
+       account, device, os, page_url, event_code, event_type, event_op, action, description, stay_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       kind, userId ?? null, visitor, dramaId ? Number(dramaId) : null, episodeId ? Number(episodeId) : null,
       String(path ?? '').slice(0, 200),
       Number.isFinite(Number(value)) ? Number(value) : null,
@@ -70,6 +159,15 @@ export function recordEvent({ type, userId, visitorId, dramaId, episodeId, path,
       Number.isFinite(Number(duration)) ? Number(duration) : null,
       meta ? JSON.stringify(meta).slice(0, 500) : null,
       String(ip ?? '').slice(0, 64), String(ua ?? '').slice(0, 200),
+      String(account ?? '').slice(0, 120) || accountOf(userId),
+      String(device ?? parsed.device ?? '').slice(0, 120),
+      String(os ?? parsed.os ?? '').slice(0, 80),
+      fullUrl || null,
+      String(eventCode ?? kind).slice(0, 80),
+      kindType, kindOp,
+      String(action ?? '').slice(0, 200) || null,
+      String(description ?? '').slice(0, 300) || null,
+      Number.isFinite(stay) && stay >= 0 ? Math.round(stay) : null,
     )
     return true
   } catch { return false }

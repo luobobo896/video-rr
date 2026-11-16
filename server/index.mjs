@@ -17,6 +17,7 @@ import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
 import { processCommissionOutbox, processCommissionReversalOutbox } from './commerce.mjs'
 import { PREVIEW_DIR } from './previews.mjs'
 import { verifyLink } from './entitlements.mjs'
+import { handleRemoteRequest } from './stream-proxy.mjs'
 import { closeExpiredOrders, reconcile } from './commerce.mjs'
 import { refreshAutoRanks } from './rank.mjs'
 import { inspect, sweep } from './ratelimit.mjs'
@@ -244,7 +245,7 @@ function cookiesOf(req) {
 /** 按媒体路径里的集号取签名：优先分集 Cookie，回退通用 Cookie（兼容老客户端/旧链接） */
 function linkCredentials(req, mediaPath, url) {
   const cookies = cookiesOf(req)
-  const scope = /^\/media\/hls\/(\d+)\//.exec(mediaPath)?.[1]
+  const scope = /^\/media\/(?:hls|remote)\/(\d+)\//.exec(mediaPath)?.[1]
   const scopedSign = scope ? cookies[`mh_link_${scope}`] : undefined
   const scopedExp = scope ? cookies[`mh_exp_${scope}`] : undefined
   return {
@@ -319,6 +320,32 @@ const server = createServer(async (req, res) => {
       }
       if (!existsSync(filePath)) { res.writeHead(404); res.end('404'); return }
       return serveFileWithRange(req, res, filePath, 'private, max-age=60')
+    }
+
+    // 外部片源代理：清单重写 + 分片转发，签名规则与本地 HLS 完全一致
+    if (pathname.startsWith('/media/remote/')) {
+      const { sign, expires } = linkCredentials(req, pathname, url)
+      if (!ALLOW_UNSIGNED && !verifyLink(pathname, sign, expires, String(req.headers['user-agent'] ?? ''))) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('403 播放链接无效或已过期')
+        return
+      }
+      const match = /^\/media\/remote\/(\d+)\/(.*)$/.exec(pathname)
+      if (!match) {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('404')
+        return
+      }
+      const episodeId = Number(match[1])
+      const episode = db
+        .prepare('SELECT id, drama_id, remote_url, remote_referer, remote_ua, remote_cookie FROM episodes WHERE id = ?')
+        .get(episodeId)
+      if (!episode) {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('404 该集不存在')
+        return
+      }
+      return handleRemoteRequest(req, res, { episodeId, episode, rest: match[2] })
     }
 
     if (pathname === '/robots.txt') {

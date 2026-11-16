@@ -3,6 +3,7 @@ import { computed, onMounted, watchEffect } from 'vue';
 import AppShell from './components/AppShell.vue';
 import Icon from './components/Icon.vue';
 import ToastMessage from './components/ToastMessage.vue';
+import { initTracking } from './track.js';
 import AdultPage from './pages/c/AdultPage.vue';
 import CategoryPage from './pages/c/CategoryPage.vue';
 import ContentRankPage from './pages/c/ContentRankPage.vue';
@@ -22,6 +23,7 @@ import ProfileEditPage from './pages/c/ProfileEditPage.vue';
 import PromotionPage from './pages/c/PromotionPage.vue';
 import RankPage from './pages/c/RankPage.vue';
 import SearchPage from './pages/c/SearchPage.vue';
+import ShortPage from './pages/c/ShortPage.vue';
 import UpcomingPage from './pages/c/UpcomingPage.vue';
 import VipPage from './pages/c/VipPage.vue';
 import { href, route } from './router.js';
@@ -31,6 +33,7 @@ const C_PAGES = {
   '/': HomePage,
   '/category': CategoryPage,
   '/adult': AdultPage,
+  '/short': ShortPage,
   '/rank': RankPage,
   '/content-rank': ContentRankPage,
   '/playlists': PlaylistsPage,
@@ -75,6 +78,7 @@ const pageTitle = computed(() => {
     '/': '影巢 · 高清影视在线观看',
     '/category': '片库 · 影巢',
     '/adult': '成人频道 · 影巢',
+    '/short': '短剧频道 · 影巢',
     '/rank': '榜单 · 影巢',
     '/content-rank': '内容数据榜 · 影巢',
     '/playlists': '片单广场 · 影巢',
@@ -101,6 +105,7 @@ watchEffect(() => {
 });
 
 onMounted(() => {
+  initTracking();
   loadConstants().catch(() => null);
   if (localStorage.getItem('mh-token')) refreshMe().catch(() => null);
 });

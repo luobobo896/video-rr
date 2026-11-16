@@ -1238,6 +1238,21 @@ const deny = (perm) => {
     return send(res, { dryRun: false, matched, updated: Number(result.changes ?? matched), sample, filters, policy })
   }
 
+  // 外部片源：整集指向别人站点的播放页或 m3u8，播放时由 /media/remote 网关代理
+  if (seg[0] === 'episodes' && seg[1] && seg[2] === 'remote' && method === 'POST') {
+    if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
+    const episode = one('SELECT * FROM episodes WHERE id = ?', Number(seg[1]))
+    if (!episode) return send(res, {}, '0404', '分集不存在', 404)
+    const remoteUrl = String(body.url ?? '').trim()
+    if (remoteUrl && !/^https?:\/\//i.test(remoteUrl)) return send(res, {}, '0400', '片源地址必须是 http(s)', 400)
+    run(`UPDATE episodes SET remote_url = ?, remote_referer = ?, remote_ua = ?, remote_cookie = ?, status = 'ready'
+      WHERE id = ?`,
+    remoteUrl || null, body.referer || null, body.ua || null, body.cookie || null, episode.id)
+    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    log('content.episode.remote', 'episode', episode.id, { remote_url: episode.remote_url }, { remote_url: remoteUrl })
+    return send(res, one('SELECT * FROM episodes WHERE id = ?', episode.id))
+  }
+
   if (seg[0] === 'episodes' && seg[1] && method === 'DELETE') {
     if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
     const before = one('SELECT * FROM episodes WHERE id = ?', Number(seg[1]))

@@ -15,6 +15,7 @@ import {
   signPayTicket, verifyPayTicket,
 } from './entitlements.mjs'
 import { publicTracksOf, saveUserTrackPreference, userTrackPreferences } from './tracks.mjs'
+import { remotePlaybackPath } from './stream-proxy.mjs'
 import { isClientTrackType, recordEvent, recordPlay } from './analytics.mjs'
 import { bindUserAcquisition, recordTouch } from './attribution.mjs'
 import {
@@ -838,7 +839,7 @@ export async function handlePublic(pathname, url, req, res) {
         if (episode) no = 1
       }
       if (!episode) return fail(res, '0404', '该集不存在', 404)
-      if (!episode.hls_path || episode.status !== 'ready') {
+      if ((!episode.hls_path && !episode.remote_url) || episode.status !== 'ready') {
         // 转码中/失败的集不能签发空链接：前端要能区分「还没好」和「没权限」
         return send(res, {
           dramaId, episodeId: episode.id, episodeStatus: episode.status, reason: 'episode_not_ready',
@@ -868,11 +869,11 @@ export async function handlePublic(pathname, url, req, res) {
           }
         }
         // 试看：签名有效期必须覆盖试看时长，否则前端按 trialSeconds 截断前就先被 403 断流
-        const trialHls = episode.hls_path ?? `/media/hls/${episode.id}/index.m3u8`
+        const trialHls = remotePlaybackPath(episode) ?? episode.hls_path ?? `/media/hls/${episode.id}/index.m3u8`
         const ua = req.headers['user-agent'] ?? ''
         const trialTtl = Math.min(PLAY_TTL_MAX, Math.max(120, trialSeconds + 60))
-        const trialLink = episode.hls_path ? secureLink(trialHls, trialTtl, ua) : { url: null, sign: null, expires: 0 }
-        if (episode.hls_path) setLinkCookies(res, trialLink, trialTtl, req, episode.id)
+        const trialLink = episode.hls_path || episode.remote_url ? secureLink(trialHls, trialTtl, ua) : { url: null, sign: null, expires: 0 }
+        if (episode.hls_path || episode.remote_url) setLinkCookies(res, trialLink, trialTtl, req, episode.id)
         recordPlay({ userId, visitorId, dramaId, episodeId: episode.id, episodeNo: no, source: 'trial', ip: clientIp(req), ua: req.headers['user-agent'] })
         let viewSession = null
         try {
@@ -886,7 +887,7 @@ export async function handlePublic(pathname, url, req, res) {
         return send(res, {
           dramaId, title: drama.title, episodeId: episode.id, episodeStatus: episode.status,
           episode: { id: episode.id, no: episode.no, title: episode.title },
-          source: 'trial', hls: episode.hls_path, expiresIn: trialTtl, trialSeconds, danmu: [],
+          source: 'trial', hls: trialLink.url ? trialHls : null, expiresIn: trialTtl, trialSeconds, danmu: [],
           viewSessionId: viewSession?.id ?? null, heartbeatIntervalSeconds: 15,
           viewThresholdSeconds: viewSession?.thresholdSeconds ?? 30, duration: Number(episode.duration ?? 0),
           ...tracks,
@@ -902,7 +903,7 @@ export async function handlePublic(pathname, url, req, res) {
           membership: access.membership ?? false,
         }, '0402', access.reason === 'single_purchase_required' ? '该片需单独购买' : '需要开通会员', 402)
       }
-      const hlsPath = episode.hls_path ?? null
+      const hlsPath = remotePlaybackPath(episode) ?? episode.hls_path ?? null
       const ua = req.headers['user-agent'] ?? ''
       // 有效期覆盖整集时长（否则 45 分钟一集在 5 分钟处断流），上限 MH_PLAY_TTL_MAX
       const duration = Number(episode.duration ?? 0)
@@ -1272,6 +1273,9 @@ export async function handlePublic(pathname, url, req, res) {
         type: body.type, userId, visitorId: body.visitorId ?? visitorId, dramaId: body.dramaId, episodeId: body.episodeId,
         path: body.path ?? body.term, value: body.value, position: body.position, duration: body.duration,
         meta: body.meta, ip: clientIp(req), ua: req.headers['user-agent'],
+        // 明细字段：账号由服务端按 userId 查，客户端只补它自己才知道的（页面地址、停留、点击文案）
+        pageUrl: body.pageUrl, eventCode: body.eventCode, eventType: body.eventType, eventOp: body.eventOp,
+        action: body.action, description: body.description, stayMs: body.stayMs,
       })
       return send(res, { ok })
     }

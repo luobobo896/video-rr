@@ -286,7 +286,8 @@ export function uaFingerprint(ua) {
  */
 export function linkScope(uri) {
   const text = String(uri ?? '')
-  const match = text.match(/^(\/media\/hls\/[^/?#]+\/)/)
+  // 本地 HLS 与外部片源代理共用一套签名：一集一个 scope，清单与分片通用
+  const match = text.match(/^(\/media\/(?:hls|remote)\/[^/?#]+\/)/)
   return match ? match[1] : text
 }
 

@@ -112,90 +112,97 @@ onMounted(() => load());
     </button>
   </div>
 
-  <div class="adult-filters">
-    <div class="filter-group">
-      <span class="filter-label">频道</span>
-      <button
-        v-for="row in facets.channels"
-        :key="row.value"
-        class="chip"
-        type="button"
-        :aria-pressed="filters.type === row.value"
-        @click="apply('type', row.value)"
-      >
-        {{ row.label }}{{ row.count !== undefined ? ` ${row.count}` : '' }}
-      </button>
+  <div class="adult-filters" :data-fold="expanded ? 'all' : 'half'">
+    <div id="category-filter-body" class="filter-body">
+      <div class="filter-group">
+        <span class="filter-label">频道</span>
+        <button
+          v-for="row in facets.channels"
+          :key="row.value"
+          class="chip"
+          type="button"
+          :aria-pressed="filters.type === row.value"
+          @click="apply('type', row.value)"
+        >
+          {{ row.label }}{{ row.count !== undefined ? ` ${row.count}` : '' }}
+        </button>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">排序</span>
+        <button
+          v-for="row in facets.sorts"
+          :key="row.value"
+          class="chip"
+          type="button"
+          :aria-pressed="filters.sort === row.value"
+          @click="apply('sort', row.value)"
+        >
+          {{ row.label }}
+        </button>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">地区</span>
+        <button
+          v-for="row in facets.regions"
+          :key="row.value"
+          class="chip"
+          type="button"
+          :aria-pressed="filters.region === row.value"
+          @click="apply('region', row.value)"
+        >
+          {{ row.label }}{{ row.count ? ` ${row.count}` : '' }}
+        </button>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">类型</span>
+        <button
+          v-for="row in facets.genres"
+          :key="row.value"
+          class="chip"
+          type="button"
+          :aria-pressed="filters.genre === row.value"
+          @click="apply('genre', row.value)"
+        >
+          {{ row.label }}{{ row.count ? ` ${row.count}` : '' }}
+        </button>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">年份</span>
+        <button
+          v-for="row in facets.years"
+          :key="row.value"
+          class="chip"
+          type="button"
+          :aria-pressed="filters.year === row.value"
+          @click="apply('year', row.value)"
+        >
+          {{ row.label }}
+        </button>
+      </div>
+      <div v-if="expanded && facets.tags.length" class="filter-group">
+        <span class="filter-label">标签</span>
+        <button
+          v-for="row in facets.tags"
+          :key="row.value"
+          class="chip"
+          type="button"
+          :aria-pressed="String(filters.tag) === String(row.value)"
+          @click="apply('tag', row.value)"
+        >
+          {{ row.label }}{{ row.count ? ` ${row.count}` : '' }}
+        </button>
+      </div>
     </div>
-    <div class="filter-group">
-      <span class="filter-label">排序</span>
-      <button
-        v-for="row in facets.sorts"
-        :key="row.value"
-        class="chip"
-        type="button"
-        :aria-pressed="filters.sort === row.value"
-        @click="apply('sort', row.value)"
-      >
-        {{ row.label }}
-      </button>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">地区</span>
-      <button
-        v-for="row in facets.regions"
-        :key="row.value"
-        class="chip"
-        type="button"
-        :aria-pressed="filters.region === row.value"
-        @click="apply('region', row.value)"
-      >
-        {{ row.label }}{{ row.count ? ` ${row.count}` : '' }}
-      </button>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">类型</span>
-      <button
-        v-for="row in (expanded ? facets.genres : facets.genres.slice(0, 8))"
-        :key="row.value"
-        class="chip"
-        type="button"
-        :aria-pressed="filters.genre === row.value"
-        @click="apply('genre', row.value)"
-      >
-        {{ row.label }}{{ row.count ? ` ${row.count}` : '' }}
-      </button>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">年份</span>
-      <button
-        v-for="row in facets.years.slice(0, expanded ? facets.years.length : 5)"
-        :key="row.value"
-        class="chip"
-        type="button"
-        :aria-pressed="filters.year === row.value"
-        @click="apply('year', row.value)"
-      >
-        {{ row.label }}
-      </button>
-    </div>
-    <div v-if="expanded && facets.tags.length" class="filter-group">
-      <span class="filter-label">标签</span>
-      <button
-        v-for="row in facets.tags"
-        :key="row.value"
-        class="chip"
-        type="button"
-        :aria-pressed="String(filters.tag) === String(row.value)"
-        @click="apply('tag', row.value)"
-      >
-        {{ row.label }}{{ row.count ? ` ${row.count}` : '' }}
-      </button>
-    </div>
-    <div class="toolbar">
-      <button class="btn btn--quiet btn--sm" type="button" @click="expanded = !expanded">
-        {{ expanded ? '收起筛选' : '更多筛选' }}
-      </button>
-    </div>
+    <button
+      class="btn btn--quiet btn--sm filter-toggle"
+      type="button"
+      aria-controls="category-filter-body"
+      :aria-expanded="expanded"
+      @click="expanded = !expanded"
+    >
+      <span>{{ expanded ? '收起筛选' : '展开全部筛选' }}</span>
+      <Icon name="down" :class-name="expanded ? 'is-flipped' : ''" />
+    </button>
   </div>
 
   <h2 class="sr-only">片库内容</h2>

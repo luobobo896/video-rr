@@ -124,7 +124,7 @@ async function request(base, path, options = {}) {
   }
 }
 
-function publicToken() {
+export function publicToken() {
   try {
     return localStorage.getItem('mh-token') || '';
   } catch {

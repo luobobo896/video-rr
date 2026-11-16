@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
 import Icon from '../../components/Icon.vue';
+import PagerBar from '../../components/PagerBar.vue';
 import PosterCard from '../../components/PosterCard.vue';
 import { publicApi } from '../../api.js';
 import { normalizeCard } from '../../models.js';
@@ -12,11 +13,11 @@ const total = ref(0);
 const page = ref(1);
 const pageSize = 24;
 const loading = ref(false);
-const loadingMore = ref(false);
 const error = ref('');
 const facets = ref({ channels: [], sorts: [], tags: [] });
 const adultTags = ref([]);
 const filters = reactive({ type: 'ALL', sort: 'hot', tag: '' });
+const expanded = ref(false);
 const adultEnabled = computed(() => state.constants?.adultMenu?.enabled !== false);
 
 let requestSeq = 0;
@@ -25,16 +26,33 @@ const tagGroups = computed(() => {
   return parents
     .map((parent) => ({
       ...parent,
-      children: adultTags.value.filter((tag) => Number(tag.parent_id) === Number(parent.id))
+      // 没有作品的标签不渲染：点了必然是空列表，只会让人以为坏了
+      children: adultTags.value.filter(
+        (tag) =>
+          Number(tag.parent_id) === Number(parent.id) &&
+          (Number(tag.dramaCount) > 0 || String(filters.tag) === String(tag.id))
+      )
     }))
     .filter((group) => group.children.length);
+});
+/** 频道筛选项同理：数量为 0 的不显示，但当前选中项要留着，否则无法取消 */
+const channelRows = computed(() =>
+  (facets.value.channels ?? []).filter(
+    (row) => row.count === undefined || Number(row.count) > 0 || filters.type === row.value
+  )
+);
+const tagLabel = computed(() => {
+  const tag = adultTags.value.find((row) => String(row.id) === String(filters.tag));
+  return tag ? tag.label || tag.name : '';
 });
 const note = computed(() => {
   const channel = facets.value.channels.find((row) => row.value === filters.type)?.label ?? '全部';
   const sort = facets.value.sorts.find((row) => row.value === filters.sort)?.label ?? '最热';
-  return `共 ${total.value} 部 · ${channel} · ${sort}`;
+  const parts = [`共 ${total.value} 部`, channel, sort];
+  if (tagLabel.value) parts.push(tagLabel.value);
+  return parts.join(' · ');
 });
-const canLoadMore = computed(() => items.value.length < total.value);
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)));
 
 function query(nextPage) {
   const params = new URLSearchParams({
@@ -48,32 +66,31 @@ function query(nextPage) {
   return params;
 }
 
-async function load({ reset = true } = {}) {
+async function load(target = 1) {
   if (!state.adultConfirmed) return;
   const seq = ++requestSeq;
-  if (reset) {
-    page.value = 1;
-    loading.value = true;
-  } else {
-    loadingMore.value = true;
-  }
+  const next = Math.min(Math.max(1, Number(target) || 1), totalPages.value);
+  page.value = next;
+  loading.value = true;
   error.value = '';
   try {
-    const data = await publicApi(`/category?${query(reset ? 1 : page.value + 1)}`);
+    const data = await publicApi(`/category?${query(next)}`);
     if (seq !== requestSeq) return;
-    const list = (data.list ?? []).map(normalizeCard);
-    items.value = reset ? list : items.value.concat(list);
+    items.value = (data.list ?? []).map(normalizeCard);
     total.value = Number(data.total ?? 0);
-    page.value = Number(data.page ?? page.value);
+    page.value = Number(data.page ?? next);
     facets.value = { ...facets.value, ...(data.facets ?? {}) };
   } catch (requestError) {
     if (seq === requestSeq) error.value = requestError.message;
   } finally {
-    if (seq === requestSeq) {
-      loading.value = false;
-      loadingMore.value = false;
-    }
+    if (seq === requestSeq) loading.value = false;
   }
+}
+
+// 换页时回到列表顶部，避免停在半空
+function goPage(next) {
+  void load(next);
+  if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 async function accept() {
@@ -95,7 +112,14 @@ function deny() {
 
 function apply(key, value) {
   filters[key] = filters[key] === value ? (key === 'type' ? 'ALL' : key === 'sort' ? 'hot' : '') : value;
-  void load();
+  void load(1);
+}
+
+function resetFilters() {
+  filters.type = 'ALL';
+  filters.sort = 'hot';
+  filters.tag = '';
+  void load(1);
 }
 
 onMounted(async () => {
@@ -116,17 +140,7 @@ onMounted(async () => {
       <h1 class="h1">成人 <span class="badge badge--18">18+</span></h1>
       <p class="meta">{{ note }}</p>
     </div>
-    <div class="segmented" role="group" aria-label="成人频道排序">
-      <button
-        v-for="item in [{ value: 'hot', label: '最热' }, { value: 'new', label: '最新' }, { value: 'score', label: '好评' }]"
-        :key="item.value"
-        type="button"
-        :aria-pressed="filters.sort === item.value"
-        @click="apply('sort', item.value)"
-      >
-        {{ item.label }}
-      </button>
-    </div>
+    <a class="btn btn--ghost btn--sm" :href="href('/short')">短剧频道</a>
   </div>
 
   <div v-if="!adultEnabled" class="empty">
@@ -148,46 +162,58 @@ onMounted(async () => {
 
   <template v-else>
     <h2 class="sr-only">成人内容分类</h2>
-    <div class="adult-filters">
-      <div class="filter-group">
-        <span class="filter-label">类型</span>
-        <button
-          v-for="row in facets.channels"
-          :key="row.value"
-          class="chip"
-          type="button"
-          :aria-pressed="filters.type === row.value"
-          @click="apply('type', row.value)"
-        >
-          {{ row.label }}{{ row.count !== undefined ? ` ${row.count}` : '' }}
-        </button>
+    <div class="adult-filters" :data-fold="expanded ? 'all' : 'half'">
+      <div id="adult-filter-body" class="filter-body">
+        <div class="filter-group">
+          <span class="filter-label">类型</span>
+          <button
+            v-for="row in channelRows"
+            :key="row.value"
+            class="chip"
+            type="button"
+            :aria-pressed="filters.type === row.value"
+            @click="apply('type', row.value)"
+          >
+            {{ row.label }}{{ row.count !== undefined ? ` ${row.count}` : '' }}
+          </button>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label">排序</span>
+          <button
+            v-for="row in facets.sorts"
+            :key="row.value"
+            class="chip"
+            type="button"
+            :aria-pressed="filters.sort === row.value"
+            @click="apply('sort', row.value)"
+          >
+            {{ row.label }}
+          </button>
+        </div>
+        <div v-for="group in tagGroups" :key="group.id" class="filter-group">
+          <span class="filter-label">{{ group.label || group.name }}</span>
+          <button
+            v-for="tag in group.children"
+            :key="tag.id"
+            class="chip"
+            type="button"
+            :aria-pressed="String(filters.tag) === String(tag.id)"
+            @click="apply('tag', tag.id)"
+          >
+            {{ tag.label || tag.name }}{{ tag.dramaCount ? ` ${tag.dramaCount}` : '' }}
+          </button>
+        </div>
       </div>
-      <div class="filter-group">
-        <span class="filter-label">排序</span>
-        <button
-          v-for="row in facets.sorts"
-          :key="row.value"
-          class="chip"
-          type="button"
-          :aria-pressed="filters.sort === row.value"
-          @click="apply('sort', row.value)"
-        >
-          {{ row.label }}
-        </button>
-      </div>
-      <div v-for="group in tagGroups" :key="group.id" class="filter-group">
-        <span class="filter-label">{{ group.label || group.name }}</span>
-        <button
-          v-for="tag in group.children"
-          :key="tag.id"
-          class="chip"
-          type="button"
-          :aria-pressed="String(filters.tag) === String(tag.id)"
-          @click="apply('tag', tag.id)"
-        >
-          {{ tag.label || tag.name }}{{ tag.dramaCount ? ` ${tag.dramaCount}` : '' }}
-        </button>
-      </div>
+      <button
+        class="btn btn--quiet btn--sm filter-toggle"
+        type="button"
+        aria-controls="adult-filter-body"
+        :aria-expanded="expanded"
+        @click="expanded = !expanded"
+      >
+        <span>{{ expanded ? '收起筛选' : '展开全部筛选' }}</span>
+        <Icon name="down" :class-name="expanded ? 'is-flipped' : ''" />
+      </button>
     </div>
 
     <div v-if="loading" class="empty">
@@ -207,15 +233,17 @@ onMounted(async () => {
       </div>
       <div v-else class="empty adult-empty">
         <span class="age-mark">18+</span>
-        <h3>成人内容筹备中</h3>
-        <p>当前筛选下没有已发布内容。你仍可以浏览普通片库。</p>
-        <a class="btn btn--ghost btn--sm" :href="href('/category')">返回片库</a>
+        <h3>当前筛选下没有内容</h3>
+        <p>换一个类型或题材，也可以回到全部成人内容。</p>
+        <button class="btn btn--ghost btn--sm" type="button" @click="resetFilters">重置筛选</button>
       </div>
-      <div v-if="canLoadMore" class="toolbar" style="justify-content: center">
-        <button class="btn btn--ghost" type="button" :disabled="loadingMore" @click="load({ reset: false })">
-          {{ loadingMore ? '加载中' : '加载更多' }}
-        </button>
-      </div>
+      <PagerBar
+        :page="page"
+        :total="total"
+        :page-size="pageSize"
+        :loading="loading"
+        @change="goPage"
+      />
     </template>
     <p class="adult-foot" style="margin-top: 16px">18+ · 仅限成年用户 · 影片与短剧共用会员权益</p>
   </template>

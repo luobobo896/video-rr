@@ -682,8 +682,12 @@ svg { display: block; }
   border-radius: var(--r-2);
   background: var(--ink-1);
 }
+.filter-body { display: grid; gap: var(--sp-3); }
 .filter-group { display: flex; align-items: flex-start; gap: var(--sp-3); flex-wrap: wrap; }
 .filter-label { flex: 0 0 44px; padding-top: 7px; font-size: var(--fs-12); color: var(--text-3); letter-spacing: 0.08em; }
+.filter-toggle { display: none; justify-self: end; align-items: center; gap: 6px; color: var(--text-2); }
+.filter-toggle .icon { width: 12px; height: 12px; transition: transform var(--dur-1) var(--ease); }
+.filter-toggle .icon.is-flipped { transform: rotate(180deg); }
 .adult-empty { padding: 56px 24px; border: 1px dashed var(--line-2); border-radius: var(--r-2); }
 .adult-empty .age-mark { font-size: 40px; }
 .adult-foot { font-size: var(--fs-12); color: var(--text-3); letter-spacing: 0.04em; }
@@ -1155,6 +1159,58 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
   .topbar .top-actions .btn { padding: 0 10px; font-size: var(--fs-11); }
   .icon-btn { width: 44px; height: 44px; }
   .chip { height: 36px; }
+  /* 移动端筛选面板：一组一行横向滑动，默认折起，只露三行 */
+  .adult-filters {
+    --filter-row: 36px;
+    padding: 8px 0 4px;
+    gap: 2px;
+    border-radius: var(--r-2);
+  }
+  .filter-body {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: calc(var(--filter-row) * 3 + 8px);
+    overflow: hidden;
+  }
+  .adult-filters[data-fold="all"] .filter-body { max-height: none; }
+  .filter-group {
+    align-items: center;
+    gap: 6px;
+    flex-wrap: nowrap;
+    min-height: var(--filter-row);
+    padding-right: 16px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .filter-group::-webkit-scrollbar { display: none; }
+  .filter-group .chip { flex: 0 0 auto; }
+  .filter-label {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    flex: 0 0 auto;
+    min-width: 46px;
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    padding: 0 14px 0 12px;
+    font-size: var(--fs-11);
+    letter-spacing: 0.04em;
+    background: var(--ink-1);
+  }
+  .filter-toggle {
+    display: inline-flex;
+    width: calc(100% - 24px);
+    height: 38px;
+    margin: 0 12px 2px;
+    justify-self: stretch;
+    justify-content: center;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+  }
   .topbar .search { width: auto; flex: 1; }
   .top-actions .account-name, .top-actions .icon-btn[data-desktop] { display: none; }
   .page { padding: var(--sp-4) var(--sp-4) var(--sp-8); gap: var(--sp-6); }
@@ -1405,4 +1461,93 @@ input:-webkit-autofill:focus {
   box-shadow: 0 0 0 1000px var(--ink-1) inset;
   caret-color: var(--text);
   transition: background-color 9999s ease-out 0s;
+}
+
+/* 分页条：与 chip 同一套视觉语言 */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 28px 0 10px;
+}
+
+.pager__step,
+.pager__num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 34px;
+  min-width: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.18s, border-color 0.18s, background 0.18s;
+}
+
+.pager__num {
+  padding: 0 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pager__step:hover:not(:disabled),
+.pager__num:hover:not(:disabled) {
+  border-color: var(--line-2);
+  color: var(--text);
+}
+
+.pager__num[aria-current='page'] {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--ink-0);
+  font-weight: 600;
+}
+
+.pager__step:disabled,
+.pager__num:disabled {
+  opacity: 0.36;
+  cursor: not-allowed;
+}
+
+.pager__icon {
+  width: 14px;
+  height: 14px;
+}
+
+.pager__icon--prev {
+  transform: rotate(180deg);
+}
+
+.pager__gap {
+  padding: 0 2px;
+  color: var(--text-3);
+}
+
+.pager__meta {
+  margin-left: 4px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .pager__step {
+    padding: 0 10px;
+  }
+
+  .pager__step span {
+    display: none;
+  }
+
+  .pager__meta {
+    width: 100%;
+    margin-left: 0;
+    text-align: center;
+  }
 }
