@@ -360,7 +360,8 @@ function refreshTargets() {
     }
     targets.push({ url: `https://jable.tv/videos/${code.toLowerCase().replace(/_/g, '-')}/`, expires: expiryOf(row.remote_url) })
   }
-  return targets
+  // 先刷最早过期的：中途被打断时，剩下的至少还活着
+  return targets.sort((a, b) => a.expires - b.expires)
 }
 
 // ---------- 评分补全（--score-only） ----------

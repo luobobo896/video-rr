@@ -805,7 +805,7 @@ async function pageDashboard() {
   // 概览只讲平台资产与内容健康度；收款/订阅/退款一律在「经营数据」里看。
   view.innerHTML = `
     <div class="cards">
-      ${card('已上架剧集', fmt(stats.publishedDramas ?? 0), `部（草稿 ${fmt(stats.draftDramas ?? 0)}）`)}
+      ${card('已上架剧集', fmt(stats.publishedDramas ?? 0), `部（草稿 ${fmt(stats.draftDramas ?? 0)} · 下架 ${fmt(stats.offlineDramas ?? 0)} · 隐藏 ${fmt(stats.hiddenDramas ?? 0)}）`)}
       ${card('分集', fmt(stats.episodes ?? 0), `集（可播 ${fmt(stats.readyEpisodes ?? 0)}）`)}
       ${card('标签', fmt(stats.tags ?? 0), '个启用')}
       ${card('C 端用户', fmt(stats.users ?? 0), `人（7 日活跃 ${fmt(stats.activeUsers7d ?? 0)}）`)}
@@ -853,7 +853,7 @@ const card = (key, value, unit) => `<div class="card"><div class="k">${esc(key)}
 const CATEGORY_LABEL = { MOVIE: '电影', TV: '电视剧', PLAYLET: '短剧/漫剧', ANIME: '动漫', VARIETY: '综艺', DOCUMENTARY: '纪录片' }
 const ACCESS_LABEL = { free: '免费', subscription: '会员免费', paid: '单独收费' }
 const MISSING_LABEL = { title: '标题', category: '类型', coverUrl: '封面', year: '年份', area: '地区', score: '评分', accessMode: '付费模式' }
-const STATUS_LABEL = { published: '已上架', draft: '草稿', offline: '已下架' }
+const STATUS_LABEL = { published: '已上架', draft: '草稿', offline: '已下架', hidden: '已隐藏' }
 const policyGroupSummary = (group) => {
   if (!group) return '未选择策略组'
   const parts = [ACCESS_LABEL[group.access_mode] ?? group.access_mode]

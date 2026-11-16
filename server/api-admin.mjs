@@ -59,6 +59,9 @@ const dramaDto = (row) => (row ? {
 } : row)
 const validDate = (value) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value)
 
+/** 短剧（PLAYLET）在站内一律按成人内容处理：外层不得出现，后台保存时强制打标，避免运营漏勾。 */
+const adultFlagOf = (category, isAdult) => (String(category ?? '').trim().toUpperCase() === 'PLAYLET' ? 1 : (isAdult ? 1 : 0))
+
 const ipOf = (req) => clientIpOf(req)
 const safeJson = (text) => { try { return JSON.parse(text) } catch { return null } }
 const paging = (url, fallbackSize = 20) => {
@@ -118,6 +121,7 @@ export const ADMIN_OPTIONS = {
     { value: 'draft', label: '草稿 / 待补全' },
     { value: 'published', label: '已上架' },
     { value: 'offline', label: '已下架' },
+    { value: 'hidden', label: '已隐藏' },
   ],
   orderStatus: [
     { value: 'created', label: '待支付' },
@@ -456,7 +460,9 @@ const deny = (perm) => {
     return send(res, {
       dramas: one('SELECT COUNT(*) AS n FROM dramas').n,
       publishedDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'published'").n,
-      draftDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status <> 'published'").n,
+      draftDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'draft'").n,
+      offlineDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'offline'").n,
+      hiddenDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'hidden'").n,
       episodes: one('SELECT COUNT(*) AS n FROM episodes').n,
       readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE status = 'ready' AND hls_path IS NOT NULL").n,
       tags: one("SELECT COUNT(*) AS n FROM tags WHERE status = 'active'").n,
@@ -894,7 +900,7 @@ const deny = (perm) => {
     const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, is_adult, release_date, score, status, sort, content_type, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     title, body.subTitle ?? '', body.coverUrl ?? '', body.description ?? '',
-    Number(body.year ?? 0) || 0, body.area ?? '', body.category ?? '', body.isAdult ? 1 : 0, releaseDate || null, Number(body.score ?? 0) || 0,
+    Number(body.year ?? 0) || 0, body.area ?? '', body.category ?? '', adultFlagOf(body.category, Boolean(body.isAdult)), releaseDate || null, Number(body.score ?? 0) || 0,
     'draft', Number(body.sort ?? 0), contentType)
     const dramaId = Number(info.lastInsertRowid)
     run(`INSERT INTO content_policies
@@ -946,13 +952,14 @@ const deny = (perm) => {
       ? body.contentType
       : before.content_type ?? (body.category === 'MOVIE' ? 'movie' : body.category === 'ANIME' ? 'comic_drama' : 'series')
     const isAdult = body.isAdult === undefined ? before.is_adult : (body.isAdult ? 1 : 0)
+    const nextCategory = body.category ?? before.category
     run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, is_adult = ?, release_date = ?, score = ?, status = ?, sort = ?, content_type = ?,
       updated_at = datetime('now'),
       published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, datetime('now')) ELSE published_at END
       WHERE id = ?`,
     body.title ?? before.title, body.subTitle ?? before.sub_title, body.coverUrl ?? before.cover_url,
     body.description ?? before.description, Number(body.year ?? before.year), body.area ?? before.area,
-    body.category ?? before.category, isAdult, releaseDate || null, Number(body.score ?? before.score), nextStatus,
+    body.category ?? before.category, adultFlagOf(nextCategory, Boolean(isAdult)), releaseDate || null, Number(body.score ?? before.score), nextStatus,
     Number(body.sort ?? before.sort), contentType, nextStatus, dramaId)
     log('content.drama.update', 'drama', dramaId, before, { ...body, status: nextStatus })
     return send(res, dramaDto(one('SELECT * FROM dramas WHERE id = ?', dramaId)))
