@@ -43,20 +43,50 @@ const firstPlayable = computed(() => {
   return resume ?? detail.value.episodes.find((episode) => episode.allow) ?? null;
 });
 const hasEntitlement = computed(() =>
-  Boolean(detail.value?.hasSubscription || detail.value?.episodes?.some((episode) => episode.source === 'purchase'))
+  Boolean(detail.value?.episodes?.some((episode) => episode.source === 'purchase' || episode.source === 'subscription'))
 );
+const purchaseKind = computed(() => detail.value?.priceInfo?.purchaseKind ?? 'single');
+const rentalHours = computed(() => Number(detail.value?.priceInfo?.rentalHours ?? 0) || 72);
 const primaryLabel = computed(() => {
   if (!detail.value?.episodes?.length) return '暂无剧集';
   if (hasEntitlement.value) return firstPlayable.value ? `继续观看第 ${firstPlayable.value.no} 集` : '开始观看';
   if (firstPlayable.value) return `免费看第 ${firstPlayable.value.no} 集`;
-  return detail.value.accessMode === 'paid' ? `购买本片 ¥${Number(detail.value.singlePrice).toFixed(2)}` : '开通会员';
+  if (detail.value.accessMode === 'paid') {
+    const price = Number(detail.value.singlePrice).toFixed(2);
+    return purchaseKind.value === 'rental'
+      ? `租赁本片 ¥${price} / ${rentalHours.value} 小时`
+      : `买断本片 ¥${price}`;
+  }
+  return '开通会员';
+});
+const payLabel = computed(() => {
+  const mode = detail.value?.accessMode;
+  if (mode === 'paid') {
+    return purchaseKind.value === 'rental'
+      ? `一次性 · 租赁 ${rentalHours.value} 小时`
+      : '一次性 · 买断';
+  }
+  if (mode === 'free') return '免费公开';
+  return '会员免费';
 });
 const freeNote = computed(() => {
   if (!detail.value) return '';
-  if (detail.value.freeEpisodes > 0) return `前 ${detail.value.freeEpisodes} 集免费`;
+  const episodes = detail.value.episodes ?? [];
+  if (episodes.length > 1 && detail.value.freeEpisodes > 0) return `前 ${detail.value.freeEpisodes} 集免费`;
   if (detail.value.trialSeconds > 0) return `可试看 ${detail.value.trialSeconds} 秒`;
-  return detail.value.accessMode === 'paid' ? '单片付费' : '会员专享';
+  if (detail.value.accessMode === 'paid') {
+    return purchaseKind.value === 'rental' ? `一次性租赁 ${rentalHours.value} 小时` : '一次性买断';
+  }
+  return detail.value.accessMode === 'free' ? '免费观看' : '会员专享';
 });
+const scoreValue = computed(() => Number(detail.value?.score ?? 0));
+const subline = computed(() => {
+  if (!detail.value) return '';
+  const year = String(detail.value.year ?? '').trim();
+  const sub = String(detail.value.subTitle ?? '').trim();
+  return [sub && sub !== year ? sub : '', year].filter(Boolean).join(' · ');
+});
+const hasEpisodes = computed(() => Boolean(detail.value?.episodes?.length));
 
 async function load() {
   loading.value = true;
@@ -135,7 +165,10 @@ onMounted(load);
     <Icon name="alert" />
     <h3>详情加载失败</h3>
     <p>{{ error }}</p>
-    <button class="btn btn--ghost btn--sm" type="button" @click="load">重试</button>
+    <div class="toolbar" style="justify-content: center">
+      <button class="btn btn--ghost btn--sm" type="button" @click="load">重试</button>
+      <a class="btn btn--ghost btn--sm" :href="href('/')">返回精选</a>
+    </div>
   </div>
   <div v-else-if="!adultUnlocked" class="adult-gate">
     <span class="age-mark">18+</span>
@@ -155,20 +188,18 @@ onMounted(load);
       <div class="detail-copy">
         <div>
           <h1 id="detail-title" class="detail-title">{{ detail.title }}</h1>
-          <p class="detail-sub">{{ detail.subTitle }} · {{ detail.year }}</p>
+          <p v-if="subline" class="detail-sub">{{ subline }}</p>
         </div>
         <div class="detail-meta">
-          <span class="accent num" style="font-weight: 600">{{ formatScore(detail.score) }}</span>
-          <span>{{ detail.year }}</span>
-          <span>{{ detail.areaLabel || detail.area }}</span>
-          <span>{{ detail.dramaTypeLabel }}</span>
-          <span class="badge badge--accent">{{ freeNote }}</span>
-          <span>{{ detail.episodes?.length ?? 0 }} 集</span>
+          <span v-if="scoreValue > 0" class="accent num" style="font-weight: 600">{{ formatScore(scoreValue) }}</span>
+          <span v-if="detail.areaLabel || detail.area">{{ detail.areaLabel || detail.area }}</span>
+          <span v-if="detail.dramaTypeLabel">{{ detail.dramaTypeLabel }}</span>
+          <span v-if="hasEpisodes">{{ detail.episodes.length }} 集</span>
           <span>{{ formatCount(detail.playCount) }} 次播放</span>
         </div>
         <p class="detail-desc">{{ detail.description }}</p>
         <div class="detail-actions">
-          <button class="btn btn--primary btn--lg" type="button" @click="playTarget(firstPlayable)">
+          <button class="btn btn--primary btn--lg" type="button" :disabled="!hasEpisodes" @click="playTarget(firstPlayable)">
             <Icon name="play" />{{ primaryLabel }}
           </button>
           <button
@@ -211,11 +242,14 @@ onMounted(load);
           :key="episode.id"
           class="ep"
           type="button"
+          :class="{ 'ep--stale': episode.stale }"
           :aria-current="firstPlayable?.no === episode.no"
+          :title="episode.stale ? '片源签名已过期，点开会自动换新链接' : ''"
           @click="selectEpisode(episode)"
         >
           {{ episode.no }}
           <Icon v-if="!episode.allow" name="lock" className="lock" />
+          <span v-else-if="episode.stale" class="ep-stale" aria-hidden="true">·</span>
         </button>
       </div>
       <div v-else class="empty" style="padding: 32px 12px">
@@ -239,7 +273,7 @@ onMounted(load);
           <span><strong>年份</strong> {{ detail.year || '—' }}</span>
           <span><strong>类型</strong> {{ detail.dramaTypeLabel }}</span>
           <span><strong>集数</strong> {{ detail.episodes?.length ?? 0 }}</span>
-          <span><strong>付费模式</strong> {{ detail.priceInfo?.purchaseKind === 'single' ? '单片 / 订阅' : '订阅' }}</span>
+          <span><strong>付费模式</strong> {{ payLabel }}</span>
         </div>
       </div>
     </section>
@@ -261,5 +295,8 @@ onMounted(load);
     :allow-single="detail?.accessMode === 'paid'"
     :drama-id="dramaId"
     :single-price="Number(detail?.singlePrice ?? 0)"
+    :purchase-kind="purchaseKind"
+    :rental-hours="rentalHours"
+    :plans-allowed="detail?.accessMode !== 'paid'"
   />
 </template>

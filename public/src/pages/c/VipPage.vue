@@ -41,7 +41,7 @@ function openCheckout() {
   <div class="section-head">
     <div>
       <h1 class="h1">会员</h1>
-      <p class="meta">全站畅看 · 成人专区同权</p>
+      <p class="meta">会员内容畅看 · 4K 原画（不含一次性收费内容）</p>
     </div>
   </div>
   <h2 class="sr-only">会员权益与开通</h2>
@@ -64,10 +64,10 @@ function openCheckout() {
           </span>
         </div>
         <ul class="checklist">
-          <li><Icon name="check" />全站剧集畅看</li>
+          <li><Icon name="check" />全站会员内容畅看</li>
           <li><Icon name="check" />4K 原画与双端同步</li>
-          <li><Icon name="check" />成人专区同权</li>
-          <li><Icon name="check" />服务端权益实时生效</li>
+          <li><Icon name="check" />电影与多集剧集同权</li>
+          <li><Icon name="check" />一次性收费内容需单独购买</li>
         </ul>
       </div>
       <div class="panel">
@@ -93,5 +93,5 @@ function openCheckout() {
       </p>
     </div>
   </template>
-  <CheckoutDialog v-model="checkoutOpen" title="开通会员" subtitle="全站畅看 · 成人专区同权" />
+  <CheckoutDialog v-model="checkoutOpen" title="开通会员" subtitle="会员内容畅看 · 不含一次性收费" />
 </template>

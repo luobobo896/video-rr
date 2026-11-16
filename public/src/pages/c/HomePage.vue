@@ -35,6 +35,8 @@ const floorSections = computed(() =>
 const topRanks = computed(() => rankItems.value.slice(0, 4));
 const vipPrice = computed(() => state.constants?.vipPrice ?? '25.00');
 const adultEnabled = computed(() => state.constants?.adultMenu?.enabled !== false);
+// 外层首页不展示成人内容（含成人短剧）：只有本次会话已确认 18+ 才放出「午夜场」入口
+const adultUnlocked = computed(() => adultEnabled.value && state.adultConfirmed);
 const heroSlides = computed(() => {
   const slides = banners.value.map((banner, index) => ({
     id: `banner-${banner.id}`,
@@ -59,7 +61,7 @@ const heroSlides = computed(() => {
       : { label: '浏览片库', path: '/category', icon: 'grid' },
     secondary: { label: '浏览片库', path: '/category', icon: 'grid' }
   }));
-  if (adultEnabled.value) {
+  if (adultUnlocked.value) {
     slides.unshift({
       id: 'midnight',
       adult: true,
@@ -70,10 +72,9 @@ const heroSlides = computed(() => {
       meta: [
         { text: '18+', badge: true },
         { text: '影片' },
-        { text: 'AI 短剧' },
         { text: '会员畅看' }
       ],
-      desc: '深夜才开的放映厅。成人影片与 AI 短剧，更成熟的题材、更克制的界面，以及只对成年用户开放的内容分级。',
+      desc: '深夜才开的放映厅。更成熟的题材、更克制的界面，以及只对成年用户开放的内容分级。',
       primary: { label: '进入成人专区', path: '/adult', icon: 'lock' },
       secondary: { label: '浏览片库', path: '/category', icon: 'grid' }
     });
@@ -253,27 +254,27 @@ onBeforeUnmount(() => {
       </button>
     </div>
   </div>
-  <div v-else class="hero" :class="{ 'hero--adult': adultEnabled }">
+  <div v-else class="hero" :class="{ 'hero--adult': adultUnlocked }">
     <div class="hero-side">
-      <span>{{ adultEnabled ? '18+ · MIDNIGHT' : 'SELECTED · CINEMA' }}</span>
+      <span>{{ adultUnlocked ? '18+ · MIDNIGHT' : 'SELECTED · CINEMA' }}</span>
       <span>CHANNEL 01</span>
     </div>
     <div class="hero-body">
-      <div class="hero-kicker"><span class="line"></span>影巢 · {{ adultEnabled ? '午夜场' : '精选' }}</div>
-      <h1 class="hero-title">{{ adultEnabled ? t('午夜场') : t('影巢放映厅') }}</h1>
+      <div class="hero-kicker"><span class="line"></span>影巢 · {{ adultUnlocked ? '午夜场' : '精选' }}</div>
+      <h1 class="hero-title">{{ adultUnlocked ? t('午夜场') : t('影巢放映厅') }}</h1>
       <div class="hero-meta">
-        <span v-if="adultEnabled" class="badge badge--18">18+</span>
+        <span v-if="adultUnlocked" class="badge badge--18">18+</span>
         <span>影片</span><span>剧集</span><span>会员畅看</span>
       </div>
       <p class="hero-desc">
-        {{ adultEnabled
-          ? '深夜才开的放映厅。成人影片与短剧，更成熟的题材、更克制的界面，以及只对成年用户开放的内容分级。'
-          : '精选电影、剧集与短剧。浏览片库，登录后同步观看记录、收藏与会员权益。' }}
+        {{ adultUnlocked
+          ? '深夜才开的放映厅。更成熟的题材、更克制的界面，以及只对成年用户开放的内容分级。'
+          : '精选电影、剧集与动漫。浏览片库，登录后同步观看记录、收藏与会员权益。' }}
       </p>
       <div class="hero-actions">
-        <a v-if="adultEnabled" class="btn btn--primary btn--lg" :href="href('/adult')"><Icon name="lock" />进入成人专区</a>
+        <a v-if="adultUnlocked" class="btn btn--primary btn--lg" :href="href('/adult')"><Icon name="lock" />进入成人专区</a>
         <a v-else class="btn btn--primary btn--lg" :href="href('/category')"><Icon name="grid" />浏览片库</a>
-        <a v-if="adultEnabled" class="btn btn--ghost btn--lg" :href="href('/category')"><Icon name="grid" />浏览片库</a>
+        <a v-if="adultUnlocked" class="btn btn--ghost btn--lg" :href="href('/category')"><Icon name="grid" />浏览片库</a>
         <a v-else class="btn btn--ghost btn--lg" :href="href('/vip')"><Icon name="crown" />会员权益</a>
       </div>
     </div>
@@ -352,7 +353,7 @@ onBeforeUnmount(() => {
       <div class="member-strip">
         <div class="member-copy">
           <h3>会员套餐，随时入场</h3>
-          <p>月卡 / 季卡 / 年卡可选，全站畅看、4K 原画、成人专区同权。</p>
+          <p>月卡 / 季卡 / 年卡可选，全站畅看、4K 原画。</p>
         </div>
         <div class="member-price"><strong>¥{{ vipPrice }}</strong><span>/ 月</span></div>
         <button class="btn btn--primary" type="button" @click="openCheckout">选择会员套餐</button>
@@ -373,7 +374,7 @@ onBeforeUnmount(() => {
             :rank="film.rankNo || index + 1"
             :title="film.title"
             :subtitle="[film.typeLabel, film.year, film.area].filter(Boolean).join(' · ')"
-            :score="film.score.toFixed(1)"
+            :score="film.score > 0 ? film.score.toFixed(1) : ''"
           />
         </div>
       </div>
@@ -388,6 +389,6 @@ onBeforeUnmount(() => {
   <CheckoutDialog
     v-model="checkoutOpen"
     title="开通会员"
-    subtitle="全站畅看 · 成人专区同权"
+    subtitle="会员内容畅看 · 不含一次性收费"
   />
 </template>

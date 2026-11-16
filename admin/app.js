@@ -851,15 +851,20 @@ const card = (key, value, unit) => `<div class="card"><div class="k">${esc(key)}
 
 /* ---------------- 剧集 ---------------- */
 const CATEGORY_LABEL = { MOVIE: '电影', TV: '电视剧', PLAYLET: '短剧/漫剧', ANIME: '动漫', VARIETY: '综艺', DOCUMENTARY: '纪录片' }
-const ACCESS_LABEL = { free: '免费', subscription: '会员免费', paid: '单独收费' }
+const ACCESS_LABEL = { free: '免费公开', subscription: '会员免费', paid: '一次性收费' }
 const MISSING_LABEL = { title: '标题', category: '类型', coverUrl: '封面', year: '年份', area: '地区', score: '评分', accessMode: '付费模式' }
 const STATUS_LABEL = { published: '已上架', draft: '草稿', offline: '已下架', hidden: '已隐藏' }
 const policyGroupSummary = (group) => {
   if (!group) return '未选择策略组'
   const parts = [ACCESS_LABEL[group.access_mode] ?? group.access_mode]
-  if (Number(group.free_episodes) > 0) parts.push(`前 ${Number(group.free_episodes)} 集免费`)
+  if (group.access_mode === 'paid') {
+    const kind = group.purchase_kind === 'rental'
+      ? `租赁 ${Number(group.rental_hours ?? 72)} 小时`
+      : '买断'
+    parts.push(`${kind} ¥${Number(group.single_price_cny ?? 0).toFixed(2)}`)
+  }
+  if (Number(group.free_episodes) > 0) parts.push(`剧集首 ${Number(group.free_episodes)} 集免费`)
   if (Number(group.trial_seconds) > 0) parts.push(`试看 ${Number(group.trial_seconds)} 秒`)
-  if (group.access_mode === 'paid' && Number(group.single_price_cny) > 0) parts.push(`单片 ¥${Number(group.single_price_cny).toFixed(2)}`)
   return parts.join(' · ')
 }
 
@@ -2272,8 +2277,25 @@ const pillOf = (status) => {
 }
 
 /* ---------------- 付费策略 + 按集定价规则 ---------------- */
-const ACCESS_LABEL_POLICY = { free: '免费', subscription: '会员免费', paid: '单独收费' }
+const ACCESS_LABEL_POLICY = { free: '免费公开', subscription: '会员免费', paid: '一次性收费' }
 const RULE_MODE_LABEL = { free: '免费观看', vip: '需会员', single: '需单集购买' }
+
+function policyGroupRule(group) {
+  if (!group) return '—'
+  const parts = []
+  if (group.access_mode === 'paid') {
+    parts.push(group.purchase_kind === 'rental'
+      ? `租赁 ${Number(group.rental_hours ?? 72)} 小时 · ¥${Number(group.single_price_cny ?? 0).toFixed(2)}`
+      : `买断 · ¥${Number(group.single_price_cny ?? 0).toFixed(2)}`)
+  } else if (group.access_mode === 'subscription') {
+    parts.push('会员全部可看，不单卖')
+  } else {
+    parts.push('全部免费，无需登录')
+  }
+  if (group.access_mode !== 'free' && Number(group.free_episodes) > 0) parts.push(`剧集首 ${Number(group.free_episodes)} 集免费`)
+  if (group.access_mode !== 'free' && Number(group.trial_seconds) > 0) parts.push(`试看 ${Number(group.trial_seconds)} 秒`)
+  return parts.join(' · ')
+}
 
 function rulesSummary(rules) {
   if (!rules || !rules.length) return '<span class="muted">沿用整体策略</span>'
@@ -2300,12 +2322,10 @@ async function pagePolicies() {
           <button class="btn primary" id="policy-group-new">＋ 新建策略组</button>
         </div>
       </div>
-      ${table(['策略组', '模式', '免费集', '试看(秒)', '单片价', '已分配', '操作'], groupPage.items.map((group) => `<tr>
+      ${table(['策略组', '模式', '规则', '已分配', '操作'], groupPage.items.map((group) => `<tr>
         <td class="policy-name"><strong>${esc(group.name)}</strong><div class="muted">${esc(group.description ?? '')}</div></td>
         <td class="policy-mode" data-label="模式">${esc(ACCESS_LABEL_POLICY[group.access_mode] ?? group.access_mode)}</td>
-        <td class="policy-free" data-label="免费集">${group.free_episodes}</td>
-        <td class="policy-trial" data-label="试看(秒)">${group.trial_seconds}</td>
-        <td class="policy-price" data-label="单片价">¥${Number(group.single_price_cny ?? 0).toFixed(2)}</td>
+        <td class="policy-rule" data-label="规则">${esc(policyGroupRule(group))}</td>
         <td class="policy-assigned" data-label="已分配">${fmt(group.assigned ?? 0)} 部</td>
         <td class="row-actions policy-actions">
           <button class="btn sm primary" data-group-assign="${group.id}">批量分配</button>
@@ -2319,20 +2339,48 @@ async function pagePolicies() {
 
   const groupById = (id) => groupList.find((group) => Number(group.id) === Number(id))
   const openPolicyGroupForm = (group) => {
+    const mode = group?.access_mode ?? 'subscription'
+    const kind = group?.purchase_kind === 'rental' ? 'rental' : 'single'
     openOverlay(group ? `编辑策略组 · ${group.name}` : '新建策略组', `
       <div class="grid-2">
         <label>名称<input id="pg-name" value="${esc(group?.name ?? '')}" /></label>
         <label>说明<input id="pg-desc" value="${esc(group?.description ?? '')}" /></label>
-        <label>模式<select id="pg-mode">${(options.accessModes ?? []).map((item) => `<option value="${esc(item.value)}" ${group?.access_mode === item.value ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></label>
-        <label>免费集<input id="pg-free" type="number" min="0" value="${group?.free_episodes ?? 1}" /></label>
-        <label>试看秒数<input id="pg-trial" type="number" min="0" value="${group?.trial_seconds ?? 0}" /></label>
-        <label>单片价<input id="pg-price" type="number" min="0" step="0.01" value="${group?.single_price_cny ?? 0}" /></label>
-        <label>售卖方式<select id="pg-kind">
-          <option value="single" ${group?.purchase_kind !== 'rental' ? 'selected' : ''}>买断</option>
-          <option value="rental" ${group?.purchase_kind === 'rental' ? 'selected' : ''}>租赁</option>
+        <label>模式<select id="pg-mode">${(options.accessModes ?? []).map((item) => `<option value="${esc(item.value)}" ${mode === item.value ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></label>
+      </div>
+      <div class="grid-2" id="pg-fields" style="margin-top:10px">
+        <label data-show="subscription paid">首 N 集免费（只对多集剧集生效，电影忽略）<input id="pg-free" type="number" min="0" value="${group?.free_episodes ?? 0}" /></label>
+        <label data-show="subscription paid">试看秒数<input id="pg-trial" type="number" min="0" value="${group?.trial_seconds ?? 0}" /></label>
+        <label data-show="paid">售卖方式<select id="pg-kind">
+          <option value="single" ${kind !== 'rental' ? 'selected' : ''}>买断（永久观看）</option>
+          <option value="rental" ${kind === 'rental' ? 'selected' : ''}>租赁（限时观看）</option>
         </select></label>
-        <label>租赁时长（小时）<input id="pg-hours" type="number" min="1" value="${group?.rental_hours ?? 72}" /></label>
-      </div>`, (body, close) => {
+        <label data-show="paid">一次性价格（元）<input id="pg-price" type="number" min="0.01" step="0.01" value="${group?.single_price_cny ?? 0}" /></label>
+        <label data-show="paid rental">租赁时长（小时）<input id="pg-hours" type="number" min="1" value="${group?.rental_hours || 72}" /></label>
+      </div>
+      <p class="muted" style="margin:10px 0 0;line-height:1.7">
+        会员免费 = 会员看全部，不提供买断/租赁；一次性收费 = 会员也要付费，才可选买断或租赁。<br />
+        电影只有一集，不走首 N 集免费；多集剧集才可用首 N 集免费做拉新。
+      </p>`, (body, close) => {
+      const fields = body.querySelector('#pg-fields')
+      const modeSelect = body.querySelector('#pg-mode')
+      const kindSelect = body.querySelector('#pg-kind')
+      const paint = () => {
+        const currentMode = modeSelect.value
+        const currentKind = kindSelect.value
+        fields.querySelectorAll('[data-show]').forEach((node) => {
+          const tokens = node.dataset.show.split(' ')
+          const wantsPaid = tokens.includes('paid')
+          const wantsRental = tokens.includes('rental')
+          const visible = currentMode === 'paid'
+            ? wantsPaid && (!wantsRental || currentKind === 'rental')
+            : tokens.includes(currentMode) && !wantsRental
+          node.hidden = !visible
+        })
+      }
+      modeSelect.addEventListener('change', paint)
+      kindSelect.addEventListener('change', paint)
+      paint()
+
       const foot = document.createElement('div')
       foot.className = 'modal-foot'
       foot.innerHTML = '<button class="btn" data-cancel>取消</button><button class="btn primary" id="pg-save">保存</button>'
@@ -2340,17 +2388,20 @@ async function pagePolicies() {
       foot.querySelector('[data-cancel]').addEventListener('click', close)
       foot.querySelector('#pg-save').addEventListener('click', async () => {
         try {
+          const accessMode = modeSelect.value
+          const purchaseKind = kindSelect.value
           const payload = {
             name: body.querySelector('#pg-name').value.trim(),
             description: body.querySelector('#pg-desc').value.trim(),
-            accessMode: body.querySelector('#pg-mode').value,
+            accessMode,
             freeEpisodes: Number(body.querySelector('#pg-free').value || 0),
             trialSeconds: Number(body.querySelector('#pg-trial').value || 0),
             singlePrice: Number(body.querySelector('#pg-price').value || 0),
-            purchaseKind: body.querySelector('#pg-kind').value,
+            purchaseKind,
             rentalHours: Number(body.querySelector('#pg-hours').value || 72),
           }
           if (!payload.name) return toast('策略组名称必填')
+          if (accessMode === 'paid' && payload.singlePrice <= 0) return toast('一次性收费必须填写大于 0 的价格')
           await api(group ? `/admin/api/policy-groups/${group.id}` : '/admin/api/policy-groups', { method: group ? 'PUT' : 'POST', body: payload })
           close()
           await pagePolicies()
@@ -2550,7 +2601,7 @@ async function pagePlans() {
       <h3>${esc(plan.name)} <span class="pill ${plan.status === 'active' ? 'ok' : ''}">${plan.status === 'active' ? '在售' : '已下架'}</span></h3>
       <p style="font-size:26px;font-weight:600;margin:6px 0">¥${price.toFixed(2)}<span class="muted" style="font-size:13px"> / ${months} 个月</span></p>
       <p class="muted">日均 ¥${perDay.toFixed(2)} · 有效期 ${days} 天 · 范围 ${plan.scope === 'all' ? '全部内容' : esc(plan.scope)}</p>
-      <p class="muted">权益：${plan.scope === 'all' ? '全站剧集无限观看（含单片付费内容）' : '指定范围内容观看'}</p>
+      <p class="muted">权益：${plan.scope === 'all' ? '会员内容无限观看（不含一次性收费内容）' : '指定范围会员内容观看'}</p>
       <p class="mono muted" style="font-size:12px">套餐编码 ${esc(plan.code)}</p>
       <div class="form-row">
         <button class="btn sm" data-toggle-plan="${plan.id}" data-status="${plan.status === 'active' ? 'disabled' : 'active'}">${plan.status === 'active' ? '下架' : '上架'}</button>
@@ -2639,7 +2690,7 @@ async function openOrderDetail(id) {
   const rowsOf = [
     ['单号', order.out_trade_no],
     ['用户', `${order.nickname ?? '—'}${order.email ? ` · ${order.email}` : ''}`],
-    ['商品', order.product_type === 'subscription' ? `会员 · ${order.plan_name ?? ''}` : `单片 · ${order.drama_title ?? ''}`],
+    ['商品', order.product_type === 'subscription' ? `会员 · ${order.plan_name ?? ''}` : `一次性 · ${order.drama_title ?? ''}`],
     ['金额', `¥${Number(order.amount_cny ?? 0).toFixed(2)}`],
     ['渠道', order.channel],
     ['状态', pillOf(order.status), true],
@@ -3078,7 +3129,7 @@ async function pagePay() {
           <label class="setting-field">
             <span>适用场景</span>
             <select class="input" id="f-scene">
-            ${[['all', '全部'], ['subscription', '会员订阅'], ['single', '单片购买']].map(([scene, label]) => `<option value="${scene}" ${channel?.scene === scene ? 'selected' : ''}>${label}</option>`).join('')}
+            ${[['all', '全部'], ['subscription', '会员订阅'], ['single', '一次性购买']].map(([scene, label]) => `<option value="${scene}" ${channel?.scene === scene ? 'selected' : ''}>${label}</option>`).join('')}
             </select>
           </label>
           <label class="setting-field">

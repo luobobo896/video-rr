@@ -170,7 +170,7 @@ svg { display: block; }
   border-right: 1px solid var(--line);
   z-index: 30;
 }
-.brand { display: flex; align-items: center; gap: 10px; padding: 0 var(--sp-2); }
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 var(--sp-2); flex: 0 0 auto; }
 .brand-mark {
   width: 32px;
   height: 32px;
@@ -184,7 +184,7 @@ svg { display: block; }
   font-size: 18px;
   font-weight: 700;
 }
-.brand-name { font-size: var(--fs-16); font-weight: 700; letter-spacing: 0.06em; }
+.brand-name { font-size: var(--fs-16); font-weight: 700; letter-spacing: 0.06em; white-space: nowrap; }
 .brand-sub { display: block; font-size: 11px; color: var(--text-3); letter-spacing: 0.18em; font-weight: 400; }
 .nav-group { display: grid; gap: 2px; }
 .sidebar-scroll { flex: 1; min-height: 0; display: grid; gap: var(--sp-5); overflow-y: auto; padding-right: 2px; }
@@ -767,6 +767,9 @@ svg { display: block; }
 .ep:hover { border-color: var(--line-2); color: var(--text); background: var(--ink-2); }
 .ep[aria-current="true"] { border-color: var(--accent); color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
 .ep .lock { width: 11px; height: 11px; color: var(--warn); }
+/* 外部片源签名过期：只在选集格上做轻提示，点进去服务端会自动换新链接 */
+.ep--stale { border-style: dashed; border-color: color-mix(in oklab, var(--warn) 45%, var(--line)); }
+.ep .ep-stale { color: var(--warn); font-weight: 700; line-height: 0; }
 .ep-note { display: flex; align-items: center; gap: 6px; font-size: var(--fs-12); color: var(--text-3); margin-top: var(--sp-3); }
 
 /* ── 播放浮层 ───────────────────────────────────────── */
@@ -1222,8 +1225,12 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
   .film-grid { grid-template-columns: repeat(2, 1fr); gap: var(--sp-4) var(--sp-3); }
   .rail .film { flex-basis: 142px; }
   .continue-grid { grid-template-columns: 1fr; }
-  .detail-head { grid-template-columns: 1fr; }
-  .detail-cover { width: 168px; }
+  .detail-head { grid-template-columns: 120px minmax(0, 1fr); column-gap: var(--sp-4); row-gap: var(--sp-3); }
+  .detail-cover { width: 100%; grid-column: 1; grid-row: 1; }
+  .detail-copy { display: contents; }
+  .detail-copy > :first-child { grid-column: 2; grid-row: 1; align-self: center; }
+  .detail-meta, .detail-desc, .detail-actions, .detail-facts { grid-column: 1 / -1; }
+  .detail-title { font-size: clamp(22px, 6.4vw, 30px); }
   .detail-actions .btn { flex: 1; }
   .episode-grid { grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); }
   .stat-strip { grid-template-columns: 1fr; }
@@ -1591,4 +1598,18 @@ input:-webkit-autofill:focus {
 .film-fallback {
   opacity: 0.5;
   filter: saturate(0.85);
+}
+@media (max-width: 389px) {
+  .topbar .lang-switch { display: none; }
+  .topbar .top-actions { gap: 6px; }
+  .topbar .icon-btn { width: 40px; height: 40px; }
+}
+@media (max-width: 359px) {
+  .topbar { gap: 6px; padding: 0 var(--sp-2); }
+  .topbar .brand-name { display: none; }
+}
+
+.hero--lp { min-height: 520px; }
+@media (max-width: 767px) {
+  .hero--lp { min-height: 320px; }
 }

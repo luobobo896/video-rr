@@ -14,7 +14,7 @@ defineProps({
     <FilmArt :film="film" :badge="badge" :ratio="ratio" />
     <span class="film-title truncate">{{ film.title }}</span>
     <span class="film-meta">
-      <span class="score">{{ film.score.toFixed(1) }}</span>
+      <span v-if="film.score > 0" class="score">{{ film.score.toFixed(1) }}</span>
       <span>{{ film.typeLabel }}{{ film.area ? ` · ${film.area}` : '' }}</span>
     </span>
   </a>

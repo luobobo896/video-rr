@@ -37,6 +37,8 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize))
 const genreRows = computed(() =>
   genres.value.filter((row) => Number(row.dramaCount) > 0 || String(filters.tag) === String(row.id))
 );
+// 短剧频道是成人内容：成人菜单关掉时整页不再取数据，也不接受「已满 18 岁」解锁
+const adultEnabled = computed(() => state.constants?.adultMenu?.enabled !== false);
 
 function query(nextPage) {
   const params = new URLSearchParams({
@@ -51,7 +53,7 @@ function query(nextPage) {
 }
 
 async function load(target = 1) {
-  if (!state.adultConfirmed) return;
+  if (!adultEnabled.value || !state.adultConfirmed) return;
   const seq = ++requestSeq;
   const next = Math.min(Math.max(1, Number(target) || 1), totalPages.value);
   page.value = next;
@@ -88,6 +90,7 @@ async function loadGenres() {
 }
 
 async function accept() {
+  if (!adultEnabled.value) return;
   confirmAdult();
   toast('已进入短剧频道');
   await loadGenres();
@@ -116,7 +119,7 @@ function resetFilters() {
 }
 
 onMounted(async () => {
-  if (!state.adultConfirmed) return;
+  if (!adultEnabled.value || !state.adultConfirmed) return;
   await loadGenres();
   await load();
 });
@@ -131,7 +134,13 @@ onMounted(async () => {
     <a class="btn btn--ghost btn--sm" :href="href('/adult')">成人电影</a>
   </div>
 
-  <div v-if="!state.adultConfirmed" class="adult-gate">
+  <div v-if="!adultEnabled" class="empty">
+    <Icon name="lock" />
+    <h3>成人频道暂未开放</h3>
+    <p>运营已关闭该频道入口。</p>
+    <a class="btn btn--ghost btn--sm" :href="href('/category')">返回片库</a>
+  </div>
+  <div v-else-if="!state.adultConfirmed" class="adult-gate">
     <span class="age-mark">18+</span>
     <h2>仅限成年用户</h2>
     <p>短剧频道包含成人向内容，请确认你已年满 18 岁。</p>

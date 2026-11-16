@@ -22,7 +22,7 @@ const groups = [
     items: [
       { key: 'home', label: '精选', path: '/', icon: 'home' },
       { key: 'category', label: '片库', path: '/category', icon: 'grid' },
-      { key: 'short', label: '短剧', path: '/short', icon: 'film' },
+      // 短剧频道是成人内容，入口只放在「成人」专区里（/adult → /short），外层导航不再出现
       { key: 'adult', label: '成人', path: '/adult', icon: 'lock', badge: '18+' },
       { key: 'rank', label: '榜单', path: '/rank', icon: 'chart' },
       { key: 'content-rank', label: '内容数据榜', path: '/content-rank', icon: 'chart' }
@@ -60,7 +60,14 @@ const bottomItems = [
 ];
 
 const userInitial = computed(() => (state.user?.nickname || state.user?.email || '影').slice(0, 1));
-const vipPrice = computed(() => state.constants?.vipPrice ?? '25');
+const vipPrice = computed(() => String(state.constants?.vipPrice ?? '').trim());
+const vipHeadline = computed(() => {
+  if (lang.value === 'en') return vipPrice.value ? `Plans from ¥${vipPrice.value}` : 'Membership';
+  return vipPrice.value ? `会员套餐 ¥${vipPrice.value} 起` : '会员内容畅看';
+});
+const vipBlurb = computed(() => (vipPrice.value
+  ? (lang.value === 'en' ? 'Monthly, quarterly and annual plans' : '月卡 / 季卡 / 年卡可选，全站畅看。')
+  : (lang.value === 'en' ? 'Member-only titles, no extra purchase' : '会员内容无需单独购买，一次性收费内容除外。')));
 const adultEnabled = computed(() => state.constants?.adultMenu?.enabled !== false);
 const visibleGroups = computed(() =>
   groups
@@ -121,12 +128,8 @@ function toggleLang() {
 
       <div class="sidebar-foot">
         <div v-if="!isVip" class="side-card">
-          <strong>
-            {{ lang === 'en' ? `Plans from ¥${vipPrice}` : `会员套餐 ¥${vipPrice} 起` }}
-          </strong>
-          <p>
-            {{ lang === 'en' ? 'Monthly, quarterly and annual plans · Adult channel included' : '月卡 / 季卡 / 年卡可选，成人专区同权。' }}
-          </p>
+          <strong>{{ vipHeadline }}</strong>
+          <p>{{ vipBlurb }}</p>
           <a class="btn btn--primary btn--sm btn--block" :href="href('/vip')">
             {{ lang === 'en' ? 'View plans' : '查看套餐' }}
           </a>
@@ -139,9 +142,14 @@ function toggleLang() {
       <header class="topbar">
         <template v-if="focusedRoute">
           <a class="icon-btn" :href="href('/')" aria-label="返回首页"><Icon name="back" /></a>
-          <a class="brand" :href="href('/')"><span class="brand-mark">影</span><span class="brand-name">影巢</span></a>
+          <a class="brand" :href="href('/')">
+            <span class="brand-mark brand-mark--logo"><img :src="'./art/logo-mark.png'" alt="" width="32" height="32" /></span>
+            <span class="brand-name">影巢</span>
+          </a>
         </template>
-        <a v-else class="topbar-brand" :href="href('/')"><span class="brand-mark">影</span>影巢</a>
+        <a v-else class="topbar-brand" :href="href('/')">
+          <span class="brand-mark brand-mark--logo"><img :src="'./art/logo-mark.png'" alt="" width="32" height="32" /></span><span class="brand-name">影巢</span>
+        </a>
         <form v-if="!focusedRoute" class="search" role="search" @submit.prevent="submitSearch">
           <Icon name="search" />
           <input

@@ -1314,3 +1314,5 @@ table input:focus, table select:focus {
   .rank-items-table td:nth-child(5) { width: 58px; }
   .rank-items-table td:nth-child(2) { overflow-wrap: anywhere; }
 }
+
+[hidden] { display: none !important; }

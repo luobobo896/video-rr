@@ -8,7 +8,7 @@ import 'element-plus/es/components/form/style/css'
   <div id="login" class="login admin-login">
     <aside class="login-aside" aria-hidden="true">
       <div class="login-brand">
-        <img class="brand-mark brand-mark--img" :src="'./icons/icon-96x96.png'" alt="" width="34" height="34" />
+        <img class="brand-mark brand-mark--img" :src="'./icons/icon-192x192.png'" alt="" width="34" height="34" />
         <span class="brand-name">影巢运营<span class="brand-sub">OPS CONSOLE</span></span>
       </div>
       <div class="login-aside-copy">

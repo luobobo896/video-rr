@@ -44,7 +44,7 @@ onMounted(load);
   <div v-else-if="!state.user" class="empty">
     <Icon name="user" />
     <h3>登录后查看个人中心</h3>
-    <p>观看记录、收藏、会员和单片权益都保存在账号中。</p>
+    <p>观看记录、收藏、会员和一次性购买权益都保存在账号中。</p>
     <button class="btn btn--primary btn--sm" type="button" @click="requireLogin('登录后查看个人中心')">登录</button>
   </div>
   <template v-else>
@@ -110,7 +110,7 @@ onMounted(load);
       </div>
     </section>
     <section v-if="purchases.length" class="panel">
-      <div class="panel-head"><h3>已购单片</h3><span class="meta">{{ purchases.length }} 部</span></div>
+      <div class="panel-head"><h3>已购内容</h3><span class="meta">{{ purchases.length }} 部</span></div>
       <div class="todo-list">
         <div v-for="item in purchases" :key="item.dramaId" class="todo">
           <span class="todo-mark"><Icon name="check" /></span>
@@ -132,5 +132,5 @@ onMounted(load);
     </div>
     <p v-if="error" class="field error">{{ error }}</p>
   </template>
-  <CheckoutDialog v-model="checkoutOpen" title="开通会员" subtitle="全站畅看 · 成人专区同权" />
+  <CheckoutDialog v-model="checkoutOpen" title="开通会员" subtitle="会员内容畅看 · 不含一次性收费" />
 </template>

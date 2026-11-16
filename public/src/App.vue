@@ -65,6 +65,8 @@ const activeKey = computed(() => {
   if (route.path.startsWith('/detail/')) return '';
   if (route.path === '/search') return '';
   if (route.path === '/profile-edit') return 'me';
+  // 短剧频道挂在成人专区下，外层导航没有独立入口，高亮回到「成人」
+  if (route.path === '/short') return 'adult';
   return route.path.split('/')[1] || '';
 });
 

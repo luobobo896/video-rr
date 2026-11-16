@@ -66,7 +66,7 @@ async function continuePay(row) {
 
 function titleOf(row) {
   if (row.productType === 'subscription') return row.planName || '会员订阅';
-  return row.dramaTitle || '单片购买';
+  return row.dramaTitle || '一次性购买';
 }
 
 onMounted(load);
@@ -98,7 +98,7 @@ onMounted(load);
   <div v-if="!state.user" class="empty">
     <Icon name="user" />
     <h3>登录后查看订单</h3>
-    <p>会员订阅与单片购买记录会保存在账号中。</p>
+    <p>会员订阅与一次性购买记录会保存在账号中。</p>
     <button class="btn btn--primary btn--sm" type="button" @click="requireLogin('登录后查看订单')">登录</button>
   </div>
   <div v-else-if="loading" class="empty">
@@ -151,7 +151,7 @@ onMounted(load);
   <div v-else class="empty">
     <Icon name="orders" />
     <h3>暂无订单</h3>
-    <p>会员订阅或单片购买记录会出现在这里。</p>
+    <p>会员订阅或一次性购买记录会出现在这里。</p>
     <a class="btn btn--ghost btn--sm" href="#/vip">去开通会员</a>
   </div>
 </template>

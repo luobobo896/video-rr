@@ -584,22 +584,24 @@ function openPaywall(detail, options = {}) {
     return
   }
 
-  let selected = plans.length
-    ? { productType: 'subscription', planId: Number(plans[0].id) }
-    : { productType: 'single', dramaId }
+  let selected = canSingle
+    ? { productType: 'single', dramaId }
+    : plans.length
+      ? { productType: 'subscription', planId: Number(plans[0].id) }
+      : { productType: 'single', dramaId }
 
   modal.dataset.paywall = token
   modal.innerHTML = `
     <div class="modal-card paywall">
       <h3>${escapeHtml(options.title ?? (canSingle ? '该片需单独购买' : '开通会员后可观看'))}</h3>
-      <p class="paywall-sub">${canSingle ? '本片为单独付费内容，会员也可观看全部剧集' : '会员可看全站剧集（不含单独付费影片）'}</p>
+      <p class="paywall-sub">${canSingle ? '本片为一次性收费内容，会员也需购买后观看' : '会员可看全站会员内容（不含一次性收费内容）'}</p>
       <div class="plan-list">
-        ${plans.map((plan) => `<button class="plan-item${selected.planId === Number(plan.id) ? ' active' : ''}" data-plan="${plan.id}">
+        ${canSingle ? '' : plans.map((plan) => `<button class="plan-item${selected.planId === Number(plan.id) ? ' active' : ''}" data-plan="${plan.id}">
           <span class="plan-name">${escapeHtml(plan.name)}</span>
           <span class="plan-price">¥${Number(plan.price).toFixed(2)}</span>
           <span class="plan-days">${plan.days} 天</span>
         </button>`).join('')}
-        ${canSingle ? `<button class="plan-item single${plans.length ? '' : ' active'}" data-single="1">
+        ${canSingle ? `<button class="plan-item single active" data-single="1">
           <span class="plan-name">购买本片（${detail?.purchaseKind === 'rental' ? '限时租赁' : '永久解锁'}）</span>
           <span class="plan-price">¥${singlePrice.toFixed(2)}</span>
         </button>` : ''}
@@ -2870,7 +2872,7 @@ async function renderMe(params = {}) {
         ${sub
           ? `<div class="me-big">会员中<small class="me-days">剩 ${subscriptionDays} 天</small></div>
              <div class="me-sub">有效期至 ${escapeHtml(sub.validTo)}${sub.scope === 'all' ? ' · 全站畅看' : ''}</div>`
-          : '<div class="me-big">未开通</div><div class="me-sub">开通后可看全站剧集（含单片付费内容）</div>'}
+          : '<div class="me-big">未开通</div><div class="me-sub">开通后可看全站会员内容（不含一次性收费内容）</div>'}
         <button class="btn-primary" id="me-subscribe" style="margin-top:12px">${sub ? '续费' : '开通会员'}</button>
       </div>
       <div class="me-card">

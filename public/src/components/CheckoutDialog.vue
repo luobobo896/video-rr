@@ -11,7 +11,10 @@ const props = defineProps({
   subtitle: { type: String, default: '全站畅看 · 4K 原画' },
   allowSingle: { type: Boolean, default: false },
   dramaId: { type: Number, default: 0 },
-  singlePrice: { type: Number, default: 0 }
+  singlePrice: { type: Number, default: 0 },
+  purchaseKind: { type: String, default: 'single' },
+  rentalHours: { type: Number, default: 72 },
+  plansAllowed: { type: Boolean, default: true }
 });
 
 const emit = defineEmits(['update:modelValue']);
@@ -24,6 +27,11 @@ const error = ref('');
 const order = ref(null);
 
 const hasSingle = computed(() => props.allowSingle && props.singlePrice > 0);
+const hasPlans = computed(() => props.plansAllowed && plans.value.length > 0);
+const singleLabel = computed(() => (props.purchaseKind === 'rental' ? '一次性租赁' : '一次性买断'));
+const singleHint = computed(() => (props.purchaseKind === 'rental'
+  ? `${props.rentalHours} 小时内可看`
+  : '永久观看，会员到期不影响'));
 
 function close() {
   emit('update:modelValue', false);
@@ -31,7 +39,8 @@ function close() {
 
 function selectDefault() {
   if (hasSingle.value) selection.value = 'single';
-  else if (plans.value.length) selection.value = `plan:${plans.value[0].id}`;
+  else if (hasPlans.value) selection.value = `plan:${plans.value[0].id}`;
+  else selection.value = '';
 }
 
 async function load() {
@@ -39,7 +48,8 @@ async function load() {
   error.value = '';
   order.value = null;
   try {
-    plans.value = await loadPlans();
+    // 一次性收费内容不展示会员套餐：开了会员也解锁不了，避免误解
+    plans.value = props.plansAllowed ? await loadPlans() : [];
     selectDefault();
   } catch (requestError) {
     error.value = requestError.message;
@@ -135,8 +145,8 @@ watch(
           <div class="plan-grid">
             <label v-if="hasSingle" class="plan">
               <input v-model="selection" type="radio" name="purchase" value="single" />
-              <strong>单片购买</strong>
-              <span>买断当前内容</span>
+              <strong>{{ singleLabel }}</strong>
+              <span>{{ singleHint }}</span>
               <b>{{ formatMoney(singlePrice) }}</b>
             </label>
             <label v-for="plan in plans" :key="plan.id" class="plan">
@@ -146,6 +156,13 @@ watch(
               <b>{{ formatMoney(plan.price) }}</b>
             </label>
           </div>
+          <p v-if="!hasSingle && !hasPlans" class="dialog-note">
+            <Icon name="clock" />
+            <span>暂无可购买选项，请稍后再试。</span>
+          </p>
+          <p v-else-if="hasSingle && !hasPlans" class="small muted">
+            本片为一次性收费内容，会员也需购买后观看。
+          </p>
           <div class="field">
             <label>支付方式</label>
             <div class="pay-method">
@@ -158,7 +175,7 @@ watch(
       </div>
       <div class="dialog-foot">
         <button type="button" class="btn btn--ghost" @click="close">取消</button>
-        <button v-if="!order" class="btn btn--primary" type="submit" :disabled="loading || submitting">
+        <button v-if="!order" class="btn btn--primary" type="submit" :disabled="loading || submitting || !selection">
           {{ submitting ? '创建订单中' : '去支付' }}
         </button>
       </div>

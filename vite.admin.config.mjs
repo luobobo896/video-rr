@@ -13,6 +13,8 @@ export default defineConfig({
     port: 5174,
     strictPort: true,
     open: '/',
+    // 同上：忽略编辑器原子写留下的 .tmpdir 临时目录，避免 Windows 下 EBUSY 打挂 watcher
+    watch: { ignored: ['**/*.tmpdir/**', '**/.*.tmpdir/**', '**/*.tmp'] },
     fs: {
       allow: [resolve('.')],
     },

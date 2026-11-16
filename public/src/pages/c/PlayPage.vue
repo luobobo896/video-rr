@@ -17,6 +17,11 @@ const playback = ref(null);
 const loading = ref(true);
 const error = ref('');
 const errorCode = ref('');
+// 外部片源的直链带签名，过期时后端回 0409 + reason=source_link_expired：
+// 这是临时状态，页面要自己等一会儿再拉一次，而不是让用户对着灰播放键发呆
+const errorReason = ref('');
+const retryCountdown = ref(0);
+const playerIssue = ref('');
 const checkoutOpen = ref(false);
 const adultUnlocked = ref(true);
 const retryToken = ref(0);
@@ -25,6 +30,7 @@ let heartbeatTimer = 0;
 let heartbeatTick = 0;
 let historyTimer = 0;
 let lastHistorySecond = 0;
+let countdownTimer = 0;
 
 const trialMode = computed(() => route.query.trial === '1' || !state.user);
 const episode = computed(
@@ -84,6 +90,10 @@ async function load() {
   loading.value = true;
   error.value = '';
   errorCode.value = '';
+  errorReason.value = '';
+  playerIssue.value = '';
+  window.clearInterval(countdownTimer);
+  retryCountdown.value = 0;
   try {
     detail.value = await publicApi(`/drama/${dramaId}`);
     adultUnlocked.value = !detail.value.isAdult || state.adultConfirmed;
@@ -102,9 +112,42 @@ async function load() {
   } catch (requestError) {
     error.value = requestError.message;
     errorCode.value = requestError.code || String(requestError.status || '');
+    errorReason.value = requestError.data?.reason || '';
+    if (errorReason.value === 'source_link_expired') startCountdown(requestError.data?.retryAfterSeconds);
   } finally {
     loading.value = false;
   }
+}
+
+/** 片源续期期间：显示倒计时，到点自动重拉一次播放信息 */
+function startCountdown(seconds) {
+  // 后端换票通常 1～3 秒，所以下限给到 3 秒：过期就当场换，不让用户干等
+  const wait = Math.max(3, Math.min(180, Number(seconds) || 6));
+  retryCountdown.value = wait;
+  window.clearInterval(countdownTimer);
+  countdownTimer = window.setInterval(() => {
+    retryCountdown.value -= 1;
+    if (retryCountdown.value > 0) return;
+    window.clearInterval(countdownTimer);
+    retryCountdown.value = 0;
+    void load();
+  }, 1000);
+}
+
+function retryNow() {
+  window.clearInterval(countdownTimer);
+  retryCountdown.value = 0;
+  void load();
+}
+
+/** 播放器彻底失败（不是续期等待）时给一个手动重载入口，不把死画面留在那 */
+function onPlayerFailed(payload) {
+  playerIssue.value = payload?.status || '片源加载失败';
+}
+
+function reloadPlayer() {
+  playerIssue.value = '';
+  retryToken.value += 1;
 }
 
 function unlockAdult() {
@@ -130,6 +173,7 @@ onMounted(load);
 
 onBeforeUnmount(() => {
   window.clearInterval(heartbeatTimer);
+  window.clearInterval(countdownTimer);
   void saveHistory(true);
 });
 </script>
@@ -151,11 +195,30 @@ onBeforeUnmount(() => {
   </div>
   <div v-else-if="error" class="empty">
     <Icon name="alert" />
-    <h3>{{ errorCode === '0402' || errorCode === '402' ? '需要解锁本集' : '播放加载失败' }}</h3>
-    <p>{{ error }}</p>
+    <h3>
+      {{ errorCode === '0402' || errorCode === '402'
+        ? '需要解锁本集'
+        : errorReason === 'source_link_expired' ? '片源正在续期'
+          : errorReason === 'source_unavailable' ? '该集片源暂不可用' : '播放加载失败' }}
+    </h3>
+    <p v-if="errorReason === 'source_link_expired'">
+      这一集的片源签名已过期，服务器正在自动换新链接。
+      <template v-if="retryCountdown > 0">{{ retryCountdown }} 秒后自动重试…</template>
+      <template v-else>稍后重试即可恢复播放。</template>
+    </p>
+    <p v-else-if="errorReason === 'source_unavailable'">
+      这一集在源站已经拿不到片源了（多半是下架），换一集会更稳妥。
+    </p>
+    <p v-else>{{ error }}</p>
     <div class="toolbar" style="justify-content: center">
       <button v-if="errorCode === '0402' || errorCode === '402'" class="btn btn--primary" type="button" @click="openPaywall">
         查看购买选项
+      </button>
+      <button v-else-if="errorReason === 'source_link_expired'" class="btn btn--primary" type="button" @click="retryNow">
+        立即重试
+      </button>
+      <button v-else-if="errorReason === 'source_unavailable'" class="btn btn--ghost" type="button" @click="retryNow">
+        再试一次
       </button>
       <button v-else class="btn btn--ghost" type="button" @click="load">重新加载</button>
       <a class="btn btn--ghost" :href="href(`/detail/${dramaId}`)">返回详情</a>
@@ -181,7 +244,14 @@ onBeforeUnmount(() => {
       @ended="onEnded"
       @play="sendHeartbeat"
       @pause="sendHeartbeat"
+      @failed="onPlayerFailed"
     />
+    <div v-if="playerIssue" class="empty" style="padding: 20px">
+      <p>{{ playerIssue }}</p>
+      <div class="toolbar" style="justify-content: center">
+        <button class="btn btn--primary" type="button" @click="reloadPlayer">重新加载播放器</button>
+      </div>
+    </div>
     <div v-if="!playable" class="empty" style="padding: 24px">
       <h3>片源暂不可用</h3>
       <p>该集可能仍在转码或转码失败。</p>
@@ -213,10 +283,13 @@ onBeforeUnmount(() => {
   </template>
   <CheckoutDialog
     v-model="checkoutOpen"
-    title="解锁本集"
+    title="解锁本片"
     :subtitle="detail?.title || ''"
     :allow-single="detail?.accessMode === 'paid'"
     :drama-id="dramaId"
     :single-price="Number(detail?.singlePrice ?? 0)"
+    :purchase-kind="detail?.priceInfo?.purchaseKind ?? 'single'"
+    :rental-hours="Number(detail?.priceInfo?.rentalHours ?? 0) || 72"
+    :plans-allowed="detail?.accessMode !== 'paid'"
   />
 </template>
