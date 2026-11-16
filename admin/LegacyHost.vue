@@ -17,7 +17,7 @@ function openCommand() {
     <button class="skip-link" type="button">跳到主要内容</button>
     <aside class="side" aria-label="运营后台侧栏">
       <a class="brand" href="#/dashboard" aria-label="影巢运营后台首页">
-        <span class="brand-mark" aria-hidden="true">影</span>
+        <img class="brand-mark brand-mark--img" :src="'./icons/icon-96x96.png'" alt="" width="34" height="34" />
         <span class="brand-name">影巢运营<span class="brand-sub">OPS CONSOLE</span></span>
       </a>
       <div class="side-tools">

@@ -381,13 +381,19 @@ cd /opt/video-rr && MH_EDGE=/usr/bin/chromium xvfb-run -a \
   node scripts/jable-import.mjs --refresh --max-left 1 --dry
 ```
 
-`/etc/cron.d/video-refresh`（每 30 分钟，`flock` 防重入）：
+`/etc/cron.d/video-refresh`（每 3 小时，`flock` 防重入）：
 
 ```
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
-*/30 * * * * root cd /opt/video-rr && flock -n /tmp/jable-refresh.lock env MH_EDGE=/usr/bin/chromium xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 40 >> /var/log/video-refresh.log 2>&1
+# jable 直链 3 小时过期。每 3 小时全量刷新一轮（约 1.8 小时跑完），
+# 请求量约 1100 次/小时，是维持 3383 部可播的最低频率，别再往上加。
+0 */3 * * * root cd /opt/video-rr && flock -n /tmp/jable-refresh.lock env MH_EDGE=/usr/bin/chromium xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 200 >> /var/log/video-refresh.log 2>&1
 ```
+
+频率是被有效期倒推出来的：链接 3 小时过期，一轮全量约 1.8 小时，
+所以 3 小时是能维持全部可播的最低频率。再密只会加速触发 Cloudflare 限流，
+不会让播放更稳；真要减少请求量，唯一有效的办法是缩小需要保持可播的片量。
 
 实测服务器端 167 部连续刷新 **0 失败**，约 21 部/分钟；1844 部待刷约 90 分钟跑完。
 

@@ -24,7 +24,12 @@
 * `public/src/pages/c/LoginPage.vue` —— 顶部品牌标 + `<img class="login-bg">` 背景
 * `public/src/App.vue` —— 路由兜底的空态 `<img class="empty-art">`
 * `public/src/components/FilmArt.vue` —— 条目没有 `cover_url` 时，按片名散列从 8 张 poster 里轮换一张
-* 样式集中在 `public/src/styles.css` 末尾「品牌与插画素材」段
+* `admin/LegacyHost.vue` + `admin/components/AdminLogin.vue` —— 运营后台侧栏与登录页改用
+  `admin/icons/icon-96x96.png`（`.brand-mark--img` 去掉渐变底、圆角裁切铺满），不再是「影」字色块
+* 样式集中在 `public/src/styles.css` 末尾「品牌与插画素材」段与 `admin/modern.css` 的 `.brand-mark--img`
+
+> Vue 模板里图片必须写成 `:src="'./path/x.png'"` 绑定形式。写成 `src="./path/x.png"` 会被
+> vite 当模块解析，`publicDir: false` 时直接构建失败（`UNRESOLVED_IMPORT`）。
 
 ## 重新生成
 

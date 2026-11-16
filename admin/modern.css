@@ -113,6 +113,14 @@ textarea {
   border: 0;
   object-fit: initial;
 }
+/* 真图标：去掉渐变底与文字色，圆角裁切后铺满 */
+.brand-mark--img {
+  background: none;
+  color: transparent;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 10px;
+}
 .brand-name {
   min-width: 0;
   font-size: 15px;
