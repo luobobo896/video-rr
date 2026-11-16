@@ -121,7 +121,19 @@ rm -f /etc/systemd/system/mediamtx.service
 systemctl daemon-reload
 
 log "4/7 systemd 服务"
+# 服务不再以 root 跑：默认用户 videorr（MH_USER 可覆盖），不存在就建一个系统用户，
+# 并把 data/日志目录交给它，否则 SQLite 与 HLS 写入会 EACCES。
+MH_USER=${MH_USER:-videorr}
+if ! id -u "$MH_USER" >/dev/null 2>&1; then
+  useradd --system --home-dir "$APP" --shell /usr/sbin/nologin "$MH_USER" 2>/dev/null \
+    || { echo "创建用户 $MH_USER 失败（可用 MH_USER=已有用户 重跑）"; exit 1; }
+  echo "已创建系统用户：$MH_USER"
+fi
+chown -R "$MH_USER":"$MH_USER" "$APP/storage" 2>/dev/null || true
+touch /var/log/video-rr.log /var/log/video-rr.err.log
+chown "$MH_USER":"$MH_USER" /var/log/video-rr.log /var/log/video-rr.err.log
 install -m 644 "$APP/deploy/video-rr.service" /etc/systemd/system/video-rr.service
+sed -i "s/^User=.*/User=$MH_USER/; s/^Group=.*/Group=$MH_USER/" /etc/systemd/system/video-rr.service
 systemctl daemon-reload
 systemctl enable video-rr.service >/dev/null 2>&1
 systemctl restart video-rr.service
@@ -135,25 +147,49 @@ log "5/7 nginx 片段"
 install -m 644 "$APP/deploy/nginx-video.snippet.conf" "$SNIPPET"
 install -m 644 "$APP/deploy/nginx-video-http.conf" "$HTTPCONF"
 
+# HTTP/2 兼容：nginx ≥1.25.1 支持独立的 `http2 on;`，但站点块里若已有 `listen 443 ssl http2;`，
+# 两种写法同时启用会让 nginx -t 报 "duplicate listen options" 而整体 reload 失败。
+# 检测到旧写法就删掉片段里那行，只保留站点块里的参数。
+if grep -qE '^[^#]*listen[^;]*http2' "$SITE" 2>/dev/null; then
+  sed -i '/^http2 on;$/d' "$SNIPPET"
+  echo "站点已用 listen ... http2，片段里已去掉独立的 http2 on;（避免重复启用）"
+else
+  echo "站点未启用 http2 参数，片段里的 http2 on; 生效（nginx ≥1.25.1）"
+fi
+
 log "6/7 注入 site 配置 + 并发参数"
 if ! grep -q 'video-rr.conf' "$SITE"; then
   cp -a "$SITE" "$SITE.bak-video-$(date +%Y%m%d%H%M%S)"
-  python3 - "$SITE" <<'PY'
+  # 注入必须真的插进去了才算成功：既没有 pomodoro marker 也没有 `listen 443 ssl;` 时
+  # 原实现会照样写回文件并打印 injected include，配置其实没变，线上 404 还得人工翻备份找原因。
+  if ! python3 - "$SITE" <<'PY'
 import sys
 path = sys.argv[1]
 text = open(path, encoding='utf-8').read()
 marker = 'include /etc/nginx/snippets/pomodoro-focus.conf; # pomodoro-focus'
 inject = '\n    include /etc/nginx/snippets/video-rr.conf; # video-rr'
-if 'video-rr.conf' not in text:
-    if marker in text:
-        text = text.replace(marker, marker + inject, 1)
-    else:
-        text = text.replace('listen 443 ssl;', inject.strip() + '\n    listen 443 ssl;', 1)
-    open(path, 'w', encoding='utf-8').write(text)
-    print('injected include')
-else:
+if 'video-rr.conf' in text:
     print('include already present')
+    sys.exit(0)
+if marker in text:
+    text = text.replace(marker, marker + inject, 1)
+    anchor = 'pomodoro-focus include'
+elif 'listen 443 ssl;' in text:
+    text = text.replace('listen 443 ssl;', inject.strip() + '\n    listen 443 ssl;', 1)
+    anchor = 'listen 443 ssl;'
+else:
+    sys.stderr.write('找不到注入锚点：既没有 pomodoro-focus include，也没有 “listen 443 ssl;”\n')
+    sys.exit(3)
+open(path, 'w', encoding='utf-8').write(text)
+print('injected include at %s' % anchor)
 PY
+  then
+    echo "nginx include 注入失败：$SITE 结构不匹配，未修改该文件（备份见 $SITE.bak-video-*）" >&2
+    echo "请手工把下面这行加进 server 块，然后重新执行本脚本：" >&2
+    echo "    include /etc/nginx/snippets/video-rr.conf; # video-rr" >&2
+    exit 1
+  fi
+  grep -q 'video-rr.conf' "$SITE" || { echo "注入后仍未在 $SITE 找到 video-rr.conf" >&2; exit 1; }
 fi
 
 NGX=/etc/nginx/nginx.conf
@@ -163,14 +199,26 @@ nginx -t
 systemctl reload nginx
 
 log "7/7 健康检查"
-for path in /video/ /video-admin/ /video/api/constants; do
-  code=$(curl -sk -A "$BROWSER_UA" -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN$path")
-  printf '  %-24s %s\n' "$path" "$code"
-done
+# 只 printf 状态码的“检查”等于没检查：部署脚本必须以退出码表态，否则 CI / 人工都看不出子路径挂错。
+health_failed=0
+want_code() { # path expected-codes-csv
+  local p=$1 want=$2 code
+  code=$(curl -sk -A "$BROWSER_UA" -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN$p")
+  if [[ ",$want," == *",$code,"* ]]; then
+    printf '  %-24s %s\n' "$p" "$code"
+  else
+    printf '  %-24s %s（期望 %s）\n' "$p" "$code" "$want"
+    health_failed=1
+  fi
+}
+want_code /video/ 200
+want_code /video-admin/ 200
+want_code /video/api/constants 200
+# 未签名直出必须被拦住（401 或 403 都算拦住了）
+want_code /video/media/hls/1/index.m3u8 401,403
 curl -fsS -A "$BROWSER_UA" "http://127.0.0.1:$APP_PORT/" | grep -q 'id="app"' || { echo "C 端未加载 Vue 构建产物"; exit 1; }
 curl -fsS -A "$BROWSER_UA" "http://127.0.0.1:$APP_PORT/admin/" | grep -q 'id="vue-root"' || { echo "后台未加载 Vue 构建产物"; exit 1; }
-unsigned=$(curl -sk -A "$BROWSER_UA" -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/video/media/hls/1/index.m3u8")
-printf '  %-24s %s（应为 403）\n' 'unsigned hls' "$unsigned"
+[ "$health_failed" = 0 ] || { echo "健康检查未通过：nginx 子路径或 Node 服务异常，见上面状态码" >&2; exit 1; }
 echo
 echo "完成：C 端 https://$DOMAIN/video/   后台 https://$DOMAIN/video-admin/"
 CRED="$APP/storage/admin-initial-passwords.txt"

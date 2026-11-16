@@ -2,6 +2,7 @@ import { execFileSync, execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { forbiddenEntries } from './lib/deploy-guard.mjs'
 
 const ROOT = process.cwd()
 const REQUIRED = [
@@ -51,10 +52,11 @@ execFileSync('tar', ['-czf', output, ...ENTRIES], { cwd: ROOT, stdio: 'inherit' 
 const entries = execFileSync('tar', ['-tzf', output], { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean)
 const missing = REQUIRED.filter((file) => !entries.includes(file))
 if (missing.length) throw new Error(`发布包校验失败，缺少：${missing.join(', ')}`)
-for (const forbidden of ['node_modules/', 'storage/', 'dist/', '.env']) {
-  if (entries.some((entry) => entry === forbidden || entry.startsWith(forbidden))) {
-    throw new Error(`发布包不应包含：${forbidden}`)
-  }
+// 旧实现只匹配根级 `.env`、`storage/` 这种前缀，于是 server/.env、admin/.env.local
+// 这类嵌套文件能一路打进发布包。这里按路径段判断。
+const forbidden = forbiddenEntries(entries)
+if (forbidden.length) {
+  throw new Error(`发布包不应包含：${forbidden.slice(0, 5).join(', ')}${forbidden.length > 5 ? ` 等 ${forbidden.length} 项` : ''}`)
 }
 
 const hash = createHash('sha256').update(readFileSync(output)).digest('hex')

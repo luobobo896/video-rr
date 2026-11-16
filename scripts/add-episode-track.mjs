@@ -10,6 +10,12 @@ import { dirname, extname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { db, ROOT } from '../server/db.mjs'
 import { createTrack, listEpisodeTracks, updateTrack } from '../server/tracks.mjs'
+import { rewriteMaster } from './lib/hls-playlist.mjs'
+import { writeFileAtomicSync } from './lib/fsx.mjs'
+
+// 旧实现在本文件里内联实现 rewriteMaster，硬编码 #EXT-X-VERSION:3 且允许多条 DEFAULT=YES。
+// 现在统一走 lib/hls-playlist.mjs；这里继续 re-export，因为 test/episode-track-ingest.test.mjs 从这里 import。
+export { rewriteMaster }
 
 const FFMPEG = process.env.MH_FFMPEG ?? 'ffmpeg'
 const HLS_DIR = process.env.MH_HLS_DIR ?? join(ROOT, 'storage', 'hls')
@@ -36,46 +42,6 @@ function run(command, args) {
 function hlsFile(pathname) {
   const match = String(pathname ?? '').match(/^\/media\/hls\/(.+)$/)
   return match ? join(HLS_DIR, ...match[1].split('/')) : null
-}
-
-function quote(value) {
-  return `"${String(value ?? '').replace(/["\r\n]/g, ' ')}"`
-}
-
-function streamAttrs(line, hasAudio, hasSubtitle) {
-  let next = line
-  if (hasAudio) next = /AUDIO="[^"]*"/.test(next) ? next.replace(/AUDIO="[^"]*"/, 'AUDIO="audio"') : `${next},AUDIO="audio"`
-  else next = next.replace(/,?AUDIO="[^"]*"/, '')
-  if (hasSubtitle) next = /SUBTITLES="[^"]*"/.test(next) ? next.replace(/SUBTITLES="[^"]*"/, 'SUBTITLES="subs"') : `${next},SUBTITLES="subs"`
-  else next = next.replace(/,?SUBTITLES="[^"]*"/, '')
-  return next
-}
-
-export function rewriteMaster(source, tracks) {
-  const lines = String(source).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  const streams = []
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!lines[index].startsWith('#EXT-X-STREAM-INF')) continue
-    const uri = lines[index + 1]
-    if (!uri || uri.startsWith('#')) continue
-    streams.push([lines[index], uri])
-    index += 1
-  }
-  if (!streams.length) throw new Error('master playlist 没有清晰度流')
-
-  const audio = tracks.filter((track) => track.kind === 'audio')
-  const subtitles = tracks.filter((track) => track.kind === 'subtitle')
-  const media = []
-  for (const track of audio) {
-    media.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE=${quote(track.language)},NAME=${quote(track.label)},DEFAULT=${track.is_default ? 'YES' : 'NO'},AUTOSELECT=YES,URI=${quote(track.uri)}`)
-  }
-  for (const track of subtitles) {
-    media.push(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE=${quote(track.language)},NAME=${quote(track.label)},DEFAULT=${track.is_default ? 'YES' : 'NO'},AUTOSELECT=YES,FORCED=NO,URI=${quote(track.uri)}`)
-  }
-
-  const out = ['#EXTM3U', '#EXT-X-VERSION:3', ...media]
-  for (const [attrs, uri] of streams) out.push(streamAttrs(attrs, audio.length > 0, subtitles.length > 0), uri)
-  return `${out.join('\n')}\n`
 }
 
 function relativeUri(uri, episodeId) {
@@ -179,7 +145,9 @@ export async function addEpisodeTrack({
     : createTrack({ episodeId: id, kind, language, edition, label, source, uri, isDefault: nextDefault })
 
   const master = rewriteMaster(readFileSync(masterFile, 'utf8'), masterTracks(id, saved))
-  writeFileSync(masterFile, master, 'utf8')
+  // 原地 writeFileSync 一旦中途崩，这一集的 master 就废了（同一份文件里所有清晰度都没了）。
+  // 先留 .bak 再 tmp+rename，写坏还能手工回滚。
+  writeFileAtomicSync(masterFile, master, { backup: true })
   db.prepare('UPDATE episodes SET hls_path = ? WHERE id = ?').run(`/media/hls/${id}/index.m3u8`, id)
   return saved
 }

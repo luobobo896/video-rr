@@ -22,6 +22,7 @@ import { db } from '../server/db.mjs'
 import {
   buildDrama, fetchArchiveItem, searchArchive, THUMB_URL,
 } from '../server/archive.mjs'
+import { exitCodeFor, exitCodeHint, shouldPruneEpisodes } from './lib/import-guards.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const IMG_DIR = join(ROOT, 'storage', 'images')
@@ -93,8 +94,17 @@ function generalTagId(name) {
   if (!clean) return 0
   const hit = one("SELECT id FROM tags WHERE name = ? AND scope = 'general'", clean)
   if (hit) return hit.id
-  const info = run("INSERT INTO tags (name, scope, sort, status) VALUES (?, 'general', 100, 'active')", clean)
-  return Number(info.lastInsertRowid) || 0
+  // tags.name 全局唯一：成人侧已经建过同名标签时，裸 INSERT 会抛 SQLITE_CONSTRAINT_UNIQUE
+  // 把整轮导入打断，还留下写了一半的剧。冲突就复用已有 id。
+  const sameName = one('SELECT id, scope FROM tags WHERE name = ? LIMIT 1', clean)
+  if (sameName) return Number(sameName.id) || 0
+  try {
+    const info = run("INSERT INTO tags (name, scope, sort, status) VALUES (?, 'general', 100, 'active')", clean)
+    return Number(info.lastInsertRowid) || 0
+  } catch (error) {
+    if (!/UNIQUE/i.test(String(error?.message ?? ''))) throw error
+    return Number(one('SELECT id FROM tags WHERE name = ? LIMIT 1', clean)?.id) || 0
+  }
 }
 
 // ---------- 入库 ----------
@@ -124,6 +134,7 @@ function updateDrama(id, draft, coverUrl) {
 }
 
 function writeEpisodes(dramaId, episodes) {
+  const dbNosBefore = all('SELECT no FROM episodes WHERE drama_id = ?', dramaId).map((row) => Number(row.no))
   let written = 0
   for (const episode of episodes) {
     run(
@@ -140,7 +151,17 @@ function writeEpisodes(dramaId, episodes) {
     )
     written += 1
   }
-  return written
+  // 源站删掉条目后库里会留下播不了的幽灵集；只在「本次导出集号 ⊇ 库内集号」时清
+  const exportedNos = episodes.map((episode) => episode.no)
+  let pruned = 0
+  if (shouldPruneEpisodes({ exportedNos, dbNos: dbNosBefore, claimedByTitle: false })) {
+    for (const no of dbNosBefore) {
+      if (exportedNos.includes(no)) continue
+      run('DELETE FROM episodes WHERE drama_id = ? AND no = ?', dramaId, no)
+      pruned += 1
+    }
+  }
+  return { written, pruned }
 }
 
 function writeTags(dramaId, tags) {
@@ -238,7 +259,9 @@ async function importIdentifier(identifier) {
     updateDrama(dramaId, draft, coverUrl || before.cover_url)
     updated += 1
   } else created += 1
-  episodeCount += writeEpisodes(dramaId, draft.episodes)
+  const written = writeEpisodes(dramaId, draft.episodes)
+  episodeCount += written.written
+  if (written.pruned) console.log(`  ⌄ ${identifier} 清掉源站已没有的 ${written.pruned} 集`)
   writeTags(dramaId, draft.tags)
   return before ? 'updated' : 'created'
 }
@@ -280,3 +303,7 @@ if (refreshOnly) {
 
 console.log(`\n完成：新建 ${created} · 更新 ${updated} · 跳过 ${skipped} · 失败 ${failed} · 写入 ${episodeCount} 集`)
 if (created || updated) console.log('提示：外层片库现在有非成人内容了，进后台「内容」核对分类与标签，再刷新前台首页。')
+// 有失败项时退出码非 0，否则计划任务看到的永远是「成功」
+const exitCode = exitCodeFor({ ok: created + updated, failed })
+if (exitCode) console.log(`本轮结果：${exitCodeHint(exitCode).replace(/^（|）$/g, '')}`)
+process.exitCode = exitCode

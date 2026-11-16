@@ -106,8 +106,13 @@ function prepareMovie(drama, episodes) {
   }
 }
 
-function applyMovie(plan) {
-  const mergedDir = join(HLS_DIR, String(plan.firstEpisode.id), 'merged')
+function mergedDirOf(plan) {
+  return join(HLS_DIR, String(plan.firstEpisode.id), 'merged')
+}
+
+/** 落盘部分：合并播放列表 + 分片软链（不进事务，失败靠调用方清理目录） */
+function prepareMergedFiles(plan) {
+  const mergedDir = mergedDirOf(plan)
   rmSync(mergedDir, { recursive: true, force: true })
   mkdirSync(mergedDir, { recursive: true })
 
@@ -140,45 +145,77 @@ function applyMovie(plan) {
   const masterLines = ['#EXTM3U', '#EXT-X-VERSION:3']
   for (const rendition of plan.renditions) masterLines.push(rendition.attrs, rendition.uri)
   writeFileSync(join(mergedDir, 'index.m3u8'), `${masterLines.join('\n')}\n`, 'utf8')
+  return mergedDir
+}
 
+function offsetsOf(plan) {
   const offsets = new Map()
   let offset = 0
   for (const [index, episode] of plan.episodes.entries()) {
     offsets.set(Number(episode.no), offset)
     offset += plan.episodeDurations[index] ?? Number(episode.duration ?? 0)
   }
+  return offsets
+}
 
+/** 只写库：调用方负责事务 */
+function writeMovieRows(plan, offsets) {
+  db.prepare("UPDATE episodes SET hls_path = ?, duration = ?, title = '正片', status = 'ready', progress = 100, error = NULL WHERE id = ?")
+    .run(plan.mergedPath, Math.round(plan.duration * 10) / 10, plan.firstEpisode.id)
+  db.prepare("UPDATE episodes SET status = 'merged', hls_path = NULL WHERE drama_id = ? AND no > ?")
+    .run(plan.drama.id, plan.firstEpisode.no)
+  db.prepare('UPDATE content_policies SET free_episodes = 0 WHERE drama_id = ? AND free_episodes > 0').run(plan.drama.id)
+
+  for (const row of db.prepare('SELECT id, episode_no, position FROM history WHERE drama_id = ? AND episode_no > ?')
+    .all(plan.drama.id, plan.firstEpisode.no)) {
+    const position = Number(row.position ?? 0) + (offsets.get(Number(row.episode_no)) ?? 0)
+    db.prepare('UPDATE history SET episode_no = ?, position = ? WHERE id = ?')
+      .run(plan.firstEpisode.no, Math.min(plan.duration, Math.max(0, position)), row.id)
+  }
+
+  const episodeIds = plan.episodes.slice(1).map((episode) => episode.id)
+  if (episodeIds.length) {
+    const placeholders = episodeIds.map(() => '?').join(',')
+    for (const row of db.prepare(`SELECT id, episode_id, time_ms FROM danmus WHERE episode_id IN (${placeholders})`).all(...episodeIds)) {
+      const episode = plan.episodes.find((item) => item.id === Number(row.episode_id))
+      const time = Number(row.time_ms ?? 0) + Math.round((offsets.get(Number(episode.no)) ?? 0) * 1000)
+      db.prepare('UPDATE danmus SET episode_id = ?, time_ms = ? WHERE id = ?')
+        .run(plan.firstEpisode.id, Math.min(Math.round(plan.duration * 1000), time), row.id)
+    }
+  }
+}
+
+/**
+ * 整批一个事务：旧实现每部片各自 BEGIN/COMMIT，中途失败时前面几部已经提交，
+ * 库停在「一半合了一半没合」的状态，重跑还得靠人肉判断。
+ * 这里用 SAVEPOINT 隔离单片失败：坏的那部回滚自己的行，其余照常提交，退出码非 0。
+ */
+function applyMovies(plans) {
+  const created = []
+  const failures = []
   db.exec('BEGIN')
   try {
-    db.prepare("UPDATE episodes SET hls_path = ?, duration = ?, title = '正片', status = 'ready', progress = 100, error = NULL WHERE id = ?")
-      .run(plan.mergedPath, Math.round(plan.duration * 10) / 10, plan.firstEpisode.id)
-    db.prepare("UPDATE episodes SET status = 'merged', hls_path = NULL WHERE drama_id = ? AND no > ?")
-      .run(plan.drama.id, plan.firstEpisode.no)
-    db.prepare('UPDATE content_policies SET free_episodes = 0 WHERE drama_id = ? AND free_episodes > 0').run(plan.drama.id)
-
-    for (const row of db.prepare('SELECT id, episode_no, position FROM history WHERE drama_id = ? AND episode_no > ?')
-      .all(plan.drama.id, plan.firstEpisode.no)) {
-      const position = Number(row.position ?? 0) + (offsets.get(Number(row.episode_no)) ?? 0)
-      db.prepare('UPDATE history SET episode_no = ?, position = ? WHERE id = ?')
-        .run(plan.firstEpisode.no, Math.min(plan.duration, Math.max(0, position)), row.id)
-    }
-
-    const episodeIds = plan.episodes.slice(1).map((episode) => episode.id)
-    if (episodeIds.length) {
-      const placeholders = episodeIds.map(() => '?').join(',')
-      for (const row of db.prepare(`SELECT id, episode_id, time_ms FROM danmus WHERE episode_id IN (${placeholders})`).all(...episodeIds)) {
-        const episode = plan.episodes.find((item) => item.id === Number(row.episode_id))
-        const time = Number(row.time_ms ?? 0) + Math.round((offsets.get(Number(episode.no)) ?? 0) * 1000)
-        db.prepare('UPDATE danmus SET episode_id = ?, time_ms = ? WHERE id = ?')
-          .run(plan.firstEpisode.id, Math.min(Math.round(plan.duration * 1000), time), row.id)
+    for (const plan of plans) {
+      const mergedDir = prepareMergedFiles(plan)
+      created.push(mergedDir)
+      db.exec('SAVEPOINT mh_movie')
+      try {
+        writeMovieRows(plan, offsetsOf(plan))
+        db.exec('RELEASE mh_movie')
+      } catch (error) {
+        db.exec('ROLLBACK TO mh_movie')
+        db.exec('RELEASE mh_movie')
+        rmSync(mergedDir, { recursive: true, force: true })
+        failures.push({ drama: plan.drama, error: error.message })
       }
     }
     db.exec('COMMIT')
   } catch (error) {
     db.exec('ROLLBACK')
-    rmSync(mergedDir, { recursive: true, force: true })
+    for (const dir of created) rmSync(dir, { recursive: true, force: true })
     throw error
   }
+  return failures
 }
 
 function backupDatabase() {
@@ -209,8 +246,8 @@ export function mergeMovieEpisodes({ apply = false, only = null } = {}) {
 
   let backup = null
   if (apply && ready.length) backup = backupDatabase()
-  if (apply) for (const plan of ready) applyMovie(plan)
-  return { ready, errors, backup, applied: apply }
+  const failures = apply ? applyMovies(ready) : []
+  return { ready, errors: [...errors, ...failures], backup, applied: apply }
 }
 
 function main() {
@@ -227,6 +264,8 @@ function main() {
   }
   if (result.backup) console.log(`数据库备份: ${result.backup}`)
   if (!result.applied) console.log('dry-run：未写库。确认后加 --apply。')
+  // 有跳过的片就让退出码非 0：迁移脚本静默成功，比失败更危险
+  if (result.errors.length) process.exitCode = 1
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main()

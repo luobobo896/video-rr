@@ -5,6 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# 不以 root 运行：install-hk.sh 会建这个系统用户并把 storage/ 与日志 chown 给它。
+# 手工部署时先执行：
+#   useradd --system --home-dir /opt/video-rr --shell /usr/sbin/nologin videorr
+#   chown -R videorr:videorr /opt/video-rr/storage
+#   touch /var/log/video-rr.log /var/log/video-rr.err.log && chown videorr: /var/log/video-rr*.log
+User=videorr
+Group=videorr
 WorkingDirectory=/opt/video-rr
 EnvironmentFile=/opt/video-rr/.env
 ExecStart=/usr/bin/node server/index.mjs
@@ -13,7 +20,14 @@ RestartSec=3
 LimitNOFILE=100000
 # 转码吃 CPU：限制一下，避免把宿主机其他服务饿死
 CPUWeight=80
-MemoryMax=3G
+# 内存上限的取舍：node 进程要接 2GB 上传流，ffmpeg 转码又是它的子进程（同 cgroup），
+# 原来单个 MemoryMax=3G 会在“上传大文件 + 同时转码”时把整组一起 OOM 杀掉，
+# 转码任务直接消失、episode 卡在 processing。现在抬到 6G 硬上限、4G 软上限：
+# 超过 MemoryHigh 先回收页缓存和可回收内存，只有真超 6G 才杀，转码因此能跑完。
+# 如果宿主机只有 4G 内存：把 ffmpeg 拆成独立的 video-rr-transcode.service（单独 MemoryMax），
+# 不要在这里把上限压回 3G——那会重新引入“转码被杀”。
+MemoryHigh=4G
+MemoryMax=6G
 StandardOutput=append:/var/log/video-rr.log
 StandardError=append:/var/log/video-rr.err.log
 

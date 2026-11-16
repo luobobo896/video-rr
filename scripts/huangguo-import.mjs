@@ -17,6 +17,8 @@ import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { db } from '../server/db.mjs'
+import { exitCodeFor, exitCodeHint, shouldPruneEpisodes } from './lib/import-guards.mjs'
+import { TAG_MATCH_SQL } from './lib/tag-match.mjs'
 import {
   HG_BASE,
   decryptHuangguoImage,
@@ -235,10 +237,8 @@ function matchTag(name) {
   if (!label) return 0
   const exact = one("SELECT id FROM tags WHERE name = ? AND scope = 'adult'", label)
   if (exact) return exact.id
-  const loose = one(
-    "SELECT id FROM tags WHERE scope = 'adult' AND (name LIKE ? OR ? LIKE '%' || name || '%') ORDER BY length(name) DESC LIMIT 1",
-    `%${label}%`, label,
-  )
+  // 字面子串匹配（见 lib/tag-match.mjs）：标签里的 % _ 不能当通配符
+  const loose = one(TAG_MATCH_SQL, 'adult', label, label)
   return loose ? loose.id : createTag(label)
 }
 
@@ -308,6 +308,8 @@ function updateScore(key, score) {
 }
 
 function upsertEpisodes(dramaId, meta) {
+  // 先看库里已有几集、哪几集，再写；写入集合不是超集时一律不清（避免误删）
+  const dbNosBefore = all('SELECT no FROM episodes WHERE drama_id = ?', dramaId).map((row) => Number(row.no))
   let written = 0
   for (const ep of meta.episodeNos) {
     const duration = Number(meta.episodeDurations?.[ep]) || 0
@@ -324,22 +326,49 @@ function upsertEpisodes(dramaId, meta) {
     )
     written++
   }
-  return written
+  // 源站删集后库里会留下播不了的幽灵集（用户看到「第 5 集一直转」）。
+  // 只在「本次导出的集号是库内超集」时清，集号集合为空时不动。
+  let pruned = 0
+  if (shouldPruneEpisodes({ exportedNos: meta.episodeNos, dbNos: dbNosBefore, claimedByTitle: false })) {
+    for (const no of dbNosBefore) {
+      if (meta.episodeNos.includes(no)) continue
+      run('DELETE FROM episodes WHERE drama_id = ? AND no = ?', dramaId, no)
+      pruned++
+    }
+  }
+  return { written, pruned }
 }
 
 /** 站内换 id 重发的同一部片：标题、集数相同且总时长差 <= 3s */
-function findTwin(meta) {
+function findTwins(meta) {
   const eps = meta.episodeNos.length
   const total = meta.episodeNos.reduce((sum, n) => sum + (Number(meta.episodeDurations?.[n]) || 0), 0)
-  if (!eps || !total) return null
+  if (!eps || !total) return []
   const rows = all(
-    `SELECT d.id, d.source_key,
+    `SELECT d.id, d.source_key, d.status,
        (SELECT COUNT(*) FROM episodes e WHERE e.drama_id = d.id) AS eps,
        (SELECT COALESCE(SUM(duration), 0) FROM episodes e WHERE e.drama_id = d.id) AS secs
      FROM dramas d WHERE d.title = ? AND d.source_key LIKE 'huangguo:%'`,
     meta.title,
   )
-  return rows.find((r) => r.eps === eps && Math.abs(Number(r.secs) - total) <= 3 && r.source_key !== meta.sourceKey) || null
+  return rows.filter((r) => r.eps === eps && Math.abs(Number(r.secs) - total) <= 3 && r.source_key !== meta.sourceKey)
+}
+
+/**
+ * 同片换 id：库里可能同时躺着好几条历史 id（源站重发一次就多一条）。
+ * docs/HUANGGUO-IMPORT.md:94 要求把同片历史条目置 status='hidden' 而不是硬删
+ * ——history/favorites/orders 里可能有引用。保留一条可见的（本次命中的那条）。
+ */
+function hideDuplicateRows(meta, keepId) {
+  let hidden = 0
+  for (const row of findTwins(meta)) {
+    if (Number(row.id) === Number(keepId)) continue
+    if (String(row.status || '') !== 'published') continue
+    run("UPDATE dramas SET status = 'hidden', updated_at = datetime('now') WHERE id = ?", row.id)
+    process.stdout.write(`  ⌄ 同片历史条目 #${row.id}（${row.source_key}）置为 hidden\n`)
+    hidden++
+  }
+  return hidden
 }
 
 async function importOne(videoId) {
@@ -366,16 +395,23 @@ async function importOne(videoId) {
     return { skipped: true, meta }
   }
   if (skipExisting) {
-    const twin = findTwin(meta)
-    if (twin) return { duplicate: twin.source_key, meta }
+    const [twin] = findTwins(meta)
+    if (twin) {
+      // 命中同片：整部跳过（不建第二条），但库里其它同片历史条目要收起来
+      const hidden = dry ? 0 : hideDuplicateRows(meta, twin.id)
+      if (String(twin.status || '') !== 'published') {
+        process.stdout.write(`  ! ${meta.title} 命中的同片 #${twin.id} 已是 hidden，频道里会看不到这部\n`)
+      }
+      return { duplicate: twin.source_key, hidden, meta }
+    }
   }
+  if (dry) return { dry: true, meta }
   const artwork = skipImages ? { cover: '', banner: '' } : await grabArtwork(meta)
-  if (dry) return { dry: true, meta, artwork }
 
   const { id, created } = upsertDrama(meta, artwork)
-  const episodes = upsertEpisodes(id, meta)
+  const { written: episodes, pruned } = upsertEpisodes(id, meta)
   const tags = linkTags(id, meta.tags)
-  return { id, created, episodes, tags, meta }
+  return { id, created, episodes, pruned, tags, meta }
 }
 
 async function runPool(items, worker) {
@@ -413,8 +449,10 @@ async function main() {
   let updated = 0
   let skipped = 0
   let duplicates = 0
+  let hiddenRows = 0
   let failed = 0
   let episodes = 0
+  let pruned = 0
   let tags = 0
   for (const r of results) {
     if (!r) continue
@@ -429,6 +467,7 @@ async function main() {
     }
     if (r.duplicate) {
       duplicates++
+      hiddenRows += r.hidden || 0
       process.stdout.write(`  ≡ ${r.meta.videoId} ${r.meta.title} 与 ${r.duplicate} 同片，跳过\n`)
       continue
     }
@@ -439,13 +478,19 @@ async function main() {
     if (r.created) created++
     else updated++
     episodes += r.episodes
+    pruned += r.pruned || 0
     tags += r.tags
-    process.stdout.write(`  ✓ #${r.id} ${r.meta.title} / ${r.episodes} 集 / ${r.tags} 标签\n`)
+    process.stdout.write(`  ✓ #${r.id} ${r.meta.title} / ${r.episodes} 集 / ${r.tags} 标签${r.pruned ? ` / 清残留集 ${r.pruned}` : ''}\n`)
   }
   const seconds = ((Date.now() - started) / 1000).toFixed(1)
   process.stdout.write(
-    `\n完成：新增 ${created} · 更新 ${updated} · 跳过 ${skipped} · 同片重复 ${duplicates} · 失败 ${failed} · 剧集 ${episodes} 条 · 标签关联 ${tags} · ${seconds}s\n`,
+    `\n完成：新增 ${created} · 更新 ${updated} · 跳过 ${skipped} · 同片重复 ${duplicates}（隐藏历史 ${hiddenRows}） · 失败 ${failed} · 剧集 ${episodes} 条 · 清残留集 ${pruned} · 标签关联 ${tags} · ${seconds}s\n`,
   )
+  // 有失败项要让计划任务看见：部分失败 1，全部失败 2
+  const ok = created + updated + skipped + duplicates
+  const code = exitCodeFor({ ok, failed })
+  if (code) process.stdout.write(`本轮结果：${exitCodeHint(code).replace(/^（|）$/g, '')}\n`)
+  process.exitCode = code
 }
 
 await main()

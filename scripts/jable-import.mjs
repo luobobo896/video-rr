@@ -25,6 +25,8 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { db } from '../server/db.mjs'
 import { parseVideoPage, parseVideoLinks, durationOfPlaylist, expiryOf, artworkUrls, scoreOfViews, slugOf } from '../server/jable.mjs'
+import { exitCodeFor, exitCodeHint, normalizeCodeKey, parseMaxLeftMinutes, shouldAdoptTicket } from './lib/import-guards.mjs'
+import { EXIT_LOCK_BUSY, acquireLock, lockBusyMessage, releaseOnExit } from './lib/lock.mjs'
 
 const exec = promisify(execFile)
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -74,6 +76,30 @@ const skipImages = flags.has('--no-images')
 const skipPreview = flags.has('--no-preview')
 const refresh = flags.has('--refresh')
 const scoreOnly = flags.has('--score-only')
+
+// --max-left：必须是正整数分钟。旧实现 `(Number(v) || 30) * 60` 把 0 悄悄当成 30 分钟、
+// 负数当成负秒，整轮静默空跑还退 0 —— 计划任务里根本看不出没干活。
+const MAX_LEFT = (() => {
+  const raw = valueOf('--max-left', '')
+  if (!raw) return null
+  const parsed = parseMaxLeftMinutes(raw)
+  if (!parsed.ok) {
+    console.error(parsed.message)
+    process.exit(2)
+  }
+  return parsed
+})()
+
+// 跨平台进程锁：--every 常驻 + 计划任务重叠时会双开 Edge CDP 抢同一个 MH_CHROME_PROFILE，
+// 表现是两个进程都抽不到页面。MH_LOCK 可换路径，MH_LOCK=off 显式关掉（不建议）。
+const LOCK_PATH = process.env.MH_LOCK && process.env.MH_LOCK !== 'off'
+  ? process.env.MH_LOCK
+  : join(ROOT, 'storage', '.jable-import.lock')
+const LOCK_DISABLED = process.env.MH_LOCK === 'off'
+
+/** 直链 CDN 域名：两批都要覆盖。refreshTargets 曾经只写 mushroomtrack，另一半条目永远刷不到。 */
+const CDN_HOSTS = ['mushroomtrack.com', 'alonestreaming.com']
+const CDN_SQL = CDN_HOSTS.map((host) => `e.remote_url LIKE '%${host}%'`).join(' OR ')
 
 // ---------- 浏览器 ----------
 const CANDIDATES = [
@@ -265,10 +291,13 @@ function linkTags(dramaId, names) {
 function upsertDrama(meta, artwork) {
   // 兜底：解析失败时宁可抛错，也不要往库里写空标题条目
   if (!meta.titleBody && !meta.subtitle) throw new Error('标题与副标题都为空，拒绝入库')
-  // 番号在 sub_title（`CODE · 女優`）里，title 是去掉番号的正文，查重不能用 title
-  const existing = meta.code
-    ? one(`SELECT * FROM dramas WHERE is_adult = 1 AND (sub_title LIKE ? OR title LIKE ?) ORDER BY id LIMIT 1`,
-      `${meta.code}%`, `${meta.code}%`)
+  // 番号在 sub_title（`CODE · 女優`）里，title 是去掉番号的正文，查重不能用 title。
+  // 两个键都先归一化 `_`→`-`：源站同一部片会写成 MIKR_134 和 MIKR-134 两种，
+  // 不归一会把同一部当新片重插（旧实现就是这样长出 194 组重复的）。
+  const codeKey = normalizeCodeKey(meta.code)
+  const existing = codeKey
+    ? one(`SELECT * FROM dramas WHERE is_adult = 1 AND (upper(replace(sub_title, '_', '-')) LIKE ? OR upper(replace(title, '_', '-')) LIKE ?) ORDER BY id LIMIT 1`,
+      `${codeKey}%`, `${codeKey}%`)
     : null
   const description = [
     meta.models.length ? `女優：${meta.models.join('、')}` : '',
@@ -332,10 +361,13 @@ const GONE_FILE = join(ROOT, 'storage', 'jable-gone.json')
 const goneSet = (() => {
   try { return new Set(Object.keys(JSON.parse(readFileSync(GONE_FILE, 'utf8')))) } catch { return new Set() }
 })()
-function markGone(url) {
+function markGone(url, { persist = !dry } = {}) {
   const code = /\/videos\/([a-z0-9]+-\d+)\/?/i.exec(String(url))?.[1]?.toUpperCase()
   if (!code || goneSet.has(code)) return
+  // --dry 只影响这一次进程内判断，别落盘（旧实现 dry 也会写 storage/jable-gone.json，
+  // 于是一次演练就把这些番号永久拉黑）
   goneSet.add(code)
+  if (!persist) return
   try {
     mkdirSync(dirname(GONE_FILE), { recursive: true })
     writeFileSync(GONE_FILE, `${JSON.stringify(Object.fromEntries([...goneSet].map((c) => [c, new Date().toISOString()])), null, 1)}\n`)
@@ -404,13 +436,13 @@ async function importOne(browser, url, options = {}) {
 function shareTicket(code, hlsUrl) {
   const exp = expiryOf(hlsUrl)
   if (!exp) return 0
-  const like = `${String(code).toUpperCase().replace(/_/g, '-')}%`
+  const like = `${normalizeCodeKey(code)}%`
   const rows = all(`SELECT e.id, e.remote_url AS remoteUrl FROM episodes e JOIN dramas d ON d.id = e.drama_id
     WHERE upper(replace(d.sub_title, '_', '-')) LIKE ? AND e.remote_url LIKE '%/hls/%'`, like)
   const update = db.prepare('UPDATE episodes SET remote_url = ? WHERE id = ?')
   let shared = 0
   for (const row of rows) {
-    if (expiryOf(row.remoteUrl) >= exp) continue
+    if (!shouldAdoptTicket({ currentExpiry: expiryOf(row.remoteUrl), candidateExpiry: exp })) continue
     update.run(hlsUrl, row.id)
     shared++
   }
@@ -420,9 +452,11 @@ function shareTicket(code, hlsUrl) {
 function refreshTargets() {
   const targets = []
   let goneSkipped = 0
-  // 番号存在 sub_title（`CODE · 女優`），title 已被去掉番号，别从 title 里找
+  // 番号存在 sub_title（`CODE · 女優`），title 已被去掉番号，别从 title 里找。
+  // 直链域名两批都要覆盖（CDN_SQL）：漏一批意味着一半条目永远不刷新，链接过期后
+  // 用户侧表现是「点开就转圈」，而 refresh 每次都说「没有快过期的」。
   const pages = all(`SELECT DISTINCT d.id, d.sub_title, d.title, e.remote_url, e.id AS eid FROM episodes e JOIN dramas d ON d.id = e.drama_id
-    WHERE e.remote_referer = ? OR e.remote_url LIKE '%mushroomtrack.com%'`, REFERER)
+    WHERE e.remote_referer = ? OR ${CDN_SQL}`, REFERER)
   // 两轮并行跑时用 MH_SHARD=0/2、1/2 分片，避免两个进程抢同一批片子
   const shard = /^(\d+)\/(\d+)$/.exec(String(process.env.MH_SHARD ?? ''))
   // 同一番号在库里可能有多条剧：一个番号只刷一次，票由 shareTicket 抄给其它条目
@@ -457,7 +491,7 @@ function refreshTargets() {
 function scoreTargets() {
   const rows = all(`SELECT d.id, d.sub_title, d.title FROM dramas d
      WHERE d.is_adult = 1 AND d.category = 'MOVIE' AND (d.score IS NULL OR d.score = '')
-       AND EXISTS (SELECT 1 FROM episodes e WHERE e.drama_id = d.id AND (e.remote_referer = ? OR e.remote_url LIKE '%alonestreaming.com%' OR e.remote_url LIKE '%mushroomtrack.com%'))
+       AND EXISTS (SELECT 1 FROM episodes e WHERE e.drama_id = d.id AND (e.remote_referer = ? OR ${CDN_SQL}))
      ORDER BY d.id`, REFERER)
   const list = []
   for (const row of rows) {
@@ -504,6 +538,7 @@ async function runScoreBatch(browser, list) {
     }
   }
   console.log(`\n完成：成功 ${ok}，跳过 ${skipped}，失败 ${failed}`)
+  return { ok, failed, skipped }
 }
 
 async function runBatch(browser, list, options = {}) {
@@ -544,6 +579,7 @@ async function runBatch(browser, list, options = {}) {
     }
   }
   console.log(`\n完成：成功 ${ok}，失败 ${failed}`)
+  return { ok, failed }
 }
 
 /** 首页先过一遍挑战，把 cf_clearance 写进 profile 的 cookie；过不了就照常继续，别让整批卡在这 */
@@ -558,8 +594,22 @@ async function warmUp(browser) {
 
 async function main() {
   const every = Number(valueOf('--every', '0')) || 0
-  const browser = await openBrowser()
+  // 抢锁必须在起浏览器之前：两个进程同时持有同一份 MH_CHROME_PROFILE 会互相把页面顶掉
+  let lock = { ok: true, release: () => true }
+  if (!LOCK_DISABLED) {
+    lock = acquireLock(LOCK_PATH, { label: `jable-import ${argv.join(' ')}`.slice(0, 200) })
+    if (!lock.ok) {
+      console.error(lockBusyMessage(lock.path, lock.holder))
+      process.exitCode = EXIT_LOCK_BUSY
+      return
+    }
+    if (lock.stale) console.log(`接管过期锁（持有者已不在）：${lock.path}`)
+  }
+  const releaseLock = releaseOnExit(lock)
+  const totals = { ok: 0, failed: 0 }
+  let browser
   try {
+    browser = await openBrowser()
     // --warm：只把首页过一遍，把 cf_clearance 养进 profile，给按需续期留着用。
     // 服务端启动时会先跑一次，之后每 20 分钟一次——冷启动要重吃一次挑战（40 秒级），
     // 而用户点开一集只愿意等几秒。
@@ -574,7 +624,11 @@ async function main() {
       const list = offset > 0 ? all_.slice(offset) : all_
       const limited = limit > 0 ? list.slice(0, limit) : list
       console.log(`待补评分 ${limited.length} 部（库存 ${list.length}${dry ? '，dry-run' : ''}）`)
-      if (limited.length) await runScoreBatch(browser, limited)
+      if (limited.length) {
+        const counted = await runScoreBatch(browser, limited)
+        totals.ok += counted.ok
+        totals.failed += counted.failed
+      }
       return
     }
     let round = 0
@@ -625,11 +679,11 @@ async function main() {
         const all_ = refreshTargets()
         const now = Math.floor(Date.now() / 1000)
         // --max-left N：只刷剩余有效期不足 N 分钟的，库里几百条时别每次全刷
-        const cut = (Number(valueOf('--max-left', '0')) || 30) * 60
+        const cut = (MAX_LEFT?.minutes ?? 30) * 60
         const expiring = all_.filter((t) => t.expires && t.expires - now < cut)
         console.log(`刷新模式：库中 ${all_.length} 条外部源，${expiring.length} 条 ${Math.round(cut / 60)} 分钟内到期`)
         // 长跑时只刷快过期的，省得每轮都把全库重解析一遍
-        const useFiltered = Boolean(every || valueOf('--max-left', ''))
+        const useFiltered = Boolean(every || MAX_LEFT)
         if (useFiltered && !expiring.length) console.log('没有快过期的链接，本轮跳过')
         // 预热一次首页，把 Cloudflare 的 clearance cookie 拿到手，后面每页就不用各自过挑战
         if (expiring.length) {
@@ -644,17 +698,26 @@ async function main() {
         console.log('没有要导入的地址。给一个影片页 URL，或用 --page <列表页> 批量抓。')
         if (!every) return
       }
-      await runBatch(browser, unique, refresh ? { retries: 1, stopAfterChallenges: 8, fast: true } : { retries: 0 })
+      const counted = await runBatch(browser, unique, refresh ? { retries: 1, stopAfterChallenges: 8, fast: true } : { retries: 0 })
+      totals.ok += counted.ok
+      totals.failed += counted.failed
       if (!every) return
       console.log(`\n${every} 分钟后开始下一轮（Ctrl+C 退出）`)
       await new Promise((r) => setTimeout(r, every * 60000))
     } while (true)
   } finally {
-    browser.close()
+    try { browser?.close() } catch { /* 浏览器已退出 */ }
+    releaseLock()
+    // 退出码：有失败=1（部分失败），全失败=2（整轮失败）。旧实现只计数不退码，
+    // 计划任务里看到的一律是成功，链接过期几天都没人知道。
+    const code = exitCodeFor(totals)
+    if (code) console.log(`本轮结果：成功 ${totals.ok} · 失败 ${totals.failed}${exitCodeHint(code)}`)
+    process.exitCode = code
   }
 }
 
 main().catch((error) => {
   console.error('导入失败：', error.message)
-  process.exit(1)
+  // 整轮失败用 2，和「部分失败 1」「抢锁失败 99」区分开
+  process.exitCode = 2
 })

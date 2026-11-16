@@ -98,14 +98,33 @@ function alignGenreTags() {
   }
 }
 
+/**
+ * 「短剧即成人」不变量：category='PLAYLET' 的剧目一律 is_adult=1。
+ * normalizeDramas 会按 catalog 改分类，改完必须复跑这条（server/db.mjs 里的
+ * ensureAdultDramaInvariant 只在启动时跑一次，脚本改坏的库要等下次重启才修，
+ * 期间外层频道会露出成人内容）。
+ */
+function enforceAdultInvariant() {
+  const stale = all("SELECT COUNT(*) AS n FROM dramas WHERE category = 'PLAYLET' AND is_adult = 0")[0].n
+  if (!stale) return 0
+  if (DRY) {
+    console.log(`  [dry] 需把 ${stale} 部 PLAYLET 剧目的 is_adult 置 1`)
+    return stale
+  }
+  run("UPDATE dramas SET is_adult = 1, updated_at = datetime('now') WHERE category = 'PLAYLET' AND is_adult = 0")
+  console.log(`  不变量：PLAYLET 置 is_adult=1 共 ${stale} 部`)
+  return stale
+}
+
 function main() {
   console.log(DRY ? '== 预览（--dry，不写库）==' : '== 执行 ==')
   ensureRankLists()
   ensureTags()
   normalizeDramas()
+  const adultFixed = enforceAdultInvariant()
   alignGenreTags()
   console.log(
-    `榜单新增 ${REPORT.ranksAdded} 个 / 标签新增 ${REPORT.tagsAdded} 个 / 剧集分类变更 ${REPORT.dramasUpdated} 部 / 类型绑定新增 ${REPORT.bindingsAdded} 条`,
+    `榜单新增 ${REPORT.ranksAdded} 个 / 标签新增 ${REPORT.tagsAdded} 个 / 剧集分类变更 ${REPORT.dramasUpdated} 部 / 短剧成人修正 ${adultFixed} 部 / 类型绑定新增 ${REPORT.bindingsAdded} 条`,
   )
   const ranks = all('SELECT type, name FROM rank_lists ORDER BY sort')
   console.log(`榜单总数 ${ranks.length}：${ranks.map((row) => row.name).join('、')}`)

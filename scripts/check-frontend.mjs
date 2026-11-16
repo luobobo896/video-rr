@@ -22,6 +22,21 @@ const FILES = [
   'admin/main.js',
   'admin/app.js',
 ]
+// public/src 与 admin/src 下的 ESM 模块由 Vite 打包，node --check 覆盖不到；
+// 这里把它们并入静态检查，让 no-undef 启发式也能抓到漏声明的辅助函数。
+const SRC_FILES = []
+function collectSrcFiles(dir) {
+  if (!existsSync(join(ROOT, dir))) return
+  for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist') continue
+    const relative = join(dir, entry.name).replace(/\\/g, '/')
+    if (entry.isDirectory()) collectSrcFiles(relative)
+    else if (entry.name.endsWith('.js')) SRC_FILES.push(relative)
+  }
+}
+collectSrcFiles('public/src')
+collectSrcFiles('admin/src')
+FILES.push(...SRC_FILES)
 const VERSION_FILES = [...FILES, 'public/index.html', 'admin/index.html']
 const STYLE_FILES = ['public/styles.css', 'public/poster-wall.css', 'admin/styles.css']
 const VUE_FILES = []
@@ -179,6 +194,14 @@ function collectDeclared(source, code) {
   }
   for (const match of source.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) {
     declared.add(match[1])
+  }
+  // 对象字面量与 class 的方法简写（constructor() {}、subscribe(cb) {}）同样是定义。
+  // 在剥掉字符串/注释后的代码上匹配 name(...) {，`if/for/while/switch/catch/function` 由 KEYWORDS 排除。
+  for (const match of code.matchAll(/([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*\{/g)) {
+    if (!KEYWORDS.has(match[1])) declared.add(match[1])
+    for (const name of identifiersIn(match[2])) {
+      if (!KEYWORDS.has(name)) declared.add(name)
+    }
   }
   return declared
 }

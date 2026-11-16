@@ -2,14 +2,22 @@
 /**
  * 真实内容导入流水线：清空演示数据 → 下载 CC 授权影片 → 按集切片 → 双码率 HLS → 封面/横幅 → 标签/分区/榜单。
  *
- * 用法：
- *   node scripts/import-catalog.mjs --reset            只清空演示数据与媒体文件
- *   node scripts/import-catalog.mjs --build            清空并重建全部内容（默认）
- *   node scripts/import-catalog.mjs --build --only bbb,sintel
- *   node scripts/import-catalog.mjs --keep --only sintel --force   只重切指定剧（不动其它内容）
- *   node scripts/import-catalog.mjs --force            已完整时也重新下载/重切
- *   node scripts/import-catalog.mjs --check            只做一致性自检
- *   node scripts/import-catalog.mjs --list             打印清单
+ * 用法（**必须显式给命令**，不带参数只打印帮助）：
+ *   node scripts/import-catalog.mjs --list                    打印清单（不连库）
+ *   node scripts/import-catalog.mjs --check                   只做一致性自检
+ *   node scripts/import-catalog.mjs --build                    按 data/catalog.json 增量构建（不清库）
+ *   node scripts/import-catalog.mjs --build --yes              先清空再重建（破坏性）
+ *   node scripts/import-catalog.mjs --reset --yes              只清空演示数据与媒体文件（破坏性）
+ *   node scripts/import-catalog.mjs --build --keep --only sintel --force   只重切指定剧
+ *   node scripts/import-catalog.mjs --build --dry              只打印将要做的事，不写盘
+ *
+ * 安全约定：
+ *   - 不带参数 = 打印帮助并 exit 0（**不再默认清库**）；
+ *   - 清空动作（resetDemo）**只**在显式 `--reset` 且给了 `--yes` 或 `MH_CONFIRM_RESET=1` 时执行；
+ *     单独 `--build` 永远不清库（想“先清再建”就 `--reset --build --yes`）；
+ *   - MH_DB 不是 <仓库根>/storage/app.db 时，需要 `--yes` **并且** `MH_CONFIRM_RESET=1` 双重确认，
+ *     运行前会把目标库绝对路径打印出来；
+ *   - `--dry` 不写库、不建目录、不删文件、不下载。
  *
  * 片源均为公开授权（见 data/catalog.json 的 license / credit 字段），下载后落 storage/sources，转码落 storage/hls/<episodeId>。
  */
@@ -18,17 +26,51 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, re
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { join } from 'node:path'
-import { contentTypeOfCategory, db, ROOT } from '../server/db.mjs'
-import { generatePreview } from '../server/previews.mjs'
+import { confirmHint } from './lib/confirm.mjs'
+import { HELP_TEXT, onlyList, planCli } from './lib/import-catalog-cli.mjs'
+import { describeDbTarget, repoRoot, resolveDbPath } from './lib/repo.mjs'
 
 const FFMPEG = process.env.MH_FFMPEG ?? 'ffmpeg'
 const FFPROBE = process.env.MH_FFPROBE ?? 'ffprobe'
+/** 路径一律以仓库根为基准，避免在别的目录下跑出一个空库。 */
+const ROOT = repoRoot()
 const DATA = join(ROOT, 'data', 'catalog.json')
 const SRC_DIR = join(ROOT, 'storage', 'sources')
 const HLS_DIR = join(ROOT, 'storage', 'hls')
 const UPLOAD_DIR = join(ROOT, 'storage', 'uploads')
 const IMG_DIR = join(ROOT, 'storage', 'images')
-for (const dir of [SRC_DIR, HLS_DIR, UPLOAD_DIR, IMG_DIR]) mkdirSync(dir, { recursive: true })
+
+const DB_INFO = resolveDbPath(process.env)
+const argv = process.argv.slice(2)
+const PLAN = planCli(argv, { env: process.env, isDefaultDb: DB_INFO.isDefault })
+const has = (flag) => argv.includes(flag)
+const valueOf = (flag, fallback = '') => {
+  const index = argv.indexOf(flag)
+  return index >= 0 ? String(argv[index + 1] ?? fallback) : fallback
+}
+const ONLY = onlyList(argv)
+const FORCE = PLAN.force
+const KEEP = PLAN.keep
+const DRY = PLAN.dry
+
+/** 破坏性动作会删掉的东西：拒绝时原样打印，确认时也打印。 */
+const DESTRUCTIVE_TARGETS = [DB_INFO.path, HLS_DIR, UPLOAD_DIR, IMG_DIR]
+
+/**
+ * db / contentTypeOfCategory / generatePreview 延迟加载：
+ * `--help`、`--list`、`--dry` 都不该建库或建目录（server/db.mjs 一 import 就开会话）。
+ */
+let db
+let contentTypeOfCategory
+let generatePreview
+async function loadRuntime() {
+  if (db) return
+  const [dbModule, previews] = await Promise.all([import('../server/db.mjs'), import('../server/previews.mjs')])
+  db = dbModule.db
+  contentTypeOfCategory = dbModule.contentTypeOfCategory
+  generatePreview = previews.generatePreview
+  for (const dir of [SRC_DIR, HLS_DIR, UPLOAD_DIR, IMG_DIR]) mkdirSync(dir, { recursive: true })
+}
 
 /** 清晰度阶梯：与 server/media.mjs 的 RENDITIONS 保持一致。 */
 const LADDER = [
@@ -36,16 +78,6 @@ const LADDER = [
   { name: '480p', height: 480, vbitrate: '850k', maxrate: '950k', bufsize: '1900k', audio: '96k', bandwidth: 1_000_000 },
   { name: '360p', height: 360, vbitrate: '520k', maxrate: '600k', bufsize: '1200k', audio: '64k', bandwidth: 640_000 },
 ]
-
-const argv = process.argv.slice(2)
-const has = (flag) => argv.includes(flag)
-const valueOf = (flag, fallback = '') => {
-  const index = argv.indexOf(flag)
-  return index >= 0 ? String(argv[index + 1] ?? fallback) : fallback
-}
-const ONLY = valueOf('--only').split(',').map((item) => item.trim()).filter(Boolean)
-const FORCE = has('--force')
-const KEEP = has('--keep')
 
 function stamp() {
   return new Date().toISOString().slice(11, 19)
@@ -251,6 +283,11 @@ function tableNames() {
 }
 
 function resetDemo() {
+  if (DRY) {
+    log(`[dry] 跳过清空：本来会 DELETE ${DEMO_TABLES.length} 张表并清空 ${HLS_DIR}、${UPLOAD_DIR}、${IMG_DIR}`)
+    return
+  }
+  log(`清空目标库：${DB_INFO.path}`)
   const existing = tableNames()
   db.exec('BEGIN IMMEDIATE')
   try {
@@ -264,8 +301,12 @@ function resetDemo() {
   for (const dir of [HLS_DIR, UPLOAD_DIR]) {
     if (!existsSync(dir)) continue
     for (const entry of readdirSync(dir)) rmSync(join(dir, entry), { recursive: true, force: true })
+    log(`  已清空 ${dir}`)
   }
-  for (const entry of readdirSync(IMG_DIR)) rmSync(join(IMG_DIR, entry), { force: true })
+  if (existsSync(IMG_DIR)) {
+    for (const entry of readdirSync(IMG_DIR)) rmSync(join(IMG_DIR, entry), { force: true })
+    log(`  已清空 ${IMG_DIR}`)
+  }
   log('已清空演示数据与媒体文件（管理员、套餐、支付/邮件设置保留）')
 }
 
@@ -463,26 +504,59 @@ function check() {
 }
 
 async function main() {
-  if (has('--list')) {
+  if (PLAN.action === 'help') {
+    console.log(HELP_TEXT)
+    return
+  }
+  if (PLAN.action === 'unknown') {
+    console.error(`未知参数：${PLAN.unknown.join(' ')}\n`)
+    console.log(HELP_TEXT)
+    process.exitCode = 2
+    return
+  }
+  log(describeDbTarget(DB_INFO))
+
+  if (PLAN.action === 'list') {
     const catalog = JSON.parse(readFileSync(DATA, 'utf8'))
     for (const drama of catalog.dramas) {
       log(`${drama.slug.padEnd(12)} ${drama.title} · ${drama.category} · ${drama.episodeCount} 集 · ${drama.source.license}`)
     }
     return
   }
-  if (has('--check')) return check()
-  if (KEEP) {
-    if (ONLY.length === 0) throw new Error('--keep 需要配合 --only <slug,...> 使用')
-    await build()
-    check()
+  if (PLAN.action === 'check') {
+    await loadRuntime()
+    return check()
+  }
+
+  const willReset = Boolean(PLAN.reset) && Boolean(PLAN.confirm.ok)
+  if (PLAN.action === 'reset' && !PLAN.confirm.ok) {
+    console.error(confirmHint({ targets: DESTRUCTIVE_TARGETS, requireBoth: PLAN.requireBoth }))
+    process.exitCode = 1
     return
   }
-  if (has('--reset') || has('--build') || argv.length === 0) {
-    if (has('--reset') && !has('--build')) return resetDemo()
-    resetDemo()
-    await build()
-    check()
+  if (PLAN.keep && ONLY.length === 0) throw new Error('--keep 需要配合 --only <slug,...> 使用')
+
+  if (DRY) {
+    log('[dry] 只打印计划：不写库、不建目录、不删文件、不下载')
+    log('[dry] 将执行：')
+    for (const step of PLAN.steps) log(`  - ${step.replace('清空演示数据', '清空演示数据（已确认时会真的执行）')}`)
+    if (PLAN.reset && !PLAN.confirm.ok) log('  ! 未给 --yes / MH_CONFIRM_RESET=1，真实运行时这一步会被跳过')
+    if (PLAN.build) {
+      const catalog = JSON.parse(readFileSync(DATA, 'utf8'))
+      const picked = ONLY.length ? catalog.dramas.filter((drama) => ONLY.includes(drama.slug)) : catalog.dramas
+      log(`[dry] 目录：${catalog.dramas.length} 部，本次处理 ${picked.length} 部（${picked.map((drama) => drama.slug).join(', ') || '无'}）`)
+    }
+    return
   }
+
+  await loadRuntime()
+  if (PLAN.reset && !PLAN.confirm.ok) {
+    log('未提供 --yes / MH_CONFIRM_RESET=1：跳过清空，只做增量构建（要清空请显式确认）')
+  }
+  if (willReset) resetDemo()
+  if (!PLAN.build) return
+  await build()
+  check()
 }
 
 main().catch((error) => {
