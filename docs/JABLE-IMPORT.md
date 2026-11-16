@@ -231,6 +231,8 @@ ON CONFLICT(drama_id) DO UPDATE SET trial_seconds = 60;
 | 图片 404 | 用了 `cover.jpg` 等不存在的命名 | 只用 `preview.jpg` 与 `/thumb.ts` |
 | 统计直链条数偏少一半 | 只过滤 `mushroomtrack.com` | 上游 CDN 域名会换（现有 `*.mushroomtrack.com` 与 `*.alonestreaming.com` 两批），按 `remote_url <> ''` 统计，别按域名 |
 | 简介变回日文原文 | `upsertDrama` 用原始描述盖掉了「簡介：」 | 已修（`keepBlurb`）；旧数据跑 `node scripts/jable-blurb.mjs` 重生成 |
+| 成人片出现空白卡片 | 素人片/改版页标题里没有番号，`slug` 却回退成 `jable-<videoId>` 骗过了校验，`sub_title` 为空就入库 | 已修：`importOne` 判 `meta.code`，没番号先用 URL slug 兜底（`/videos/([a-z0-9]+-\d+)/`），兜底也拿不到就判失败；`upsertDrama` 再兜一层拒绝空标题。生产出过 370 条空壳，已连剧集/标签/策略一起清掉 |
+| refresh 里大量「标题里没有番号」 | 素人片标题是纯日文 | 同上一行，URL 兜底后这类片也能刷新，否则链接一过期就再也认不回来 |
 
 ## 发布到生产
 

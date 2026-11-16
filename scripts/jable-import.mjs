@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { db } from '../server/db.mjs'
-import { parseVideoPage, parseVideoLinks, durationOfPlaylist, expiryOf, artworkUrls, scoreOfViews } from '../server/jable.mjs'
+import { parseVideoPage, parseVideoLinks, durationOfPlaylist, expiryOf, artworkUrls, scoreOfViews, slugOf } from '../server/jable.mjs'
 
 const exec = promisify(execFile)
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -314,7 +314,17 @@ async function importOne(browser, url) {
   if (!/hlsUrl\s*=\s*'/.test(html)) return { ok: false, url, reason: '页面没拿到 hlsUrl（挑战没过或页面改版）' }
   const meta = parseVideoPage(html, url)
   if (!meta.hlsUrl) return { ok: false, url, reason: '没有 hlsUrl' }
-  // 番号解析不出来的页面（改版、区域限制页）只会写进空标题条目，直接判失败
+  // 素人片和改版页的标题里没有番号，用详情页 URL 的 slug 兜底：
+  // 不然这类片一旦链接过期，refresh 再也认不回来
+  if (!meta.code) {
+    const fromUrl = /\/videos\/([a-z0-9]+-\d+)\/?$/i.exec(String(url))
+    if (fromUrl) {
+      meta.code = fromUrl[1].toUpperCase()
+      meta.slug = slugOf(meta.code)
+      meta.titleBody = meta.titleBody || meta.title || meta.code
+      meta.subtitle = meta.subtitle || meta.code
+    }
+  }
   if (!meta.code) return { ok: false, url, reason: '标题里没有番号' }
   if (!meta.slug) return { ok: false, url, reason: '拿不到番号，无法生成 slug' }
   const expiry = expiryOf(meta.hlsUrl)
