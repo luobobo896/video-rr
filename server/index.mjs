@@ -18,6 +18,7 @@ import { processCommissionOutbox, processCommissionReversalOutbox } from './comm
 import { PREVIEW_DIR } from './previews.mjs'
 import { verifyLink } from './entitlements.mjs'
 import { handleRemoteRequest } from './stream-proxy.mjs'
+import { ensureFresh } from './jable-refresh.mjs'
 import { closeExpiredOrders, reconcile } from './commerce.mjs'
 import { refreshAutoRanks } from './rank.mjs'
 import { inspect, sweep } from './ratelimit.mjs'
@@ -337,7 +338,8 @@ const server = createServer(async (req, res) => {
         return
       }
       const episodeId = Number(match[1])
-      const episode = db
+      const rest = match[2]
+      let episode = db
         .prepare('SELECT id, drama_id, remote_url, remote_referer, remote_ua, remote_cookie FROM episodes WHERE id = ?')
         .get(episodeId)
       if (!episode) {
@@ -345,7 +347,20 @@ const server = createServer(async (req, res) => {
         res.end('404 该集不存在')
         return
       }
-      return handleRemoteRequest(req, res, { episodeId, episode, rest: match[2] })
+      // 清单请求才判续期：直链签名有保鲜期，快过期了就在这里换一张新的票
+      if (!rest || rest === 'index.m3u8') {
+        try {
+          const result = await ensureFresh(episodeId)
+          if (result.refreshed) {
+            episode = db
+              .prepare('SELECT id, drama_id, remote_url, remote_referer, remote_ua, remote_cookie FROM episodes WHERE id = ?')
+              .get(episodeId)
+          }
+        } catch (error) {
+          console.error('[refresh] 续期失败', episodeId, error.message)
+        }
+      }
+      return handleRemoteRequest(req, res, { episodeId, episode, rest })
     }
 
     if (pathname === '/robots.txt') {
