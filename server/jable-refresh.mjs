@@ -22,6 +22,8 @@ const FAIL_COOLDOWN_MS = Number(process.env.MH_REFRESH_COOLDOWN_MS || 5 * 60 * 1
 // 按需续期用独立的锁和 profile：定时批次动辄跑十几分钟，共用一把锁会让用户永远等不到。
 // 浏览器实例用同一个 profile 会互相抢，所以两边各留一份。
 const REFRESH_LOCK = process.env.MH_REFRESH_LOCK || '/tmp/jable-refresh-ondemand.lock'
+// flock -E：抢不到锁用这个退出码，和子进程自己的失败码区分开
+const BUSY_EXIT = '99'
 const REFRESH_PROFILE = process.env.MH_REFRESH_PROFILE || join(dirname(fileURLToPath(import.meta.url)), '..', 'storage', '.jable-chrome-od')
 // 同时只开两个浏览器：CF 认的是出口 IP 的总频率，不是单页频率
 const MAX_CONCURRENT = Math.max(1, Number(process.env.MH_REFRESH_CONCURRENCY || 2))
@@ -89,7 +91,9 @@ function runOnce(pageUrl, timeoutMs) {
     const script = viaXvfb
       ? ['xvfb-run', '-a', process.execPath, SCRIPT, pageUrl, '--no-images', '--no-preview']
       : [process.execPath, SCRIPT, pageUrl, '--no-images', '--no-preview']
-    const child = spawn('flock', ['-n', REFRESH_LOCK, ...script], {
+    // -E 99：抢不到锁时用 99 退出，免得和子进程自己的 exit 1（抓页失败）混在一起。
+    // 不加 -E 的话 flock 会把子进程的退出码原样透出，失败会被误判成「锁被占」。
+    const child = spawn('flock', ['-n', '-E', BUSY_EXIT, REFRESH_LOCK, ...script], {
       env: { ...process.env, MH_CHROME_PROFILE: REFRESH_PROFILE },
       stdio: 'ignore',
     })
@@ -108,7 +112,7 @@ function runOnce(pageUrl, timeoutMs) {
       resolve(code ?? -1)
     }
     child.on('error', () => done(-1))
-    // 0 成功；1 是 flock 没抢到锁（另一个按需续期在跑）；其它按失败算
+    // 0 成功；99 是 flock 没抢到锁（另一个按需续期在跑）；其它都按失败算（含抓页失败 exit 1）
     child.on('exit', (code) => done(code))
   })
 }
@@ -171,7 +175,7 @@ async function renew(row, episodeId, timeoutMs) {
     }
   }
   const code = await schedule(row, timeoutMs)
-  if (code === 1) {
+  if (String(code) === BUSY_EXIT) {
     // 另一个按需续期正占着锁：稍微等一下它，别让用户白等一轮
     const renewed = await waitForRenewal(episodeId, before, 3000)
     if (renewed) return { refreshed: true, ok: true, leftMs: leftMsOf(renewed) }
@@ -249,7 +253,7 @@ export function warmProfile() {
     const viaXvfb = Boolean(process.env.MH_XVFB)
     const base = [process.execPath, SCRIPT, '--warm']
     const script = viaXvfb ? ['xvfb-run', '-a', ...base] : base
-    const child = spawn('flock', ['-n', REFRESH_LOCK, ...script], {
+    const child = spawn('flock', ['-n', '-E', BUSY_EXIT, REFRESH_LOCK, ...script], {
       env: { ...process.env, MH_CHROME_PROFILE: REFRESH_PROFILE },
       stdio: 'ignore',
     })

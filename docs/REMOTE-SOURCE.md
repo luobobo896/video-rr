@@ -139,7 +139,9 @@ jable 的 m3u8 直链签名写在 URL 里（`/hls/<token>/<exp>/...`），有效
   并静默忽略整份配置 —— 线上真的因此断过 8 小时没人发现，改完一定要
   `tail -c 40 /etc/cron.d/video-refresh | od -c` 看一眼。
 - 按需续期用**自己的锁**（`/tmp/jable-refresh-ondemand.lock`）和 profile（`storage/.jable-chrome-od`），
-  否则批次一跑十几分钟，用户永远等不到。
+  否则批次一跑十几分钟，用户永远等不到。`flock` 一律加 `-E 99`：抢不到锁用 99 退出，和子进程
+  自己的失败码（抓页失败 exit 1）区分开；不加 `-E` 时 flock 会把子进程的退出码原样透出，
+  抓页失败会被误判成「锁被占」，剧集既没换到票、也不会进冷却重试。
 - `scripts/jable-health.mjs` 统计过期比例、写 `storage/health/jable.json`，超阈值（默认 100 条或 3%）
   且没有刷新进程时自己拉起一轮。`--json` 给机器读，`--quiet` 只在告警时输出，告警退出码 2。
 
