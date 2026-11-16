@@ -67,8 +67,12 @@ test('出厂菜单权限与页面读接口一致', () => {
   const rows = db.prepare("SELECT route, perm_code FROM admin_menus WHERE route IN ('/policies','/ops','/refunds')").all()
   const byRoute = Object.fromEntries(rows.map((row) => [row.route, row.perm_code]))
   assert.equal(byRoute['/policies'], 'content.policy.write')
-  assert.equal(byRoute['/ops'], 'ops.banner.write&ops.section.write')
+  // 菜单 visible 用 hasPermission 精确匹配，perm_code 必须是单一权限码；
+  // 历史出厂值 'ops.banner.write&ops.section.write' 谁都不命中，会让「首页运营」对超管也不可见。
+  assert.equal(byRoute['/ops'], 'ops.section.write')
   assert.equal(byRoute['/refunds'], 'finance.order.read')
+  const compound = db.prepare("SELECT COUNT(*) AS n FROM admin_menus WHERE perm_code LIKE '%&%'").get()
+  assert.equal(Number(compound.n), 0)
 })
 
 test('角色管理 / 用户管理为独立菜单，权限在角色弹窗内分配', () => {

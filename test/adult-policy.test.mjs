@@ -21,7 +21,7 @@ before(async () => {
 
 after(() => { try { db?.close() } catch { /* ignore */ } })
 
-test('成人内容免费策略会被纠正为会员专享、无免费集、无试看', () => {
+test('成人内容已有显式策略时不覆盖（导入脚本的 --mode 不会被重启纠回）', () => {
   const dramaId = Number(db.prepare("INSERT INTO dramas (title, category, is_adult, status) VALUES ('成人策略测试', 'MOVIE', 1, 'published')").run().lastInsertRowid)
   db.prepare("INSERT INTO episodes (drama_id, no, title, duration, status) VALUES (?, 1, '第 1 集', 60, 'ready')").run(dramaId)
   db.prepare(`INSERT INTO content_policies
@@ -32,17 +32,31 @@ test('成人内容免费策略会被纠正为会员专享、无免费集、无�
 
   dbModule.ensureAdultPolicyInvariant()
 
+  // 显式配置属于运营/导入脚本的意图，缺口补齐只补「一条策略都没有」的内容
   const policy = db.prepare(`SELECT access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours
     FROM content_policies WHERE drama_id = ?`).get(dramaId)
   assert.deepEqual({ ...policy }, {
-    access_mode: 'subscription', free_episodes: 0, trial_seconds: 0,
-    single_price_cny: 0, purchase_kind: 'single', rental_hours: 0,
+    access_mode: 'free', free_episodes: 3, trial_seconds: 300,
+    single_price_cny: 12, purchase_kind: 'rental', rental_hours: 72,
   })
 
   const guest = entitlements.resolveAccess(null, dramaId, 1)
-  assert.equal(guest.allow, false)
-  assert.equal(guest.reason, 'subscription_required')
-  assert.equal(guest.trialSeconds, 0)
+  assert.equal(guest.allow, true)
+})
+
+test('成人内容缺失策略时按默认口径补齐（会员专享、无免费集、无试看）', () => {
+  const dramaId = Number(db.prepare("INSERT INTO dramas (title, category, is_adult, status) VALUES ('成人策略缺口测试', 'MOVIE', 1, 'published')").run().lastInsertRowid)
+  db.prepare("INSERT INTO episodes (drama_id, no, title, duration, status) VALUES (?, 1, '第 1 集', 60, 'ready')").run(dramaId)
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM content_policies WHERE drama_id = ?').get(dramaId).n, 0)
+
+  dbModule.ensureAdultPolicyInvariant()
+
+  const policy = db.prepare(`SELECT access_mode, free_episodes, trial_seconds, single_price_cny
+    FROM content_policies WHERE drama_id = ?`).get(dramaId)
+  assert.deepEqual({ ...policy }, {
+    access_mode: 'subscription', free_episodes: 0, trial_seconds: 0, single_price_cny: 0,
+  })
+  assert.equal(entitlements.resolveAccess(null, dramaId, 1).allow, false)
 })
 
 test('成人内容缺失策略时补齐，且按集付费规则被清空', () => {

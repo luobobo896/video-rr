@@ -37,9 +37,83 @@ const UA_EMPTY_ALLOW = /^$/
 const LOGIN_MAX_FAILS = 5
 const LOGIN_MAX_FAILS_GLOBAL = 30
 const LOGIN_LOCK_SECONDS = 600
+// 内存桶上限：超限按插入序淘汰最久未用（LRU），防止 Map 无界增长被刷爆内存
+const MAX_BUCKETS = 20_000
+const MAX_ENUM_KEYS = 20_000
+const MAX_FAIL_KEYS = 20_000
 
 function isLoopback(ip) {
   return ip === '127.0.0.1' || ip === '::1' || ip === 'localhost' || ip === '::ffff:127.0.0.1'
+}
+
+const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/
+const IPV4_MAPPED_RE = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i
+const HEXTET_RE = /^[0-9a-f]{1,4}$/
+
+function stripPortAndZone(raw) {
+  let value = String(raw ?? '').trim().toLowerCase()
+  if (!value) return ''
+  // [::1]:443 → ::1
+  if (value.startsWith('[')) {
+    const close = value.indexOf(']')
+    if (close < 0) return ''
+    value = value.slice(1, close)
+  } else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(value)) {
+    // 1.2.3.4:5678 → 1.2.3.4
+    value = value.slice(0, value.lastIndexOf(':'))
+  }
+  // fe80::1%eth0 → fe80::1
+  const zone = value.indexOf('%')
+  if (zone >= 0) value = value.slice(0, zone)
+  return value
+}
+
+function isIpv4(value) {
+  if (!IPV4_RE.test(value)) return false
+  return value.split('.').every((part) => Number(part) <= 255)
+}
+
+function ipv6Groups(value) {
+  const halves = value.split('::')
+  if (halves.length > 2) return undefined
+  const head = halves[0] ? halves[0].split(':') : []
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : []
+  if (halves.length === 1 && head.length !== 8) return undefined
+  const fill = 8 - head.length - tail.length
+  if (fill < 0) return undefined
+  const groups = [...head, ...Array(halves.length === 2 ? fill : 0).fill('0'), ...tail]
+  if (groups.length !== 8) return undefined
+  return groups.every((group) => HEXTET_RE.test(group)) ? groups : undefined
+}
+
+/**
+ * 归一化限流桶键（防「换源地址即换桶」绕过限流）。
+ *
+ * - IPv4 原样（去端口、校验每段 ≤255）
+ * - IPv4-mapped IPv6（`::ffff:a.b.c.d`）折叠成 IPv4，避免同一客户端双桶计数
+ * - IPv6 取前 4 个 hextet（/64）作为桶键：一个用户通常被分到一整个 /64，
+ *   逐地址计数等于没有限流；同时保证同一 /64 内不同地址共用同一桶
+ * - 端口、方括号、zone id（%eth0）一律剥掉；非法/空值统一落 `unknown`
+ */
+export function normalizeBucketKey(ip) {
+  const value = stripPortAndZone(ip)
+  if (!value) return 'unknown'
+  const mapped = IPV4_MAPPED_RE.exec(value)
+  if (mapped) return isIpv4(mapped[1]) ? mapped[1] : 'unknown'
+  if (isIpv4(value)) return value
+  if (!value.includes(':')) return 'unknown'
+  const groups = ipv6Groups(value)
+  if (!groups) return 'unknown'
+  return `${groups.slice(0, 4).join(':')}::/64`
+}
+
+/** 内存 Map 统一按插入序做 LRU 淘汰（Map 迭代序 = 插入序，命中时重插即移到尾部）。 */
+function evictOverflow(map, max) {
+  while (map.size > max) {
+    const oldest = map.keys().next()
+    if (oldest.done) break
+    map.delete(oldest.value)
+  }
 }
 
 /**
@@ -102,7 +176,10 @@ async function hitRedis(bucketKey, window, member) {
 function hitMemory(bucketKey, window, now) {
   const hits = (BUCKETS.get(bucketKey) ?? []).filter((ts) => now - ts < window)
   hits.push(now)
+  // 先删后插：把命中桶移到 Map 尾部，使 evictOverflow 淘汰的是「最久未用」
+  BUCKETS.delete(bucketKey)
   BUCKETS.set(bucketKey, hits)
+  evictOverflow(BUCKETS, MAX_BUCKETS)
   return hits.length
 }
 
@@ -122,7 +199,9 @@ async function countDistinct(enumKey, id, windowSeconds) {
   const state = ENUM.get(enumKey) ?? { ids: new Set(), ts: now }
   if (now - state.ts > windowSeconds * 1000) { state.ids = new Set(); state.ts = now }
   state.ids.add(id)
+  ENUM.delete(enumKey)
   ENUM.set(enumKey, state)
+  evictOverflow(ENUM, MAX_ENUM_KEYS)
   return state.ids.size
 }
 
@@ -130,6 +209,8 @@ async function countDistinct(enumKey, id, windowSeconds) {
 export async function inspect(req, pathname, method) {
   const { ip, viaProxy } = clientInfoOf(req)
   const ua = req.headers['user-agent'] ?? ''
+  // 所有桶键统一走归一化：IPv6 逐地址计数等于没有限流（一个 /64 里换源地址就有全新桶）
+  const bucketIp = normalizeBucketKey(ip)
 
   // 仅「本机直连」（健康检查 / 内部脚本）完全放行；
   // 经反代的请求即使解析出回环地址也照常走 UA 与限流，避免伪造转发头关掉防护
@@ -152,7 +233,7 @@ export async function inspect(req, pathname, method) {
   const idMatch = /^\/(?:api\/(?:drama|play|access))\/(\d+)/.exec(pathname)
   if (idMatch) {
     const bucket = Math.floor(Date.now() / 60_000)
-    const distinct = await countDistinct(`enum:${ip}:${bucket}`, idMatch[1], 90)
+    const distinct = await countDistinct(`enum:${bucketIp}:${bucket}`, idMatch[1], 90)
     if (distinct > 40) {
       record('enumeration', ip, pathname, ua, `distinct content ids=${distinct} in 60s`)
       return { blocked: true, status: 403, reason: 'enumeration_denied' }
@@ -164,7 +245,7 @@ export async function inspect(req, pathname, method) {
   if (!rule) return { blocked: false }
 
   const now = Date.now()
-  const bucketKey = `${rule.name}:${ip}`
+  const bucketKey = `${rule.name}:${bucketIp}`
   const member = `${now}-${randomUUID().slice(0, 8)}`
   const count = (await hitRedis(bucketKey, rule.window, member)) ?? hitMemory(bucketKey, rule.window, now)
   if (count > rule.limit) {
@@ -184,7 +265,7 @@ export async function inspect(req, pathname, method) {
  */
 export async function noteLoginFailure(username, ip = 'unknown') {
   const user = String(username ?? '').toLowerCase()
-  const pairKey = `login-fail:${user}:${ip}`
+  const pairKey = `login-fail:${user}:${normalizeBucketKey(ip)}`
   const userKey = `login-fail-user:${user}`
   const pairCount = await bump(pairKey, LOGIN_LOCK_SECONDS)
   const userCount = await bump(userKey, LOGIN_LOCK_SECONDS)
@@ -204,14 +285,17 @@ async function bump(bucketKey, seconds) {
   const state = FAILS.get(bucketKey) ?? { count: 0, resetAt: now + seconds * 1000 }
   if (now > state.resetAt) { state.count = 0; state.resetAt = now + seconds * 1000 }
   state.count += 1
+  FAILS.delete(bucketKey)
   FAILS.set(bucketKey, state)
+  evictOverflow(FAILS, MAX_FAIL_KEYS)
   return state.count
 }
 
 /** 锁定剩余的秒数，0 表示未锁定。 */
 export async function loginLockSeconds(username, ip = 'unknown') {
   const user = String(username ?? '').toLowerCase()
-  const pair = await lockLeft(`login-fail:${user}:${ip}`, LOGIN_MAX_FAILS)
+  const bucketIp = normalizeBucketKey(ip)
+  const pair = await lockLeft(`login-fail:${user}:${bucketIp}`, LOGIN_MAX_FAILS)
   if (pair > 0) return pair
   return lockLeft(`login-fail-user:${user}`, LOGIN_MAX_FAILS_GLOBAL)
 }
@@ -234,7 +318,7 @@ async function lockLeft(bucketKey, threshold) {
 /** 登录成功后清空失败计数（按该账号 + 该 IP 的正对计数，以及全局计数）。 */
 export async function clearLoginFailures(username, ip = 'unknown') {
   const user = String(username ?? '').toLowerCase()
-  const keys = [`login-fail:${user}:${ip}`, `login-fail-user:${user}`]
+  const keys = [`login-fail:${user}:${normalizeBucketKey(ip)}`, `login-fail-user:${user}`]
   for (const bucketKey of keys) FAILS.delete(bucketKey)
   if (redisReady()) await cmd('DEL', ...keys.map((item) => key(item)))
   COUNTERS.logins += 1
@@ -255,6 +339,16 @@ export function sweep() {
   }
   for (const [id, state] of FAILS) {
     if (now > state.resetAt) FAILS.delete(id)
+  }
+}
+
+/** 内存桶规模（运维/回归用）：超过上限后按 LRU 淘汰，size 不会无限增长。 */
+export function bucketStats() {
+  return {
+    buckets: BUCKETS.size,
+    enumKeys: ENUM.size,
+    failKeys: FAILS.size,
+    maxBuckets: MAX_BUCKETS,
   }
 }
 

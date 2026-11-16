@@ -11,6 +11,8 @@ import { join } from 'node:path'
 
 const cacheDir = mkdtempSync(join(tmpdir(), 'mh-remote-'))
 process.env.MH_REMOTE_CACHE = cacheDir
+// 网关默认拒绝回源到内网（SSRF 防护）；本用例的上游就是本机 mock 服务，显式打开逃生阀
+process.env.MH_REMOTE_ALLOW_PRIVATE = '1'
 const { handleRemoteRequest, remoteSourceOf, rewritePlaylist, remotePlaybackPath } = await import('../server/stream-proxy.mjs')
 
 let origin = ''

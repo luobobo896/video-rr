@@ -5,6 +5,12 @@ import { adultVisibilitySql } from './content-visibility.mjs'
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const run = (sql, ...args) => db.prepare(sql).run(...args)
 
+/**
+ * 搜索关键词的 SQL 归一：去掉首尾空白，并把 `%` `_` `\` 转义成字面量。
+ * 不转义时一条 path='%' 的埋点就能把所有剧各加一分，热搜榜直接失真。
+ */
+const KEYWORD = `replace(replace(replace(TRIM(COALESCE(te.path, '')), '\\', '\\\\'), '%', '\\%'), '_', '\\_')`
+
 /** 榜单类型 → 打分口径。窗口 30 天，权重越靠前的行为越"重"。 */
 export const RANK_STRATEGIES = {
   HOT: {
@@ -36,12 +42,13 @@ export const RANK_STRATEGIES = {
     desc: '近 30 天搜索命中次数',
     // 搜索埋点通常只记关键词（path），没有 drama_id；先按 drama_id 关联，
     // 为空时退回关键词匹配标题/副标题，否则热搜榜永远是空的。
+    // 关键词按字面量匹配（% 和 _ 不是通配符），长度 2–40，避免单字符把全站都算一次。
     sql: `SELECT d.id AS drama_id, COUNT(*) * 1.0 AS score
       FROM track_events te JOIN dramas d
         ON d.id = te.drama_id
-        OR (te.drama_id IS NULL AND TRIM(COALESCE(te.path, '')) <> ''
-            AND (d.title LIKE '%' || TRIM(te.path) || '%'
-                 OR COALESCE(d.sub_title, '') LIKE '%' || TRIM(te.path) || '%'))
+        OR (te.drama_id IS NULL AND length(${KEYWORD}) BETWEEN 2 AND 40
+            AND (d.title LIKE '%' || ${KEYWORD} || '%' ESCAPE '\\'
+                 OR COALESCE(d.sub_title, '') LIKE '%' || ${KEYWORD} || '%' ESCAPE '\\'))
       WHERE te.type = 'search' AND te.created_at >= datetime('now', '-30 days')
         AND d.status = 'published' AND ${adultVisibilitySql()}
       GROUP BY d.id HAVING score > 0 ORDER BY score DESC, d.id ASC`,
@@ -66,9 +73,10 @@ export const RANK_STRATEGIES = {
   },
   EXPECT: {
     label: '期待榜',
-    desc: '未上架/未完结的片子按上架时间倒序（即将上线）',
+    // 只收已上架：draft/下架内容不能出现在公开榜单里（否则等于提前预告未上架片）
+    desc: '已上架新片按上架年份倒序（即将上线）',
     sql: `SELECT d.id AS drama_id, 100.0 - ABS(COALESCE(d.year, 2000) - 2030) AS score
-      FROM dramas d WHERE d.status IN ('published', 'draft') AND ${adultVisibilitySql()}
+      FROM dramas d WHERE d.status = 'published' AND ${adultVisibilitySql()}
       ORDER BY COALESCE(d.year, 2000) DESC, d.id DESC LIMIT 20`,
   },
   QUARTER: {

@@ -4,11 +4,14 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { db, ROOT } from './db.mjs'
 
-export const UPLOAD_DIR = join(ROOT, 'storage', 'uploads')
-export const HLS_DIR = join(ROOT, 'storage', 'hls')
+/** 目录可被 MH_* 覆盖，便于把上传/HLS 落到独立磁盘或测试用临时目录。 */
+const dirFromEnv = (name, fallback) => (process.env[name] ? resolve(process.env[name]) : fallback)
+
+export const UPLOAD_DIR = dirFromEnv('MH_UPLOAD_DIR', join(ROOT, 'storage', 'uploads'))
+export const HLS_DIR = dirFromEnv('MH_HLS_DIR', join(ROOT, 'storage', 'hls'))
 const FFMPEG = process.env.MH_FFMPEG ?? 'ffmpeg'
 const FFPROBE = process.env.MH_FFPROBE ?? 'ffprobe'
 

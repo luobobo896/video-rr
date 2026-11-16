@@ -8,6 +8,8 @@
  * 一条 identifier = 一部片；一个 identifier 里多个视频文件 = 多集剧集（老剧合集常见）。
  * 解析逻辑都写成纯函数，测试不需要联网（test/archive.test.mjs）。
  */
+import { logWarn } from './logger.mjs'
+
 export const SEARCH_URL = 'https://archive.org/advancedsearch.php'
 export const META_URL = 'https://archive.org/metadata'
 export const DOWNLOAD_URL = 'https://archive.org/download'
@@ -23,9 +25,15 @@ export const SEARCH_FIELDS = [
 
 const UA = 'MH-Clone/1.0 (+content scraping; archive.org public collections)'
 
-const VIDEO_EXT = /\.(mp4|m4v|webm|ogv|mkv|avi|mov|mpeg|mpg)$/i
+/** 可播容器按 docs/ARCHIVE-IMPORT.md:42 收：ogm 是 Ogg 封装的视频，mpeg/mpg 常是伴生预览片。 */
+const VIDEO_EXT = /\.(mp4|m4v|webm|ogv|ogm|mkv|mov|avi)$/i
 /** 这些 format 是封面、字幕、文本、种子之类的伴生文件，不是片源。 */
 const NON_VIDEO = /(thumb|tile|spectrogram|waveform|djvu|pdf|text|json|xml|item image|metadata|album art|subtitle)/i
+/**
+ * 伴生文件还会混进「格式看起来正常」的名字里（archive.org 的 `_meta.mp4`、`_files.xml` 改名后的
+ * `.mp4`、字幕被包成 mp4）。只看 format 挡不住，必须按文件名里的词元再排一遍。
+ */
+const COMPANION_NAME = /(^|[._\-\s])(meta|metadata|files|thumbs?|tiles?|spectrogram|waveform|djvu|pdf|torrent|srt|vtt|ass|ssa|sub|subs|idx|nfo|json|xml|txt|md5|sha1|sfv|log)([._\-\s]|$)/i
 /** 同一个片子常同时有 h.264 / MPEG4 / Ogg 多份转码，按 format 挑一份。 */
 const FORMAT_RANK = [
   [/h\.?264|mpeg4|512kb mpeg4|mpeg2/i, 3],
@@ -63,18 +71,22 @@ const PLAUSIBLE_YEAR = (value) => {
   return Number.isFinite(year) && year >= 1890 && year <= new Date().getFullYear() ? year : null
 }
 
-/** 片名里带年份时先取它（「My Man Godfrey (1936)」比馆藏上传年 2010 更可信），再看馆藏日期字段。 */
+/**
+ * 片名里带年份时先取它（「My Man Godfrey (1936)」比馆藏上传年 2010 更可信）。
+ * 其次按「发布/馆藏日期 → 年份字段」的优先序取第一个可信值：以前把全部候选取 min，
+ * 元数据里随手写的版权年/上传年会把作品年份整体拉早。
+ */
 export function releaseYearOf({ title = '', metadata = {}, doc = {} } = {}) {
-  const candidates = [
-    ...String(title ?? '').matchAll(/\((1[89]\d{2}|20\d{2})\)/g),
-    yearOf(metadata.date),
-    yearOf(doc.date),
-    yearOf(metadata.publicdate),
-    yearOf(doc.publicdate),
-    yearOf(metadata.year),
-    yearOf(doc.year),
-  ].map((item) => PLAUSIBLE_YEAR(item?.[1] ?? item)).filter(Boolean)
-  return candidates.length ? Math.min(...candidates) : null
+  for (const match of String(title ?? '').matchAll(/\((1[89]\d{2}|20\d{2})\)/g)) {
+    const year = PLAUSIBLE_YEAR(match[1])
+    if (year) return year
+  }
+  const ordered = [metadata.date, doc.date, metadata.publicdate, doc.publicdate, metadata.year, doc.year]
+  for (const value of ordered) {
+    const year = PLAUSIBLE_YEAR(yearOf(value))
+    if (year) return year
+  }
+  return null
 }
 
 /** 片名里重复的「(1936) (2010)」全部剥掉：年份交给 year 字段，标题只留片名。 */
@@ -144,6 +156,8 @@ export function pickVideoFiles(files = []) {
     if (String(file.format ?? '').toLowerCase() === 'metadata') continue
     if (!VIDEO_EXT.test(name)) continue
     if (NON_VIDEO.test(String(file.format ?? ''))) continue
+    // `_meta.mp4` 这类伴生文件的 format 是正常的 h.264，只能按文件名拦
+    if (COMPANION_NAME.test(baseNameOf(name))) continue
     const size = Number(file.size ?? 0) || 0
     if (size > 0 && size < 512 * 1024) continue
     const mp4Bonus = /\.mp4$/i.test(name) ? 1 : 0
@@ -338,8 +352,17 @@ export function searchUrl({ query = '', collection = '', yearFrom = 0, yearTo = 
 
 async function getJson(url, timeout = 20000) {
   const response = await fetch(url, { headers: { accept: 'application/json', 'user-agent': UA }, signal: AbortSignal.timeout(timeout) })
-  if (!response.ok) throw new Error(`archive.org HTTP ${response.status}`)
-  return response.json()
+  if (!response.ok) {
+    logWarn('archive.fetch_failed', { host: url.host, status: response.status, path: url.pathname })
+    throw new Error(`archive.org HTTP ${response.status}`)
+  }
+  try {
+    return await response.json()
+  } catch (error) {
+    // 刮削最怕"拿到 200 但不是 JSON"（维护页/限流页），记下来才好判断是脚本还是源站问题
+    logWarn('archive.body_invalid', { host: url.host, path: url.pathname, message: error?.message ?? 'invalid json' })
+    throw error
+  }
 }
 
 export async function searchArchive(options = {}) {

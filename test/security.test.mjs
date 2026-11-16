@@ -14,6 +14,8 @@ process.env.MH_SECRET = 'test-secret'
 process.env.MH_OTP_SECRET = 'otp-secret'
 process.env.MH_LINK_SECRET = 'link-secret'
 process.env.MH_LINK_TTL = '300'
+// otp.mjs 的明文验证码钩子要求 MH_OTP_TEST=1 **且** NODE_ENV=test；缺一个就不会回显 testCode
+process.env.NODE_ENV = 'test'
 delete process.env.MH_REDIS_URL
 
 let db, security, entitlements, ratelimit, otp, adminApi
@@ -119,7 +121,7 @@ test('播放签名：默认 300 秒、绑 UA、篡改 UA 或签名失效', () =>
   assert.ok(shortLived.expires - Math.floor(Date.now() / 1000) <= 120)
 })
 
-test('验证码：默认不返回明文（仅 MH_OTP_TEST=1 时返回 testCode）', async () => {
+test('验证码：默认不返回明文，只有 MH_OTP_TEST=1 且 NODE_ENV=test 才回显 testCode', async () => {
   delete process.env.MH_OTP_TEST
   await assert.rejects(
     () => otp.sendCode({ email: `nodev${Date.now()}@example.com`, purpose: 'login', ip: '203.0.113.44' }),
@@ -130,18 +132,32 @@ test('验证码：默认不返回明文（仅 MH_OTP_TEST=1 时返回 testCode�
     },
   )
   process.env.MH_OTP_TEST = '1'
+  assert.equal(otp.otpTestHookEnabled(), true)
   const sent = await otp.sendCode({ email: `hook${Date.now()}@example.com`, purpose: 'login', ip: '203.0.113.45' })
   assert.equal(sent.devCode, undefined)
   assert.match(sent.testCode, /^\d{6}$/)
+  // 少一个条件就不该有明文：生产/预发漏设 NODE_ENV 时不能把验证码摆到响应里
+  const prevNodeEnv = process.env.NODE_ENV
+  process.env.NODE_ENV = 'development'
+  assert.equal(otp.otpTestHookEnabled(), false)
+  process.env.NODE_ENV = prevNodeEnv
+  assert.equal(otp.otpTestHookEnabled(), true)
   delete process.env.MH_OTP_TEST
 })
 
-test('后台代发登录码：管理员可签发一次性验证码，且带审计信息', async () => {
+test('后台代发登录码：客服代发落 cs_assist 用途，明文码只在测试钩子下返回', async () => {
   const email = `assist${Date.now()}@example.com`
-  const issued = await otp.issueAssistCode(email, { operator: 'admin' })
+  process.env.MH_OTP_TEST = '1'
+  const issued = await otp.issueAssistCode(email, { operator: 'admin', purpose: 'cs_assist', withPlainCode: true })
   assert.match(issued.code, /^\d{6}$/)
   assert.equal(issued.expiresIn, 300)
-  const row = db.prepare('SELECT user_agent FROM email_codes WHERE email = ? ORDER BY id DESC LIMIT 1').get(email)
+  const row = db.prepare('SELECT purpose, user_agent FROM email_codes WHERE email = ? ORDER BY id DESC LIMIT 1').get(email)
   assert.equal(row.user_agent, 'admin-assist:admin')
+  assert.equal(row.purpose, 'cs_assist')
+  // 生产调用方不索取明文：payload 里不该出现 code
+  const masked = await otp.issueAssistCode(`assist2${Date.now()}@example.com`, { operator: 'admin', purpose: 'cs_assist', withPlainCode: false })
+  assert.equal(masked.code, undefined)
+  delete process.env.MH_OTP_TEST
+  // 客服代发的码仍能在登录入口兑换
   await otp.verifyCode({ email, purpose: 'login', code: issued.code })
 })

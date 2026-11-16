@@ -107,7 +107,8 @@ export function durationOfPlaylist(text) {
 
 /** hlsUrl 的签名过期时刻：/hls/<token>/<exp>/... 里的 exp 是 unix 秒。 */
 export function expiryOf(hlsUrl) {
-  const hit = /\/hls\/[^/]+\/(\d{9,11})\//.exec(String(hlsUrl ?? ''))
+  // 与 stream-proxy 的缓存键同一口径：10 位秒级时间戳为主，留足 9–13 位防未来变形
+  const hit = /\/hls\/[^/]+\/(\d{9,13})\//.exec(String(hlsUrl ?? ''))
   return hit ? Number(hit[1]) : 0
 }
 

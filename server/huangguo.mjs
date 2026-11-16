@@ -1,4 +1,5 @@
 import { createECDH, createCipheriv, createDecipheriv, hkdfSync } from 'node:crypto'
+import { logWarn } from './logger.mjs'
 
 /**
  * 黄果短剧（huangguoai.com）片源适配。
@@ -32,9 +33,22 @@ export function hgRefOf(videoId, ep) {
 /**
  * 图片同样是加密的：crypto-image-protocol.js 里公开一对 AES-128-CBC / NoPadding 凭据，
  * 密文裸存 16 字节对齐，解密后才是真 JPEG/PNG（短剧封面是 3:4 竖版）。
+ *
+ * 这对凭据写在对方站点自己的前端 bundle 里，本质上不是秘密；但硬编码在本仓库会被当成
+ * 「我们的密钥」审计，所以优先读 MH_HUANGGUO_IMG_KEY / MH_HUANGGUO_IMG_IV，
+ * 源码常量只作兼容 fallback 并提示迁移（下个版本删）。
  */
-export const HG_IMAGE_KEY = 'f5d965df75336270'
-export const HG_IMAGE_IV = '97b60394abc2fbe1'
+const DEFAULT_HG_IMAGE_KEY = 'f5d965df75336270'
+const DEFAULT_HG_IMAGE_IV = '97b60394abc2fbe1'
+const imageKeyEnv = String(process.env.MH_HUANGGUO_IMG_KEY ?? '').trim()
+const imageIvEnv = String(process.env.MH_HUANGGUO_IMG_IV ?? '').trim()
+export const HG_IMAGE_KEY = imageKeyEnv.length === 16 ? imageKeyEnv : DEFAULT_HG_IMAGE_KEY
+export const HG_IMAGE_IV = imageIvEnv.length === 16 ? imageIvEnv : DEFAULT_HG_IMAGE_IV
+if (!imageKeyEnv || imageKeyEnv.length !== 16) {
+  logWarn('huangguo.image_key_default', {
+    hint: '当前用源码里的公开默认密钥，建议改成 MH_HUANGGUO_IMG_KEY（16 字节）+ MH_HUANGGUO_IMG_IV',
+  })
+}
 
 const IMAGE_MAGIC = [
   [0xff, 0xd8, 0xff], // JPEG

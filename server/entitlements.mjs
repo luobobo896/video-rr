@@ -65,20 +65,39 @@ export function ruleFor(rules, episodeNo) {
   return rules.find((rule) => no >= Number(rule.from_no) && (rule.to_no === null || rule.to_no === undefined || no <= Number(rule.to_no))) ?? null
 }
 
+/**
+ * 集数解析：null/空串表示「不设上限」，其余必须是有限整数。
+ * 早期实现直接 `Number(value)`，`"abc"` 得 NaN 落库成 NULL —— 等于整部剧不设上限；
+ * 配 mode='free' 就是整剧免费，所以非法值必须报错而不是静默降级。
+ */
+function parseEpisodeNo(value, label) {
+  if (value === null || value === undefined || value === '') return null
+  const number = Number(value)
+  if (!Number.isFinite(number) || !Number.isInteger(number)) {
+    throw Object.assign(new Error(`${label}必须是整数`), { status: 400 })
+  }
+  return number
+}
+
 /** 写入某部剧的规则集合（整体替换，后台保存用）。 */
 export function setEpisodeRules(dramaId, rules) {
   const id = Number(dramaId)
-  const rows = (rules ?? []).map((rule, index) => ({
-    from: Math.max(1, Number(rule.fromNo ?? rule.from_no ?? 1) || 1),
-    to: rule.toNo ?? rule.to_no ?? null,
-    mode: ['free', 'vip', 'single'].includes(rule.mode) ? rule.mode : 'vip',
-    price: Math.max(0, Number(rule.price ?? rule.price_cny ?? 0) || 0),
-    note: rule.note ?? null,
-    sort: index,
-  }))
-  for (const row of rows) {
-    if (row.to !== null && Number(row.to) < row.from) throw Object.assign(new Error(`第 ${row.from} 集的结束集数不能小于起始集数`), { status: 400 })
-  }
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('剧目 id 非法'), { status: 400 })
+  const rows = (rules ?? []).map((rule, index) => {
+    const label = `第 ${index + 1} 条规则`
+    const from = parseEpisodeNo(rule.fromNo ?? rule.from_no ?? 1, `${label}的起始集数`) ?? 1
+    const to = parseEpisodeNo(rule.toNo ?? rule.to_no ?? null, `${label}的结束集数`)
+    if (from < 1) throw Object.assign(new Error(`${label}的起始集数必须大于 0`), { status: 400 })
+    if (to !== null && to < from) throw Object.assign(new Error(`第 ${from} 集的结束集数不能小于起始集数`), { status: 400 })
+    return {
+      from,
+      to,
+      mode: ['free', 'vip', 'single'].includes(rule.mode) ? rule.mode : 'vip',
+      price: Math.max(0, Number(rule.price ?? rule.price_cny ?? 0) || 0),
+      note: rule.note ?? null,
+      sort: index,
+    }
+  })
   db.exec('BEGIN IMMEDIATE')
   try {
     db.prepare('DELETE FROM episode_price_rules WHERE drama_id = ?').run(id)
@@ -304,6 +323,12 @@ const linkSecret = () => getSetting('site', {}).linkSecret ?? 'dev-link-secret'
 export const LINK_TTL = Math.min(1800, Math.max(60, Number(process.env.MH_LINK_TTL ?? 300) || 300))
 
 /**
+ * 单次播放签名的最长有效期：覆盖整集时长，默认 2 小时（MH_PLAY_TTL_MAX 可调，最长 4 小时）。
+ * 与 api-public.mjs 里同口径，secureLinkScoped 用它给 TTL 封顶。
+ */
+export const PLAY_TTL_MAX = Math.max(LINK_TTL, Math.min(4 * 3600, Number(process.env.MH_PLAY_TTL_MAX ?? 7200) || 7200))
+
+/**
  * UA 指纹：同一链接只允许签发时的浏览器使用，防止链接被复制到别处/脚本盗链。
  * 只取 UA 的哈希前 16 位进签名，不改 Cookie 结构。
  */
@@ -320,8 +345,11 @@ export function uaFingerprint(ua) {
  */
 export function linkScope(uri) {
   const text = String(uri ?? '')
-  // 本地 HLS 与外部片源代理共用一套签名：一集一个 scope，清单与分片通用
-  const match = text.match(/^(\/media\/(?:hls|remote)\/[^/?#]+\/)/)
+  // 试看多一层秒数：/media/trial/<id>/<sec>/ 是完整 scope，秒数进签名后客户端改不动
+  const trial = text.match(/^(\/media\/trial\/[^/?#]+\/\d+\/)/)
+  if (trial) return trial[1]
+  // 本地 HLS、外部片源代理、试看共用一套签名：一集一个 scope，清单与分片通用
+  const match = text.match(/^(\/media\/(?:hls|remote|trial)\/[^/?#]+\/)/)
   return match ? match[1] : text
 }
 
@@ -336,6 +364,37 @@ export function secureLink(uri, expiresInSeconds = LINK_TTL, ua = '') {
   const digest = createHash('md5').update(`${expires}${scope}${uaFingerprint(ua)}${linkSecret()}`).digest()
   const sign = digest.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
   return { expires, sign, scope, url: `${uri}?sign=${sign}&expires=${expires}` }
+}
+
+/**
+ * 显式 scope + TTL 的签名（试看/受限播放用）：secureLink 只从 URI 推 scope，调用方拿不到
+ * 「按目录签、按 5 秒下限、按 PLAY_TTL_MAX 封顶」的控制权，这里补上。
+ * - scopePath 以 '/' 结尾时原样签（不再被 linkScope 收窄或扩写）；
+ * - 否则按 linkScope() 归一成目录，保持与 secureLink 一致的匹配面；
+ * - TTL 下限 5 秒、上限 PLAY_TTL_MAX；
+ * - res 上顺带写 Cookie（HLS 分片请求不带 query，只带 Cookie），沿用 api-public 的命名规则。
+ */
+export function secureLinkScoped(res, scopePath, ttlSeconds = LINK_TTL, ua = undefined) {
+  const raw = String(scopePath ?? '').trim()
+  if (!raw.startsWith('/') || /[?#]/.test(raw)) {
+    throw Object.assign(new Error('签名 scope 必须是以 / 开头的路径'), { status: 400 })
+  }
+  const scope = raw.endsWith('/') ? raw : linkScope(raw)
+  const ttl = Math.min(PLAY_TTL_MAX, Math.max(5, Math.trunc(Number(ttlSeconds)) || LINK_TTL))
+  const agent = ua ?? String(res?.req?.headers?.['user-agent'] ?? '')
+  const expires = Math.floor(Date.now() / 1000) + ttl
+  const digest = createHash('md5').update(`${expires}${scope}${uaFingerprint(agent)}${linkSecret()}`).digest()
+  const sign = digest.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  if (typeof res?.setHeader === 'function') {
+    const proto = String(res.req?.headers?.['x-forwarded-proto'] ?? '').split(',')[0].trim().toLowerCase()
+    const flags = `; Path=/; Max-Age=${ttl}; SameSite=Lax; HttpOnly${proto === 'https' ? '; Secure' : ''}`
+    const scopeId = /^\/media\/(?:hls|remote|trial)\/([^/]+)\//.exec(scope)?.[1]
+    const list = []
+    if (scopeId) list.push(`mh_link_${scopeId}=${sign}${flags}`, `mh_exp_${scopeId}=${expires}${flags}`)
+    list.push(`mh_link=${sign}${flags}`, `mh_exp=${expires}${flags}`)
+    res.setHeader('set-cookie', list)
+  }
+  return { expires, sign, scope, ttl, url: `${scope}?sign=${sign}&expires=${expires}` }
 }
 
 export function verifyLink(uri, sign, expires, ua = '') {
@@ -359,7 +418,9 @@ export function verifyPlayToken(token) {
   if (typeof token !== 'string' || !token.includes('.')) return undefined
   const [body, mac] = token.split('.')
   const expected = createHmac('sha256', linkSecret()).update(body).digest('base64url')
-  if (mac !== expected) return undefined
+  const left = Buffer.from(String(mac ?? ''))
+  const right = Buffer.from(expected)
+  if (left.length !== right.length || !timingSafeEqual(left, right)) return undefined
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
     if (!payload.exp || payload.exp < Date.now()) return undefined

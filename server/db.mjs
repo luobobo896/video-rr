@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { hashPassword } from './auth.mjs'
 import { currentKeyVersion, maskConfig, sealSecret } from './secretbox.mjs'
 import { ADULT_TAG_GROUPS } from './adult-taxonomy.mjs'
+import { logWarn } from './logger.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const ROOT = join(HERE, '..')
@@ -546,6 +547,18 @@ CREATE TABLE IF NOT EXISTS guest_trials (
 );
 CREATE INDEX IF NOT EXISTS idx_guest_trials_lookup ON guest_trials(visitor_id, drama_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_play_events_drama_time ON play_events(drama_id, created_at DESC);
+-- 试看计量底座：服务端按主体累计已看秒数，不信任客户端上报的剩余时长（P0-1/P0-2）
+CREATE TABLE IF NOT EXISTS trial_uses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_kind TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  drama_id INTEGER,
+  episode_id INTEGER,
+  seconds_used INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_trial_uses_subject ON trial_uses(subject_kind, subject, drama_id);
+CREATE INDEX IF NOT EXISTS idx_trial_uses_created ON trial_uses(created_at);
 `)
 
 const count = (table) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n
@@ -692,7 +705,7 @@ export const DEFAULT_ADMIN_MENUS = [
     ['成人菜单', '/adult-settings', 'content.drama.write', null],
     ['付费策略', '/policies', 'content.policy.write', '💳'],
     ['标签管理', '/tags', 'tag.read', '🏷️'],
-    ['首页运营', '/ops', 'ops.banner.write&ops.section.write', '🖼️'],
+    ['首页运营', '/ops', 'ops.section.write', '🖼️'],
     ['榜单', '/ranks', 'ops.rank.write', '🏆'],
     ['内容统计', '/content-stats', 'growth.content.read', '📈'],
     ['内容审核', '/review', 'content.review', '🛡️'],
@@ -1021,19 +1034,11 @@ export function ensureAdminSchema() {
 export function ensureAdultTagSeed() {
   if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tags'").get()) return
   if (getSetting('adult.tagSeedVersion')) return
-  const find = db.prepare('SELECT * FROM tags WHERE name = ?')
-  const insert = db.prepare(`INSERT INTO tags (name, scope, sort, status, parent_id, updated_at)
-    VALUES (?, 'adult', ?, 'active', ?, datetime('now'))`)
+  // 走 ensureTag：tags.name 是全局唯一，老库若已有同名 general 标签，直接复用而不是撞 UNIQUE 中断
   for (const group of ADULT_TAG_GROUPS) {
-    let parent = find.get(group.name)
-    if (!parent) {
-      insert.run(group.name, group.sort, null)
-      parent = find.get(group.name)
-    }
+    const parent = ensureTag(group.name, { scope: 'adult', sort: group.sort })
     if (!parent || parent.scope !== 'adult') continue
-    group.tags.forEach((name, index) => {
-      if (!find.get(name)) insert.run(name, (index + 1) * 10, parent.id)
-    })
+    group.tags.forEach((name, index) => ensureTag(name, { scope: 'adult', sort: (index + 1) * 10, parentId: parent.id }))
   }
   setSetting('adult.tagSeedVersion', 1)
 }
@@ -1125,6 +1130,7 @@ export function seedIfEmpty() {
   insertAdminRole.run(db.prepare("SELECT id FROM admins WHERE username = 'cs01'").get().id, roleOf('cs'))
 
   // 种子内容
+  const adultSeeded = []
   const seed = JSON.parse(readFileSync(join(ROOT, 'data', 'seed.json'), 'utf8'))
   const insertDrama = db.prepare(`INSERT INTO dramas
     (title, sub_title, cover_url, description, year, area, category, score, status, sort, content_type, is_adult, published_at)
@@ -1156,7 +1162,7 @@ export function seedIfEmpty() {
     const insertEpisode = db.prepare(`INSERT INTO episodes (drama_id, no, title, duration, status) VALUES (?, ?, ?, ?, 'ready')`)
     const insertPolicy = db.prepare(`INSERT INTO content_policies (drama_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
       VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    const dramaRows = db.prepare('SELECT id, category FROM dramas ORDER BY id').all()
+    const dramaRows = db.prepare('SELECT id, category, is_adult FROM dramas ORDER BY id').all()
     for (const [index, row] of dramaRows.entries()) {
       const isMovie = row.category === 'MOVIE'
       const episodeCount = isMovie ? 1 : 24
@@ -1166,6 +1172,7 @@ export function seedIfEmpty() {
       if (premium) insertPolicy.run(row.id, 'paid', 0, 360, 12, 'single', 72)
       else if (isMovie) insertPolicy.run(row.id, 'subscription', 0, 360, 0, 'single', 72)
       else insertPolicy.run(row.id, 'subscription', 1, 0, 0, 'single', 72)
+      if (row.is_adult) adultSeeded.push(row.id)
     }
 
     // 套餐
@@ -1229,7 +1236,8 @@ export function seedIfEmpty() {
     db.exec('ROLLBACK')
     throw error
   }
-  // 种子里的成人短剧默认带 1 集免费，落库后立即按成人策略纠正
+  // 种子里的成人短剧默认带 1 集免费：只对本次种进来的成人剧逐条纠正，不动其它剧的显式策略
+  for (const dramaId of adultSeeded) applyAdultPolicy(dramaId)
   ensureAdultPolicyInvariant()
   ensurePolicyInvariant()
   return { seeded: true, dramas: count('dramas'), episodes: count('episodes') }
@@ -1316,12 +1324,16 @@ export function syncMenuCatalog() {
   // 修正历史出厂菜单权限：只改仍保留旧值的系统菜单，不覆盖运营自定义授权。
   for (const [route, oldPerm, newPerm] of [
     ['/policies', 'content.drama.read', 'content.policy.write'],
-    ['/ops', 'ops.banner.write', 'ops.banner.write&ops.section.write'],
+    ['/ops', 'ops.banner.write', 'ops.section.write'],
     ['/refunds', 'finance.refund.create', 'finance.order.read'],
   ]) {
     db.prepare(`UPDATE admin_menus SET perm_code = ?, updated_at = datetime('now')
       WHERE route = ? AND perm_code = ? AND is_system = 1`).run(newPerm, route, oldPerm)
   }
+  // 出厂值曾把 /ops 的权限码写成复合串 'ops.banner.write&ops.section.write'；hasPermission 只做精确匹配，
+  // 复合串谁都不命中 → 「首页运营」对所有人（含超管）永久不可见。整表刷成单一有效权限码（幂等）。
+  db.prepare(`UPDATE admin_menus SET perm_code = 'ops.section.write', updated_at = datetime('now')
+    WHERE perm_code = 'ops.banner.write&ops.section.write'`).run()
   db.prepare("UPDATE admin_menus SET label = '分销分析', updated_at = datetime('now') WHERE route = '/distribution' AND label = '分销佣金'").run()
 
   // 增长域上线时给系统默认角色补一次菜单权限；之后不再强行覆盖运营的自定义授权。
@@ -2029,6 +2041,159 @@ CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_status ON withdrawal_requests
 }
 
 /**
+ * 启动期不变量的统一兜底：老库里可能有历史脏数据（重复 source_key、客服重复发权益），
+ * 建唯一索引这类动作失败只降级记录，绝不能把服务拖到起不来。
+ */
+function safeInvariant(label, fn) {
+  try {
+    return { ok: true, result: fn() }
+  } catch (error) {
+    logWarn('db.invariant_failed', { label, message: error?.message, code: error?.code })
+    return { ok: false, result: undefined }
+  }
+}
+
+/**
+ * `dramas.source_key` 去重：同一 source_key 只保留最小 id，其余置 NULL（不硬删，history/orders 还有引用）。
+ * 导入脚本「先查后插」在并发或重跑时会产出重复剧，建唯一索引前必须先清干净。
+ * 返回被清掉的条数。
+ */
+export function dedupeDramasBySourceKey() {
+  const info = db.prepare(`UPDATE dramas SET source_key = NULL, updated_at = datetime('now')
+    WHERE source_key IS NOT NULL AND source_key <> '' AND id NOT IN (
+      SELECT MIN(id) FROM dramas WHERE source_key IS NOT NULL AND source_key <> '' GROUP BY source_key
+    )`).run()
+  return Number(info.changes ?? 0)
+}
+
+/** `dramas.source_key` 部分唯一索引（空值不参与），幂等；重复项先按最小 id 保留。 */
+export function ensureDramaSourceKeyUnique() {
+  const removed = dedupeDramasBySourceKey()
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_dramas_source_key_unique
+    ON dramas(source_key) WHERE source_key IS NOT NULL AND source_key <> ''`)
+  return { removed }
+}
+
+/**
+ * 权益去重（部分唯一索引的前置清理）：同一用户同一部剧的「永久有效」权益只留最小 id，
+ * 同一用户同一部剧同一到期时刻的租赁同样只留最小 id，其余置 status='superseded'
+ * （不硬删，订单与客服记录还能追溯）。返回被改写的条数。
+ */
+export function dedupeActivePurchases() {
+  const permanent = db.prepare(`UPDATE purchases SET status = 'superseded'
+    WHERE status = 'active' AND expires_at IS NULL AND id NOT IN (
+      SELECT MIN(id) FROM purchases WHERE status = 'active' AND expires_at IS NULL GROUP BY user_id, drama_id
+    )`).run()
+  const rental = db.prepare(`UPDATE purchases SET status = 'superseded'
+    WHERE status = 'active' AND expires_at IS NOT NULL AND id NOT IN (
+      SELECT MIN(id) FROM purchases WHERE status = 'active' AND expires_at IS NOT NULL
+      GROUP BY user_id, drama_id, expires_at
+    )`).run()
+  return Number(permanent.changes ?? 0) + Number(rental.changes ?? 0)
+}
+
+/** 有效权益的部分唯一索引（只约束 status='active' 的永久权益与未到期租赁），幂等。 */
+export function ensurePurchaseUniqueIndexes() {
+  const superseded = dedupeActivePurchases()
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_active_permanent
+    ON purchases(user_id, drama_id) WHERE status = 'active' AND expires_at IS NULL`)
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_purchases_active_rental
+    ON purchases(user_id, drama_id, expires_at) WHERE status = 'active' AND expires_at IS NOT NULL`)
+  return { superseded }
+}
+
+/**
+ * 「每位用户每张券限用一次」原先只靠 `BEGIN IMMEDIATE` 串行写来保证，这里下沉成数据库约束。
+ * 历史库若已有重复核销，先输出可执行的体检提示再跳过，避免整段迁移抛死。
+ */
+export function ensureCouponRedemptionUnique() {
+  const duplicates = db.prepare(`SELECT coupon_id, user_id, COUNT(*) AS n FROM coupon_redemptions
+    GROUP BY coupon_id, user_id HAVING n > 1 LIMIT 5`).all()
+  if (duplicates.length) {
+    logWarn('db.coupon_redemption_duplicates', {
+      sample: duplicates,
+      hint: '同一用户重复核销同一张券：先核对订单并保留首笔，再重启以重建唯一索引 ux_coupon_redemptions_user',
+    })
+    return { skipped: true, duplicates: duplicates.length }
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_coupon_redemptions_user ON coupon_redemptions(coupon_id, user_id)')
+  return { skipped: false }
+}
+
+/**
+ * 「同一订单只允许一笔待处理退款」同样只是应用层先查后插，这里加部分唯一索引兜住。
+ * 历史库里若已有同单多笔 pending/approved，建索引会失败：先体检，给出可执行的清理提示再跳过。
+ */
+export function ensureRefundPendingUnique() {
+  const duplicates = db.prepare(`SELECT order_id, COUNT(*) AS n FROM refunds
+    WHERE status IN ('pending', 'approved') GROUP BY order_id HAVING n > 1 LIMIT 5`).all()
+  if (duplicates.length) {
+    logWarn('db.refund_pending_duplicates', {
+      sample: duplicates,
+      hint: "同一订单存在多笔待处理退款：先把多余的一笔改为 rejected（UPDATE refunds SET status='rejected' WHERE id = ?），再重启以重建 ux_refunds_order_pending",
+    })
+    return { skipped: true, duplicates: duplicates.length }
+  }
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_refunds_order_pending ON refunds(order_id)
+    WHERE status IN ('pending', 'approved')`)
+  return { skipped: false }
+}
+
+/** sessions 只增不删，表会无限长：删掉过期会话（expires_at 与 auth.mjs 一致，存 epoch 毫秒），返回删除条数。 */
+export function pruneExpiredSessions() {
+  const info = db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now())
+  return Number(info.changes ?? 0)
+}
+
+/**
+ * 标签写入的唯一入口：`tags.name` 是全局唯一（跨 scope），裸 INSERT 撞到成人同名标签会抛
+ * SQLITE_CONSTRAINT_UNIQUE。命中同名直接复用已有行，写路径不再因重名中断。
+ */
+export function ensureTag(name, { scope = 'general', sort = 0, status = 'active', parentId = null } = {}) {
+  const label = String(name ?? '').trim().slice(0, 60)
+  if (!label) return undefined
+  const find = () => db.prepare('SELECT * FROM tags WHERE name = ?').get(label)
+  const existing = find()
+  if (existing) return existing
+  try {
+    const info = db.prepare(`INSERT INTO tags (name, scope, sort, status, parent_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'))`).run(label, scope, Number(sort) || 0, status, parentId ?? null)
+    return db.prepare('SELECT * FROM tags WHERE id = ?').get(Number(info.lastInsertRowid))
+  } catch (error) {
+    if (!String(error?.message ?? '').includes('UNIQUE')) throw error
+    return find()
+  }
+}
+
+/**
+ * 试看计量底座（P0-1/P0-2 的服务端口径）：客户端只能上报「本次增量」，累计值一律以这里为准，
+ * 否则签一次超长 TTL 的试看链接就能无限看。
+ */
+export function recordTrialUse({ subjectKind, subject, dramaId = null, episodeId = null, secondsUsed = 0 } = {}) {
+  const kind = String(subjectKind ?? '').slice(0, 32)
+  const who = String(subject ?? '').slice(0, 200)
+  const seconds = Math.max(0, Math.round(Number(secondsUsed) || 0))
+  if (!kind || !who || !seconds) return 0
+  db.prepare(`INSERT INTO trial_uses (subject_kind, subject, drama_id, episode_id, seconds_used, created_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))`).run(kind, who, Number(dramaId) || null, Number(episodeId) || null, seconds)
+  return seconds
+}
+
+/** 某主体在滑动窗口内已消耗的试看秒数与计账次数（windows），dramaId 为 null 时不限剧。 */
+export function trialBudget({ subjectKind, subject, dramaId = null, windowHours = 24 } = {}) {
+  const kind = String(subjectKind ?? '').slice(0, 32)
+  const who = String(subject ?? '').slice(0, 200)
+  if (!kind || !who) return { usedSeconds: 0, windows: 0 }
+  const hours = Math.min(720, Math.max(1, Math.trunc(Number(windowHours)) || 24))
+  const row = db.prepare(`SELECT COALESCE(SUM(seconds_used), 0) AS used, COUNT(*) AS windows
+    FROM trial_uses
+    WHERE subject_kind = ? AND subject = ?
+      AND COALESCE(drama_id, 0) = COALESCE(?, 0)
+      AND created_at >= datetime('now', ?)`).get(kind, who, Number(dramaId) || null, `-${hours} hours`)
+  return { usedSeconds: Number(row?.used ?? 0), windows: Number(row?.windows ?? 0) }
+}
+
+/**
  * 短剧频道只承载成人内容：外层（未确认 18+ 的导航、首页、筛选栏）不能出现短剧，
  * 所以这里把历史遗留的 `PLAYLET + is_adult = 0` 一次性纠正。幂等，每次启动都跑。
  */
@@ -2057,20 +2222,16 @@ export function applyAdultPolicy(dramaId) {
   return true
 }
 
+/**
+ * 成人内容策略缺口补齐：只给「一条策略都没有」的成人内容套默认（会员专享、无免费集、无试看、不可单买）。
+ * 显式配置（例如 JABLE 导入的 --mode free / subscription、运维手改的价格）一律保留——
+ * 早期实现每次启动都强行 UPDATE 回 subscription，导入脚本的 -mode 参数会被无声纠回去。
+ */
 export function ensureAdultPolicyInvariant() {
-  db.exec(`UPDATE content_policies
-    SET policy_group_id = NULL, access_mode = 'subscription', free_episodes = 0,
-        trial_seconds = 0, single_price_cny = 0, purchase_kind = 'single', rental_hours = 0,
-        updated_at = datetime('now')
-    WHERE drama_id IN (SELECT id FROM dramas WHERE is_adult = 1)
-      AND (policy_group_id IS NOT NULL OR access_mode <> 'subscription' OR free_episodes <> 0
-        OR trial_seconds <> 0 OR single_price_cny <> 0 OR purchase_kind <> 'single' OR rental_hours <> 0)`)
-  db.exec(`INSERT INTO content_policies
-    (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
-    SELECT d.id, NULL, 'subscription', 0, 0, 0, 'single', 0 FROM dramas d
-    WHERE d.is_adult = 1 AND NOT EXISTS (SELECT 1 FROM content_policies p WHERE p.drama_id = d.id)
-    ON CONFLICT(drama_id) DO NOTHING`)
-  db.exec('DELETE FROM episode_price_rules WHERE drama_id IN (SELECT id FROM dramas WHERE is_adult = 1)')
+  const missing = db.prepare(`SELECT d.id FROM dramas d
+    WHERE d.is_adult = 1 AND NOT EXISTS (SELECT 1 FROM content_policies p WHERE p.drama_id = d.id)`).all()
+  for (const row of missing) applyAdultPolicy(row.id)
+  return { applied: missing.length }
 }
 
 /** 付费策略不变量：会员免费/免费公开不挂单片价，电影不吃首 N 集免费。 */
@@ -2124,5 +2285,27 @@ ensureAdultPolicyInvariant()
 ensurePolicyInvariant()
 // 新增的权限节点（如 system.menu）也要在脚本/测试场景下补齐，否则角色授权页看不到
 syncMenuCatalog()
+
+// 数据完整性不变量：重复 source_key / 重复有效权益先清再建部分唯一索引。
+// 失败只在日志里降级（老库脏数据不能挡住启动），成功时把清理条数记一笔便于运维核查。
+const dramaKeyIndex = safeInvariant('dramas.source_key', ensureDramaSourceKeyUnique)
+if (dramaKeyIndex.result?.removed) logWarn('db.source_key_dedup', { removed: dramaKeyIndex.result.removed })
+const purchaseIndexes = safeInvariant('purchases.active', ensurePurchaseUniqueIndexes)
+if (purchaseIndexes.result?.superseded) logWarn('db.purchase_dedup', { superseded: purchaseIndexes.result.superseded })
+// 交易类约束下沉：应用层先查后插只靠事务串行，多进程/重试时还是可能双开
+safeInvariant('coupon_redemptions.unique', ensureCouponRedemptionUnique)
+safeInvariant('refunds.pending', ensureRefundPendingUnique)
+
+// sessions 到期行每小时清理一次；MH_SESSION_PRUNE=0 可关（多进程部署时只留一个进程开即可）
+if (process.env.MH_SESSION_PRUNE !== '0') {
+  setInterval(() => {
+    try {
+      const removed = pruneExpiredSessions()
+      if (removed) logWarn('db.sessions_pruned', { removed })
+    } catch (error) {
+      logWarn('db.sessions_prune_failed', { message: error?.message })
+    }
+  }, 3600_000).unref()
+}
 
 export { DB_PATH }

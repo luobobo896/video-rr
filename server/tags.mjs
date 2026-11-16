@@ -4,6 +4,7 @@
  */
 import { db } from './db.mjs'
 import { adultVisibilitySql } from './content-visibility.mjs'
+import { likeContains } from './sql-like.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
@@ -31,8 +32,9 @@ export function listTags({ withCount = false, includeDisabled = false, publicOnl
   }
   if (!includeDisabled) clauses.push(`${p}status = 'active'`)
   if (keyword) {
-    clauses.push(`${p}name LIKE ?`)
-    args.push(`%${String(keyword).trim()}%`)
+    // 字面量包含匹配：keyword 里的 % 和 _ 是普通字符，不是通配符
+    clauses.push(`${p}name LIKE ? ESCAPE '\\'`)
+    args.push(likeContains(String(keyword).trim()))
   }
   if (level === 'top') clauses.push(`${p}parent_id IS NULL`)
   if (level === 'child') clauses.push(`${p}parent_id IS NOT NULL`)
@@ -52,9 +54,11 @@ export function listTags({ withCount = false, includeDisabled = false, publicOnl
 
   const rows = all(sql, ...args).map((row) => (withCount ? { ...row, dramaCount: row.drama_count ?? 0 } : row))
   if (!page) return rows
-  const size = Math.min(200, Math.max(1, Number(pageSize) || 20))
-  const start = (Math.max(1, Number(page)) - 1) * size
-  return { total: rows.length, page: Number(page), pageSize: size, list: rows.slice(start, start + size) }
+  // 分页参数一律先归一再进 SQL/slice：page=abc 时 Number() 得 NaN，早期实现会把 NaN 直接当 start
+  const size = Math.min(200, Math.max(1, Math.trunc(Number(pageSize)) || 20))
+  const current = Math.max(1, Math.trunc(Number(page)) || 1)
+  const start = (current - 1) * size
+  return { total: rows.length, page: current, pageSize: size, list: rows.slice(start, start + size) }
 }
 
 /** 一级/二级树，后台标签管理页直接用。 */
@@ -93,9 +97,19 @@ export function createTag({ name, sort = 100, status = 'active', parentId = null
     return existing
   }
   const parent = normalizeParent(parentId, null, scope)
-  const info = db
-    .prepare("INSERT INTO tags (name, scope, sort, status, parent_id, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
-    .run(trimmed, scope, Number(sort) || 100, status === 'disabled' ? 'disabled' : 'active', parent)
+  let info
+  try {
+    info = db
+      .prepare("INSERT INTO tags (name, scope, sort, status, parent_id, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+      .run(trimmed, scope, Number(sort) || 100, status === 'disabled' ? 'disabled' : 'active', parent)
+  } catch (error) {
+    // tags.name 是全局唯一：并发或脚本写入撞名时不要把 SQLITE_CONSTRAINT_UNIQUE 抛成 500
+    if (!String(error?.message ?? '').includes('UNIQUE')) throw error
+    const raced = one('SELECT * FROM tags WHERE name = ?', trimmed)
+    if (!raced) throw error
+    if (raced.scope !== scope) throw bad('同名标签已存在于其他分类')
+    return raced
+  }
   return one('SELECT * FROM tags WHERE id = ?', Number(info.lastInsertRowid))
 }
 

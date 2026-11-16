@@ -133,12 +133,17 @@ export function updateTrack(id, input = {}) {
   const uri = input.uri === undefined ? before.uri : text(input.uri, 'URI', { required: true, max: 500 })
   const isDefault = input.isDefault === undefined ? Number(before.is_default) === 1 : Boolean(input.isDefault)
   const status = input.status === undefined ? before.status : statusOf(input.status)
-  const duplicate = sameTrack(before.episode_id, kind, language, edition, trackId)
-  if (duplicate) throw new TrackError('同语言同版本轨道已存在', 409)
 
   db.exec('BEGIN')
   try {
-    if (isDefault) db.prepare('UPDATE episode_tracks SET is_default = 0 WHERE episode_id = ? AND kind = ?').run(before.episode_id, kind)
+    // 查重必须在事务内：并发两次提交同一语言/版本时，先查后写会双双通过
+    if (sameTrack(before.episode_id, kind, language, edition, trackId)) throw new TrackError('同语言同版本轨道已存在', 409)
+    if (isDefault) {
+      // 改 kind 时旧 kind 组的默认轨也要清，否则同集会留下一条「默认」的旧 kind 轨
+      const kinds = kind === before.kind ? [kind] : [kind, before.kind]
+      db.prepare(`UPDATE episode_tracks SET is_default = 0 WHERE episode_id = ? AND kind IN (${kinds.map(() => '?').join(', ')})`)
+        .run(before.episode_id, ...kinds)
+    }
     db.prepare(`UPDATE episode_tracks SET kind = ?, language = ?, edition = ?, label = ?, source = ?,
       uri = ?, is_default = ?, status = ? WHERE id = ?`)
       .run(kind, language, edition, label, source || null, uri, isDefault ? 1 : 0, status, trackId)
@@ -146,6 +151,7 @@ export function updateTrack(id, input = {}) {
     return db.prepare('SELECT * FROM episode_tracks WHERE id = ?').get(trackId)
   } catch (error) {
     db.exec('ROLLBACK')
+    if (error instanceof TrackError) throw error
     if (String(error.message).includes('UNIQUE')) throw new TrackError('同语言同版本轨道已存在', 409)
     throw error
   }

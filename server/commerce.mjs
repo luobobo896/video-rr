@@ -18,15 +18,46 @@ const run = (sql, ...args) => db.prepare(sql).run(...args)
 
 const nowSql = () => new Date().toISOString().slice(0, 19).replace('T', ' ')
 const outTradeNo = () => `MH${Date.now()}${randomBytes(2).toString('hex').toUpperCase()}`
+
+/**
+ * 券有效期口径：一律按 Asia/Shanghai（UTC+8）当天判定。
+ * 以前直接拿 UTC 的 today 比较，"+08 已经是今天、UTC 还停在昨天"的 00:00–08:00 里
+ * 当天生效的券会显示未生效、上海昨天到期的券还能继续用。这里在 SQL 里显式 +8 小时。
+ */
+const shanghaiToday = () => one("SELECT date('now', '+8 hours') AS day").day
+
+/** 单张券每人限用次数：表里没有 per_user_limit 列，统一按 1 次/人。 */
+const COUPON_PER_USER_LIMIT = 1
+
+const BUSY_BACKOFF_MS = [20, 60, 150]
+const sleepSync = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+const isBusyError = (error) => /\bSQLITE_BUSY\b|\bSQLITE_LOCKED\b|database (?:table )?is locked/i
+  .test(`${error?.code ?? ''} ${error?.message ?? ''}`)
+
+/**
+ * 资金写事务。
+ * - BEGIN IMMEDIATE：一开始就拿写锁，避免 BEGIN(deferred) 先读后升级写锁时的 SQLITE_BUSY 死锁；
+ * - busy 退避重试最多 3 次（20/60/150ms），别的进程（导入/批处理）占着写锁时排队而不是直接失败；
+ * - 非 busy 错误立即回滚并抛出，绝不吞异常，也不重放已提交的事务。
+ */
 const tx = (fn) => {
-  db.exec('BEGIN')
-  try {
-    const result = fn()
-    db.exec('COMMIT')
-    return result
-  } catch (error) {
-    db.exec('ROLLBACK')
-    throw error
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      db.exec('BEGIN IMMEDIATE')
+    } catch (error) {
+      if (!isBusyError(error) || attempt >= BUSY_BACKOFF_MS.length) throw error
+      sleepSync(BUSY_BACKOFF_MS[attempt])
+      continue
+    }
+    try {
+      const result = fn()
+      db.exec('COMMIT')
+      return result
+    } catch (error) {
+      try { db.exec('ROLLBACK') } catch { /* 回滚失败不能掩盖原始错误 */ }
+      if (!isBusyError(error) || attempt >= BUSY_BACKOFF_MS.length) throw error
+      sleepSync(BUSY_BACKOFF_MS[attempt])
+    }
   }
 }
 
@@ -142,7 +173,7 @@ export function validateCoupon(code, amountCny) {
   const coupon = one('SELECT * FROM coupons WHERE code = ?', String(code).toUpperCase())
   if (!coupon) return { ok: false, message: '优惠券不存在' }
   if (coupon.status !== 'active') return { ok: false, message: '优惠券已停用' }
-  const today = new Date().toISOString().slice(0, 10)
+  const today = shanghaiToday()
   if (coupon.valid_from && coupon.valid_from.slice(0, 10) > today) return { ok: false, message: '优惠券未生效' }
   if (coupon.valid_to && coupon.valid_to.slice(0, 10) < today) return { ok: false, message: '优惠券已过期' }
   if (coupon.total > 0 && coupon.used >= coupon.total) return { ok: false, message: '优惠券已领完' }
@@ -152,6 +183,31 @@ export function validateCoupon(code, amountCny) {
     : Math.round(amountCny * (coupon.discount_value / 100) * 100) / 100
   return { ok: true, discount, coupon }
 }
+
+/**
+ * 下单时预占券额度（必须在 BEGIN IMMEDIATE 事务里调用）。
+ * 表里没有 per_user_limit / reserved 列，所以用 coupon_redemptions 的行充当「占用」：
+ *  - 每人限用：同一 (coupon_id, user_id) 的占用行达到 COUPON_PER_USER_LIMIT 即拒绝；
+ *  - 总量：占用行数（含待支付订单）达到 total 即拒绝，避免「支付成功才 used+1」造成超发。
+ * coupons.used 仍然只在支付成功后 +1，并用条件 UPDATE 兜底不越过 total。
+ */
+function reserveCoupon(coupon, userId, orderId) {
+  if (!coupon) return
+  if (couponRedeemedByUser(coupon.id, userId) >= COUPON_PER_USER_LIMIT) {
+    throw new CommerceError('coupon_per_user_limit', '该优惠券每位用户限用一次')
+  }
+  const total = Number(coupon.total ?? 0)
+  if (total > 0) {
+    const occupied = Number(one('SELECT COUNT(*) AS n FROM coupon_redemptions WHERE coupon_id = ?', coupon.id)?.n ?? 0)
+    if (occupied >= total) throw new CommerceError('coupon_exhausted', '优惠券已领完')
+  }
+  run('INSERT OR IGNORE INTO coupon_redemptions (coupon_id, user_id, order_id) VALUES (?, ?, ?)',
+    coupon.id, Number(userId), Number(orderId))
+}
+
+const couponRedeemedByUser = (couponId, userId) => Number(one(
+  'SELECT COUNT(*) AS n FROM coupon_redemptions WHERE coupon_id = ? AND user_id = ?',
+  Number(couponId), Number(userId))?.n ?? 0)
 
 /* ---------------- 下单 ---------------- */
 
@@ -173,9 +229,9 @@ export function createOrder({ userId, visitorId, productType, planId, dramaId, c
   const couponResult = validateCoupon(couponCode, price)
   if (!couponResult.ok) throw new CommerceError('coupon_invalid', couponResult.message)
   const amount = Math.max(0.01, Math.round((price - couponResult.discount) * 100) / 100)
-  const attribution = getOrderAttribution({ userId, visitorId })
-  const distribution = getDistributionSnapshot(userId)
-  const attributionSnapshot = JSON.stringify(attribution.snapshot ?? {})
+  // 归因绑定（首次下单会写 user_acquisitions）与分销快照都挪到下面的 tx 里解析：
+  // 放在事务外时，另一个连接持写锁会让这句先抛 database is locked，退避重试根本没机会生效；
+  // 更糟的是订单提交而绑定回滚，或反过来——首触渠道永久丢失。
 
   // 渠道解析：显式指定 > 场景默认 > 优先级兜底；金额/币种不满足则跳过
   const scene = productType === 'subscription' ? 'subscription' : 'single'
@@ -217,77 +273,92 @@ export function createOrder({ userId, visitorId, productType, planId, dramaId, c
     return { order, payUrl: `/pay/mock/${order.out_trade_no}` }
   }
 
-  // 幂等：120 秒内同一用户 + 同一商品 + 同渠道的未支付订单直接复用，避免连点产生多笔
-  const reusable = one(`SELECT * FROM orders
-    WHERE user_id = ? AND channel = ? AND status IN ('created', 'pending')
-      AND product_type = ? AND COALESCE(plan_id, 0) = ? AND COALESCE(drama_id, 0) = ?
-      AND ABS(amount_cny - ?) < 0.005
-      AND datetime(created_at) >= datetime('now', '-120 seconds')
-    ORDER BY id DESC LIMIT 1`,
-  userId, channelCode, productType,
-  productType === 'subscription' ? plan.id : 0,
-  productType === 'single' ? Number(dramaId) : 0,
-  amount)
-  if (reusable) {
-    run(`UPDATE orders SET visitor_id = COALESCE(NULLIF(visitor_id, ''), ?),
-      acquisition_channel_id = COALESCE(acquisition_channel_id, ?), acquisition_channel_type = COALESCE(acquisition_channel_type, ?),
-      acquisition_campaign_id = COALESCE(acquisition_campaign_id, ?), promo_code = COALESCE(promo_code, ?),
-      domain_source = COALESCE(domain_source, ?), first_enter_at = COALESCE(first_enter_at, ?),
-      attributed_at = COALESCE(attributed_at, ?), attribution_model = COALESCE(attribution_model, ?),
-      attribution_touch_id = COALESCE(attribution_touch_id, ?), attribution_snapshot_json = COALESCE(attribution_snapshot_json, ?),
-      attribution_status = COALESCE(attribution_status, 'ok'),
-      distributor_user_id = COALESCE(distributor_user_id, ?), distribution_code = COALESCE(distribution_code, ?),
-      distribution_relation_id = COALESCE(distribution_relation_id, ?)
-      WHERE id = ?`,
-    visitorId ? String(visitorId).slice(0, 64) : null,
+  // 从幂等复用、券预占、插单到占用行写入全在同一个 BEGIN IMMEDIATE 里：
+  // 否则并发下单会同时通过「这张券还剩几张」的检查，把券刷超发。
+  const created = tx(() => {
+    const attribution = getOrderAttribution({ userId, visitorId })
+    const distribution = getDistributionSnapshot(userId)
+    const attributionSnapshot = JSON.stringify(attribution.snapshot ?? {})
+    // 幂等：120 秒内同一用户 + 同一商品 + 同渠道的未支付订单直接复用，避免连点产生多笔
+    const reusable = one(`SELECT * FROM orders
+      WHERE user_id = ? AND channel = ? AND status IN ('created', 'pending')
+        AND product_type = ? AND COALESCE(plan_id, 0) = ? AND COALESCE(drama_id, 0) = ?
+        AND ABS(amount_cny - ?) < 0.005
+        AND datetime(created_at) >= datetime('now', '-120 seconds')
+      ORDER BY id DESC LIMIT 1`,
+    userId, channelCode, productType,
+    productType === 'subscription' ? plan.id : 0,
+    productType === 'single' ? Number(dramaId) : 0,
+    amount)
+    if (reusable) {
+      run(`UPDATE orders SET visitor_id = COALESCE(NULLIF(visitor_id, ''), ?),
+        acquisition_channel_id = COALESCE(acquisition_channel_id, ?), acquisition_channel_type = COALESCE(acquisition_channel_type, ?),
+        acquisition_campaign_id = COALESCE(acquisition_campaign_id, ?), promo_code = COALESCE(promo_code, ?),
+        domain_source = COALESCE(domain_source, ?), first_enter_at = COALESCE(first_enter_at, ?),
+        attributed_at = COALESCE(attributed_at, ?), attribution_model = COALESCE(attribution_model, ?),
+        attribution_touch_id = COALESCE(attribution_touch_id, ?), attribution_snapshot_json = COALESCE(attribution_snapshot_json, ?),
+        attribution_status = COALESCE(attribution_status, 'ok'),
+        distributor_user_id = COALESCE(distributor_user_id, ?), distribution_code = COALESCE(distribution_code, ?),
+        distribution_relation_id = COALESCE(distribution_relation_id, ?)
+        WHERE id = ?`,
+      visitorId ? String(visitorId).slice(0, 64) : null,
+      attribution.channelId, attribution.channelType, attribution.campaignId, attribution.promoCode,
+      attribution.domainSource, attribution.firstEnterAt, attribution.attributedAt, attribution.attributionModel,
+      attribution.touchId, attributionSnapshot, distribution.distributorUserId,
+      distribution.distributionCode, distribution.relationId, reusable.id)
+      return { order: reusable, reused: true }
+    }
+
+    const draft = {
+      outTradeNo: outTradeNo(),
+      amount,
+      usdtAmount: channelCode === 'usdt' ? Math.round((amount / rate) * 100) / 100 : null,
+      usdtRate: channelCode === 'usdt' ? rate : null,
+      address: channelCode === 'usdt' ? (config.walletAddress ?? '') : null,
+    }
+
+    const info = run(`INSERT INTO orders
+      (out_trade_no, user_id, visitor_id, product_type, plan_id, drama_id, amount_cny, coupon_id, channel, status, pay_url,
+       usdt_amount, usdt_rate, usdt_address, expires_at, meta_json,
+       acquisition_channel_id, acquisition_channel_type, acquisition_campaign_id, promo_code, domain_source,
+       first_enter_at, attributed_at, attribution_model, attribution_touch_id, attribution_snapshot_json,
+       attribution_status, distributor_user_id, distribution_code, distribution_relation_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?)`,
+    draft.outTradeNo, userId, visitorId ? String(visitorId).slice(0, 64) : null, productType,
+    productType === 'subscription' ? plan.id : null,
+    productType === 'single' ? Number(dramaId) : null,
+    amount, couponResult.coupon?.id ?? null, channelCode,
+    channelCode === 'mock' ? `/pay/mock/${draft.outTradeNo}` : null,
+    draft.usdtAmount, draft.usdtRate, draft.address,
+    new Date(Date.now() + 15 * 60_000).toISOString().slice(0, 19).replace('T', ' '),
+    JSON.stringify({
+      basePrice: price, discount: couponResult.discount, purchaseKind: policy?.purchase_kind ?? null,
+      couponCode: couponCode ?? null,
+      channelId: row.id, channelEnv: row.env, channelKeyVersion: row.key_version,
+    }),
     attribution.channelId, attribution.channelType, attribution.campaignId, attribution.promoCode,
     attribution.domainSource, attribution.firstEnterAt, attribution.attributedAt, attribution.attributionModel,
-    attribution.touchId, attributionSnapshot, distribution.distributorUserId,
-    distribution.distributionCode, distribution.relationId, reusable.id)
-    if (!reusable.visitor_id && visitorId) reusable.visitor_id = visitorId
-    return { ...paymentOf(reusable), reused: true }
-  }
-
-  const order = {
-    outTradeNo: outTradeNo(),
-    amount,
-    usdtAmount: channelCode === 'usdt' ? Math.round((amount / rate) * 100) / 100 : null,
-    usdtRate: channelCode === 'usdt' ? rate : null,
-    address: channelCode === 'usdt' ? (config.walletAddress ?? '') : null,
-  }
-
-  const info = run(`INSERT INTO orders
-    (out_trade_no, user_id, visitor_id, product_type, plan_id, drama_id, amount_cny, coupon_id, channel, status, pay_url,
-     usdt_amount, usdt_rate, usdt_address, expires_at, meta_json,
-     acquisition_channel_id, acquisition_channel_type, acquisition_campaign_id, promo_code, domain_source,
-     first_enter_at, attributed_at, attribution_model, attribution_touch_id, attribution_snapshot_json,
-     attribution_status, distributor_user_id, distribution_code, distribution_relation_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?)`,
-  order.outTradeNo, userId, visitorId ? String(visitorId).slice(0, 64) : null, productType,
-  productType === 'subscription' ? plan.id : null,
-  productType === 'single' ? Number(dramaId) : null,
-  amount, couponResult.coupon?.id ?? null, channelCode,
-  channelCode === 'mock' ? `/pay/mock/${order.outTradeNo}` : null,
-  order.usdtAmount, order.usdtRate, order.address,
-  new Date(Date.now() + 15 * 60_000).toISOString().slice(0, 19).replace('T', ' '),
-  JSON.stringify({
-    basePrice: price, discount: couponResult.discount, purchaseKind: policy?.purchase_kind ?? null,
-    couponCode: couponCode ?? null,
-    channelId: row.id, channelEnv: row.env, channelKeyVersion: row.key_version,
-  }),
-  attribution.channelId, attribution.channelType, attribution.campaignId, attribution.promoCode,
-  attribution.domainSource, attribution.firstEnterAt, attribution.attributedAt, attribution.attributionModel,
-  attribution.touchId, attributionSnapshot, distribution.distributorUserId, distribution.distributionCode,
-  distribution.relationId,
-  )
-  const created = one('SELECT * FROM orders WHERE id = ?', Number(info.lastInsertRowid))
-  recordEvent({
-    type: 'order_created', userId, visitorId, dramaId: created.drama_id,
-    path: productType === 'subscription' ? 'subscription' : `single/${created.drama_id}`,
-    value: amount, meta: { orderId: created.id, productType, planId: created.plan_id, channel: channelCode }, ip, ua,
+    attribution.touchId, attributionSnapshot, distribution.distributorUserId, distribution.distributionCode,
+    distribution.relationId,
+    )
+    const order = one('SELECT * FROM orders WHERE id = ?', Number(info.lastInsertRowid))
+    // 券的额度与每人限用在这里预占；抛错整单回滚，不会留下「没券可用」的订单。
+    reserveCoupon(couponResult.coupon, userId, order.id)
+    return { order, reused: false }
   })
-  return paymentOf(created)
+
+  const order = created.order
+  if (created.reused) {
+    if (!order.visitor_id && visitorId) order.visitor_id = visitorId
+    return { ...paymentOf(order), reused: true }
+  }
+  recordEvent({
+    type: 'order_created', userId, visitorId, dramaId: order.drama_id,
+    path: productType === 'subscription' ? 'subscription' : `single/${order.drama_id}`,
+    value: amount, meta: { orderId: order.id, productType, planId: order.plan_id, channel: channelCode }, ip, ua,
+  })
+  return paymentOf(order)
 }
 
 /* ---------------- 支付：发放 + 幂等 ---------------- */
@@ -339,7 +410,13 @@ export function markPaid({ outTradeNo, orderId, channel, channelTxnId, amount, c
     // 佣金生成和支付同事务落 outbox；派生失败可重试，不会静默丢失。
     run('INSERT OR IGNORE INTO commission_outbox (order_id) VALUES (?)', order.id)
     if (order.coupon_id) {
-      run('UPDATE coupons SET used = used + 1 WHERE id = ?', order.coupon_id)
+      // 券的额度在下单时就按 coupon_redemptions 预占过（见 reserveCoupon），这里只累计「已支付使用」次数。
+      // 条件 UPDATE 兜底：历史数据让 used 追平 total 时不会越过上限；已确认的支付不能因此回滚，只记告警。
+      const claimed = run(`UPDATE coupons SET used = used + 1
+        WHERE id = ? AND (total IS NULL OR total <= 0 OR used < total)`, order.coupon_id)
+      if (Number(claimed.changes ?? 0) !== 1) {
+        logWarn('commerce.coupon_used_overflow', { orderId: order.id, couponId: order.coupon_id, outTradeNo: order.out_trade_no })
+      }
       run('INSERT OR IGNORE INTO coupon_redemptions (coupon_id, user_id, order_id) VALUES (?, ?, ?)', order.coupon_id, order.user_id, order.id)
     }
     const paid = one('SELECT * FROM orders WHERE id = ?', order.id)
@@ -423,64 +500,95 @@ export function handleUsdtNotify({ outTradeNo, txid, amount, confirmations, chan
 
 export function createRefund({ orderId, amount, reason, operatorId }) {
   if (!reason || String(reason).trim().length < 4) throw new CommerceError('reason_required', '退款原因必填（≥4 字）')
-  const order = one('SELECT * FROM orders WHERE id = ?', orderId)
-  if (!order) throw new CommerceError('order_not_found', '订单不存在', 404)
-  if (!['paid', 'fulfilled'].includes(order.status)) throw new CommerceError('order_not_refundable', '当前订单状态不可退款')
-  const refundAmount = Number(amount ?? order.amount_cny)
-  if (refundAmount <= 0 || refundAmount > order.amount_cny - order.refunded_amount + 0.001) {
-    throw new CommerceError('refund_amount_invalid', '退款金额不合法')
-  }
-  const pending = one("SELECT * FROM refunds WHERE order_id = ? AND status IN ('pending','approved')", order.id)
-  if (pending) throw new CommerceError('refund_exists', '该订单已有待处理退款')
-  const info = run("INSERT INTO refunds (order_id, amount, reason, operator_id, status) VALUES (?, ?, ?, ?, 'pending')",
-    order.id, refundAmount, reason, operatorId ?? null)
-  return one('SELECT * FROM refunds WHERE id = ?', Number(info.lastInsertRowid))
+  // 读订单 → 校验剩余可退金额 → 插退款单必须在同一个 BEGIN IMMEDIATE 里，
+  // 否则两笔并发退款都能通过「amount ≤ 剩余可退」的检查，把订单退成负数/超额。
+  return tx(() => {
+    const order = one('SELECT * FROM orders WHERE id = ?', orderId)
+    if (!order) throw new CommerceError('order_not_found', '订单不存在', 404)
+    if (!['paid', 'fulfilled'].includes(order.status)) throw new CommerceError('order_not_refundable', '当前订单状态不可退款')
+    const refundAmount = Number(amount ?? order.amount_cny)
+    if (refundAmount <= 0 || refundAmount > order.amount_cny - order.refunded_amount + 0.001) {
+      throw new CommerceError('refund_amount_invalid', '退款金额不合法')
+    }
+    const pending = one("SELECT * FROM refunds WHERE order_id = ? AND status IN ('pending','approved')", order.id)
+    if (pending) throw new CommerceError('refund_exists', '该订单已有待处理退款')
+    const info = run("INSERT INTO refunds (order_id, amount, reason, operator_id, status) VALUES (?, ?, ?, ?, 'pending')",
+      order.id, refundAmount, reason, operatorId ?? null)
+    return one('SELECT * FROM refunds WHERE id = ?', Number(info.lastInsertRowid))
+  })
 }
 
+/**
+ * 审批 = 置 approved + 真正执行退款，两件事在同一个 BEGIN IMMEDIATE 事务里。
+ * 以前置状态在事务外、执行在事务内：执行抛错就留下一张「已批准」的死单
+ * （审批和驳回都只接受 pending），既没退钱也没释放权益。现在执行失败整笔回滚，
+ * 退款单保持 pending，可以直接重新审批。
+ */
 export function approveRefund({ refundId, approverId }) {
-  const refund = one('SELECT * FROM refunds WHERE id = ?', refundId)
-  if (!refund) throw new CommerceError('refund_not_found', '退款单不存在', 404)
-  if (refund.status !== 'pending') throw new CommerceError('refund_state_invalid', '退款单状态不可审批')
-  if (refund.operator_id && Number(refund.operator_id) === Number(approverId)) {
-    throw new CommerceError('dual_control_required', '退款需双人复核：审批人不能是发起人')
-  }
-  run("UPDATE refunds SET status = 'approved', approver_id = ? WHERE id = ?", approverId ?? null, refund.id)
-  return executeRefund(refund.id)
+  const result = tx(() => {
+    const refund = one('SELECT * FROM refunds WHERE id = ?', refundId)
+    if (!refund) throw new CommerceError('refund_not_found', '退款单不存在', 404)
+    if (refund.status !== 'pending') throw new CommerceError('refund_state_invalid', '退款单状态不可审批')
+    if (refund.operator_id && Number(refund.operator_id) === Number(approverId)) {
+      throw new CommerceError('dual_control_required', '退款需双人复核：审批人不能是发起人')
+    }
+    const claimed = run("UPDATE refunds SET status = 'approved', approver_id = ? WHERE id = ? AND status = 'pending'",
+      approverId ?? null, refund.id)
+    if (Number(claimed.changes ?? 0) !== 1) throw new CommerceError('refund_state_invalid', '退款单状态已被他人处理')
+    return performRefund(refund.id)
+  })
+  return finishRefund(result)
 }
 
 export function executeRefund(refundId) {
-  const result = tx(() => {
-    const refund = one('SELECT * FROM refunds WHERE id = ?', refundId)
-    const order = one('SELECT * FROM orders WHERE id = ?', refund.order_id)
-    // 渠道退款：mock 直接成功；支付宝/USDT 需真实接口，这里记录待人工执行
-    const channel = order.channel
-    if (channel === 'alipay') {
-      const pay = getSetting('pay', {}).alipay ?? {}
-      if (!pay.refundEnabled) {
-        run("UPDATE refunds SET status = 'approved' WHERE id = ?", refund.id)
-        return { refund, warning: '支付宝退款接口未启用：需在支付配置开启后再执行' }
+  return finishRefund(tx(() => performRefund(refundId)))
+}
+
+/** 退款先落账，佣金冲减失败不阻断退款；outbox 保留任务并定时重试。 */
+function finishRefund(result) {
+  if (result?.ok !== false && result?.refund?.status === 'done') processCommissionReversalOutbox(result.refund.id)
+  return result
+}
+
+/** 退款的实际记账（调用方必须已经开好事务）：冲减退款额 → 回收权益 → 落佣金冲减 outbox。 */
+function performRefund(refundId) {
+  const refund = one('SELECT * FROM refunds WHERE id = ?', refundId)
+  if (!refund) throw new CommerceError('refund_not_found', '退款单不存在', 404)
+  if (refund.status === 'done') return { ok: false, reason: 'refund_done', refund }
+  if (refund.status === 'rejected') throw new CommerceError('refund_state_invalid', '退款单已驳回，不可执行')
+  const order = one('SELECT * FROM orders WHERE id = ?', refund.order_id)
+  if (!order) throw new CommerceError('order_not_found', '订单不存在', 404)
+  // 渠道退款：mock 直接成功；支付宝/USDT 需真实接口，这里记录待人工执行
+  const channel = order.channel
+  if (channel === 'alipay') {
+    const pay = getSetting('pay', {}).alipay ?? {}
+    if (!pay.refundEnabled) {
+      // 网关退款没开：单据停在 approved 等人工在网关上执行，但返回必须是明确的失败语义，
+      // 不能让调用方以为钱已经退了。
+      run("UPDATE refunds SET status = 'approved' WHERE id = ?", refund.id)
+      return {
+        ok: false,
+        reason: 'refund_disabled',
+        refund: one('SELECT * FROM refunds WHERE id = ?', refund.id),
+        warning: '支付宝退款接口未启用：需在支付配置开启后再执行',
       }
     }
-    const nextRefundedAmount = Number(order.refunded_amount ?? 0) + Number(refund.amount)
-    const fullyRefunded = nextRefundedAmount >= Number(order.amount_cny) - 0.001
-    const revoked = fullyRefunded ? revokeByOrder(order.id) : { subscriptions: 0, purchases: 0 }
-    // 部分退款不撤销全部权益，订单保持可继续退剩余金额。
-    const nextStatus = fullyRefunded ? 'refunded' : (order.fulfilled_at ? 'fulfilled' : 'paid')
-    run("UPDATE orders SET status = ?, refunded_amount = refunded_amount + ? WHERE id = ?", nextStatus, refund.amount, order.id)
-    run("UPDATE refunds SET status = 'done', done_at = datetime('now') WHERE id = ?", refund.id)
-    run(`INSERT OR IGNORE INTO commission_reversal_outbox
-      (refund_id, order_id, total_refunded_amount) VALUES (?, ?, ?)`,
-    refund.id, order.id, nextRefundedAmount)
-    return {
-      refund: one('SELECT * FROM refunds WHERE id = ?', refund.id), revoked,
-      order: { ...order, refunded_amount: nextRefundedAmount }, fullyRefunded,
-    }
-  })
-  // 退款先落账，佣金冲减失败不阻断退款；outbox 保留任务并定时重试。
-  if (result.refund?.status === 'done') {
-    processCommissionReversalOutbox(result.refund.id)
   }
-  return result
+  const nextRefundedAmount = Number(order.refunded_amount ?? 0) + Number(refund.amount)
+  const fullyRefunded = nextRefundedAmount >= Number(order.amount_cny) - 0.001
+  const revoked = fullyRefunded ? revokeByOrder(order.id) : { subscriptions: 0, purchases: 0 }
+  // 部分退款不撤销全部权益，订单保持可继续退剩余金额。
+  const nextStatus = fullyRefunded ? 'refunded' : (order.fulfilled_at ? 'fulfilled' : 'paid')
+  run("UPDATE orders SET status = ?, refunded_amount = refunded_amount + ? WHERE id = ?", nextStatus, refund.amount, order.id)
+  run("UPDATE refunds SET status = 'done', done_at = datetime('now') WHERE id = ?", refund.id)
+  run(`INSERT OR IGNORE INTO commission_reversal_outbox
+    (refund_id, order_id, total_refunded_amount) VALUES (?, ?, ?)`,
+  refund.id, order.id, nextRefundedAmount)
+  return {
+    ok: true,
+    refund: one('SELECT * FROM refunds WHERE id = ?', refund.id), revoked,
+    order: { ...order, refunded_amount: nextRefundedAmount }, fullyRefunded,
+  }
 }
 
 export function processCommissionReversalOutbox(refundId = null, { limit = 50 } = {}) {
@@ -533,12 +641,32 @@ export function reconcile() {
   const stuckPaid = all("SELECT * FROM orders WHERE status = 'paid'")
   const fixes = []
   for (const order of missingPayment) {
-    const result = markPaid({ orderId: order.id, channel: order.channel ?? 'unknown', channelTxnId: `RECON-${order.out_trade_no}`, raw: { source: 'reconcile' } })
-    fixes.push({ orderId: order.id, action: '补录支付并发权益', duplicate: result.duplicate })
+    // 真正补录：这些订单已经是 fulfilled，走 markPaid 只会命中「状态已终态」直接 duplicate，
+    // 于是每轮对账都「补录」却什么都没写（payments 永久缺失）。这里按订单自身金额/渠道补一行，
+    // 流水号带 reconcile: 前缀可追溯，UNIQUE(channel_txn_id) + 事务内先查保证重复对账不会多写。
+    const inserted = tx(() => {
+      if (one('SELECT id FROM payments WHERE order_id = ?', order.id)) return false
+      const info = run(`INSERT OR IGNORE INTO payments
+        (order_id, channel, channel_txn_id, amount, currency, verified, raw_json)
+        VALUES (?, ?, ?, ?, ?, 0, ?)`,
+      order.id, order.channel ?? 'unknown', `reconcile:${order.out_trade_no}`,
+      Number(order.amount_cny), order.currency ?? 'CNY',
+      JSON.stringify({ source: 'reconcile', orderStatus: order.status }).slice(0, 4000))
+      return Number(info.changes ?? 0) > 0
+    })
+    fixes.push({
+      orderId: order.id,
+      action: inserted ? '补录支付流水' : '支付流水已存在',
+      channelTxnId: `reconcile:${order.out_trade_no}`,
+      duplicate: !inserted,
+    })
   }
   for (const order of stuckPaid) {
-    fulfillOrder(order)
-    run("UPDATE orders SET status = 'fulfilled', fulfilled_at = datetime('now') WHERE id = ?", order.id)
+    // 补发权益与改状态同事务：权益发放本身按 order_id 幂等，重跑不会重复发。
+    tx(() => {
+      fulfillOrder(order)
+      run("UPDATE orders SET status = 'fulfilled', fulfilled_at = datetime('now') WHERE id = ? AND status = 'paid'", order.id)
+    })
     fixes.push({ orderId: order.id, action: '补发权益' })
   }
   return {
@@ -555,14 +683,19 @@ export function reconcile() {
 export function commerceStats() {
   const sum = (sql) => Number(one(sql)?.n ?? 0)
   return {
-    revenue: sum("SELECT COALESCE(SUM(amount_cny),0) AS n FROM orders WHERE status IN ('paid','fulfilled')"),
-    refunded: sum("SELECT COALESCE(SUM(refunded_amount),0) AS n FROM orders WHERE status = 'refunded'"),
+    // 净额口径：订单金额减去已退金额（含部分退款），部分退款的订单不能再按原价计入收入；
+    // 全额退款单已经落到 refunded，它的净额本身就是 0，所以 income 只算 paid/fulfilled。
+    revenue: sum("SELECT COALESCE(SUM(amount_cny - refunded_amount),0) AS n FROM orders WHERE status IN ('paid','fulfilled')"),
+    grossRevenue: sum("SELECT COALESCE(SUM(amount_cny),0) AS n FROM orders WHERE status IN ('paid','fulfilled')"),
+    refunded: sum("SELECT COALESCE(SUM(refunded_amount),0) AS n FROM orders WHERE status IN ('paid','fulfilled','refunded')"),
     orders: sum('SELECT COUNT(*) AS n FROM orders'),
     paidOrders: sum("SELECT COUNT(*) AS n FROM orders WHERE status IN ('paid','fulfilled')"),
     pendingOrders: sum("SELECT COUNT(*) AS n FROM orders WHERE status IN ('created','pending')"),
     pendingRefunds: sum("SELECT COUNT(*) AS n FROM refunds WHERE status = 'pending'"),
     activeSubscriptions: sum("SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'active' AND datetime(valid_to) > datetime('now')"),
-    purchases: sum("SELECT COUNT(*) AS n FROM purchases WHERE status = 'active'"),
+    // 已过期租赁不再算「在售所有权」，否则 purchases 永远偏高。
+    purchases: sum(`SELECT COUNT(*) AS n FROM purchases WHERE status = 'active'
+      AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))`),
   }
 }
 
@@ -638,9 +771,19 @@ export function orderDto(row) {
 
 /** 订单超时关单（定时任务每分钟跑）。 */
 export function closeExpiredOrders() {
-  const result = run(`UPDATE orders SET status = 'closed'
-    WHERE status IN ('created','pending') AND datetime(expires_at) < datetime('now')`)
-  return Number(result.changes ?? 0)
+  // 关单与「释放券预占」在同一个事务里：先挑出过期单，删掉它们占用的券行，再统一置 closed。
+  // 否则未支付订单会把券额度永久占住（用户重新下单会被每人限用/总量挡住）。
+  return tx(() => {
+    const stale = all(`SELECT id, coupon_id FROM orders
+      WHERE status IN ('created','pending') AND datetime(expires_at) < datetime('now')`)
+    if (!stale.length) return 0
+    for (const order of stale) {
+      if (order.coupon_id) run('DELETE FROM coupon_redemptions WHERE order_id = ?', order.id)
+    }
+    const result = run(`UPDATE orders SET status = 'closed'
+      WHERE status IN ('created','pending') AND datetime(expires_at) < datetime('now')`)
+    return Number(result.changes ?? 0)
+  })
 }
 
 /* --- 支付宝（RSA2） --- */
@@ -845,15 +988,12 @@ export function setDefaultChannel({ channelId }) {
   const channel = one('SELECT * FROM pay_channels WHERE id = ?', Number(channelId))
   if (!channel) throw new CommerceError('channel_not_found', '渠道不存在', 404)
   if (channel.status !== 'enabled') throw new CommerceError('channel_disabled', '只有启用中的渠道可设为默认')
-  db.exec('BEGIN')
-  try {
+  // 同一个 scene 的「清零 + 设默认」放进 tx()：走 BEGIN IMMEDIATE + busy 退避，
+  // 不再自己手写 BEGIN（deferred），也不会在并发下出现双默认。
+  tx(() => {
     run('UPDATE pay_channels SET is_default = 0 WHERE scene = ?', channel.scene)
     run('UPDATE pay_channels SET is_default = 1, updated_at = datetime(\'now\') WHERE id = ?', channel.id)
-    db.exec('COMMIT')
-  } catch (error) {
-    db.exec('ROLLBACK')
-    throw error
-  }
+  })
   return one('SELECT * FROM pay_channels WHERE id = ?', channel.id)
 }
 

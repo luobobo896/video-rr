@@ -26,7 +26,7 @@ import { pollDeviceFlow, startDeviceFlow } from './mailer-oauth.mjs'
 import { analyticsReport } from './analytics.mjs'
 import { resolveRegions } from './geoip.mjs'
 import { buildCodeEmail, buildPasswordResetEmail } from './email-template.mjs'
-import { logError, logInfo } from './logger.mjs'
+import { logError, logInfo, logWarn } from './logger.mjs'
 import { createTag, deleteTag, listTags, setDramaTags, setTagStatus, tagTree, tagsOfDrama, updateTag } from './tags.mjs'
 import { createTrack, deleteTrack, listEpisodeTracks, updateTrack } from './tracks.mjs'
 import { refreshAutoRanks, refreshRank, RANK_STRATEGIES } from './rank.mjs'
@@ -45,12 +45,53 @@ import {
 import { completenessOf, scrapeTitle } from './scrape.mjs'
 import { autofillBanners, refreshArtwork } from './artwork.mjs'
 import { clearLoginFailures, clientIpOf, guardStats, loginLockSeconds, noteLoginFailure } from './ratelimit.mjs'
-import { issueAssistCode } from './otp.mjs'
+import { issueAssistCode, otpTestHookEnabled } from './otp.mjs'
 import { usdtWatchStatus } from './usdt-watch.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
 const one = (sql, ...args) => db.prepare(sql).get(...args)
 const run = (sql, ...args) => db.prepare(sql).run(...args)
+
+/**
+ * 数值参数夹取：NaN/Infinity/空串一律落到 fallback，再夹进 [min, max]。
+ * 全文件的查询参数、分页、天数都必须过这里——`Number('abc')` 是 NaN，
+ * 直接进 SQL 会变成 `LIMIT NULL`（等于不限），进 Date 会抛 RangeError（500）。
+ */
+const intOf = (value, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) => {
+  const number = Math.floor(Number(value))
+  if (!Number.isFinite(number)) return fallback
+  return Math.min(max, Math.max(min, number))
+}
+
+/**
+ * 小数夹取：价格/折扣额这类 REAL 字段用（intOf 会把 0.85 折截成 0）。
+ */
+const numOf = (value, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.min(max, Math.max(min, number))
+}
+
+/**
+ * 事务包装（node:sqlite 没有内置 helper）：多写路径要么全成、要么全回滚。
+ * 只接受同步回调；嵌套调用直接复用外层事务，避免 "cannot start a transaction within a transaction"。
+ */
+let txDepth = 0
+function tx(fn) {
+  if (txDepth > 0) return fn()
+  db.exec('BEGIN IMMEDIATE')
+  txDepth += 1
+  try {
+    const result = fn()
+    db.exec('COMMIT')
+    return result
+  } catch (error) {
+    try { db.exec('ROLLBACK') } catch { /* 回滚失败就保留原始错误 */ }
+    throw error
+  } finally {
+    txDepth -= 1
+  }
+}
 const dramaDto = (row) => (row ? {
   ...row,
   isAdult: Boolean(row.is_adult),
@@ -84,8 +125,9 @@ const MISSING_LABEL = {
 const labelMissing = (keys) => keys.map((key) => MISSING_LABEL[key] ?? key).join('、')
 
 /** 剧集上架前的必填校验：标题 / 内容类型 / 付费模式 / 封面 / 年份 / 地区 / 评分。 */
-function dramaCompleteness(row) {
-  const policy = row?.id ? policyOf(row.id) : null
+function dramaCompleteness(row, policy = undefined) {
+  // policy 可由调用方预取传入（列表页批量查），不传时按需查一次
+  const resolved = policy === undefined ? (row?.id ? policyOf(row.id) : null) : policy
   return completenessOf({
     title: row?.title,
     category: row?.category,
@@ -93,7 +135,7 @@ function dramaCompleteness(row) {
     year: row?.year,
     area: row?.area,
     score: row?.score,
-    access: policy ? { mode: policy.access_mode } : null,
+    access: resolved ? { mode: resolved.access_mode } : null,
   })
 }
 
@@ -169,6 +211,17 @@ function policyValidationError(policy) {
   if (policy.singlePrice <= 0) return '一次性收费必须填写大于 0 的价格'
   if (policy.purchaseKind === 'rental' && policy.rentalHours < 1) return '租赁时长至少 1 小时'
   return ''
+}
+
+/**
+ * 归一化 + 校验一步到位：通过时返回 `{ policy }`，不合法时返回 `{ error }`。
+ * 电影没有分集，首集免费一律归零（此前每个调用点各写一遍）；策略组同样要过这道闸。
+ */
+function resolvePolicy(input = {}, meta = {}) {
+  const policy = input?.group ? policyFromGroup(input.group) : normalizePolicy(input ?? {}, meta)
+  if (isMovieMeta(meta.contentType ?? input?.contentType, meta.category ?? input?.category)) policy.freeEpisodes = 0
+  const error = policyValidationError(policy)
+  return error ? { error } : { policy }
 }
 
 function policyFromGroup(group) {
@@ -280,6 +333,8 @@ const PERM = {
   coupons: 'commerce.coupon.write',
   orders: 'finance.order.read',
   orderConfirm: 'finance.order.confirm',
+  // 订单域的写权限：权限目录里没有 finance.order.write，写操作统一挂 finance.order.confirm
+  orderWrite: 'finance.order.confirm',
   tags: 'tag.read',
   tagRead: 'tag.read',
   tagWrite: 'tag.write',
@@ -293,11 +348,15 @@ const PERM = {
   sections: 'ops.section.write',
   ranks: 'ops.rank.write',
   review: 'content.review',
+  // 审核动作是写操作：content.review 只是菜单/读码，真正的写权限是 content.review.write
+  reviewWrite: 'content.review.write',
   users: 'user.read',
   userManage: 'user.manage',
   userPassword: 'user.password',
   userAssist: 'user.login.assist',
   cs: 'cs.toolkit',
+  // 补发权益的写权限：cs.toolkit 只是客服工具箱的菜单码，cs.toolkit.grant 才是发权益
+  csGrant: 'cs.toolkit.grant',
   roles: 'admin.read',
   rolesWrite: 'admin.write',
   menus: 'system.menu',
@@ -307,7 +366,6 @@ const PERM = {
   emailRead: 'email.read',
   emailWrite: 'email.write',
   audit: 'audit.read',
-  analytics: 'analytics.read',
   paySettings: 'admin.write',
   channelRead: 'growth.channel.read',
   channelWrite: 'growth.channel.write',
@@ -399,7 +457,11 @@ const fail = (res, error, fallback = '操作失败') => {
             : status === 413 ? '0413'
               : status === 502 ? '0502'
                 : status === 504 ? '0504' : '0500'
-  return send(res, {}, code, error?.message ?? fallback, status)
+  // rbac.mjs 的错误带业务码（unknown_permission / protected_permission / unknown_role …），
+  // 前端要按它区分「参数写错」和「权限不够」，所以放进 data 里带出去，别只剩一句 message。
+  const detail = typeof error?.code === 'string' && /^[a-z_]{3,40}$/.test(error.code) ? error.code : null
+  const data = detail ? { error: detail, ...(error?.extra ?? {}) } : {}
+  return send(res, data, code, error?.message ?? fallback, status)
 }
 
 const deny = (perm) => {
@@ -511,8 +573,8 @@ const deny = (perm) => {
   if (pathname === '/admin/api/channels/analytics' && method === 'GET') {
     if (!guard(PERM.channelRead)) return deny(PERM.channelRead)
     return send(res, analyticsChannelRows({
-      days: Number(url.searchParams.get('days') ?? 7),
-      channelId: Number(url.searchParams.get('channelId') ?? 0) || undefined,
+      days: intOf(url.searchParams.get('days') ?? 7, 7, 1, 365),
+      channelId: intOf(url.searchParams.get('channelId') ?? 0, 0, 0) || undefined,
     }))
   }
 
@@ -544,10 +606,10 @@ const deny = (perm) => {
   if (pathname === '/admin/api/content-stats' && method === 'GET') {
     if (!guard(PERM.contentStats)) return deny(PERM.contentStats)
     return send(res, contentAnalytics({
-      days: Number(url.searchParams.get('days') ?? 7),
+      days: intOf(url.searchParams.get('days') ?? 7, 7, 1, 365),
       contentType: url.searchParams.get('contentType') ?? 'all',
       category: url.searchParams.get('category') ?? 'all',
-      contentId: Number(url.searchParams.get('contentId') ?? 0) || undefined,
+      contentId: intOf(url.searchParams.get('contentId') ?? 0, 0, 0) || undefined,
     }))
   }
 
@@ -561,7 +623,7 @@ const deny = (perm) => {
 
   if (pathname === '/admin/api/content-stats/refresh' && method === 'POST') {
     if (!guard(PERM.contentStatsWrite)) return deny(PERM.contentStatsWrite)
-    const stats = rebuildContentStats({ days: Number(body.days ?? 7) })
+    const stats = rebuildContentStats({ days: intOf(body.days ?? 7, 7, 1, 365) })
     const ranks = refreshContentRanks()
     log('growth.content.refresh', 'content_stats', null, null, { stats, ranks: ranks.length }, body.reason)
     return send(res, { stats, ranks })
@@ -593,12 +655,12 @@ const deny = (perm) => {
 
   if (pathname === '/admin/api/distribution/overview' && method === 'GET') {
     if (!guard(PERM.distributionRead)) return deny(PERM.distributionRead)
-    return send(res, distributionAnalytics({ days: Number(url.searchParams.get('days') ?? 7) }))
+    return send(res, distributionAnalytics({ days: intOf(url.searchParams.get('days') ?? 7, 7, 1, 365) }))
   }
 
   if (pathname === '/admin/api/distribution/dashboard' && method === 'GET') {
     if (!guard(PERM.distributionRead)) return deny(PERM.distributionRead)
-    return send(res, distributionDashboard({ days: Number(url.searchParams.get('days') ?? 30) }))
+    return send(res, distributionDashboard({ days: intOf(url.searchParams.get('days') ?? 30, 30, 1, 365) }))
   }
 
   if (pathname === '/admin/api/distribution/payout-config' && method === 'GET') {
@@ -627,8 +689,8 @@ const deny = (perm) => {
     if (!guard(PERM.distributionRead)) return deny(PERM.distributionRead)
     return send(res, pageWithdrawals({
       status: url.searchParams.get('status') || undefined,
-      page: Number(url.searchParams.get('page') ?? 1),
-      pageSize: Number(url.searchParams.get('pageSize') ?? 20),
+      page: intOf(url.searchParams.get('page') ?? 1, 1, 1),
+      pageSize: intOf(url.searchParams.get('pageSize') ?? 20, 20, 1, 200),
     }))
   }
 
@@ -646,47 +708,47 @@ const deny = (perm) => {
   if (pathname === '/admin/api/distribution/relations' && method === 'GET') {
     if (!guard(PERM.distributionRead)) return deny(PERM.distributionRead)
     return send(res, pageRelations({
-      ancestorUserId: Number(url.searchParams.get('ancestorUserId') ?? 0) || undefined,
-      depth: Number(url.searchParams.get('depth') ?? 0) || undefined,
+      ancestorUserId: intOf(url.searchParams.get('ancestorUserId') ?? 0, 0, 0) || undefined,
+      depth: intOf(url.searchParams.get('depth') ?? 0, 0, 0, 20) || undefined,
       status: url.searchParams.get('status') || undefined,
       riskStatus: url.searchParams.get('riskStatus') || undefined,
-      page: Number(url.searchParams.get('page') ?? 1),
-      pageSize: Number(url.searchParams.get('pageSize') ?? 20),
+      page: intOf(url.searchParams.get('page') ?? 1, 1, 1),
+      pageSize: intOf(url.searchParams.get('pageSize') ?? 20, 20, 1, 200),
     }))
   }
 
   if (pathname === '/admin/api/distribution/tree' && method === 'GET') {
     if (!guard(PERM.distributionRead)) return deny(PERM.distributionRead)
-    const rootUserId = Number(url.searchParams.get('rootUserId') ?? 0)
+    const rootUserId = intOf(url.searchParams.get('rootUserId') ?? 0, 0, 0)
     if (!rootUserId) return send(res, {}, '0400', 'rootUserId 必填', 400)
-    return send(res, { list: teamTree({ rootUserId, maxDepth: Number(url.searchParams.get('maxDepth') ?? 3) }) })
+    return send(res, { list: teamTree({ rootUserId, maxDepth: intOf(url.searchParams.get('maxDepth') ?? 3, 3, 1, 10) }) })
   }
 
   if (pathname === '/admin/api/distribution/commissions' && method === 'GET') {
     if (!guard(PERM.distributionRead)) return deny(PERM.distributionRead)
     return send(res, pageCommissions({
-      distributorUserId: Number(url.searchParams.get('distributorUserId') ?? 0) || undefined,
-      commissionLevel: Number(url.searchParams.get('commissionLevel') ?? 0) || undefined,
+      distributorUserId: intOf(url.searchParams.get('distributorUserId') ?? 0, 0, 0) || undefined,
+      commissionLevel: intOf(url.searchParams.get('commissionLevel') ?? 0, 0, 0, 20) || undefined,
       status: url.searchParams.get('status') || undefined,
-      page: Number(url.searchParams.get('page') ?? 1),
-      pageSize: Number(url.searchParams.get('pageSize') ?? 20),
+      page: intOf(url.searchParams.get('page') ?? 1, 1, 1),
+      pageSize: intOf(url.searchParams.get('pageSize') ?? 20, 20, 1, 200),
     }))
   }
 
   if (pathname === '/admin/api/distribution/settlements' && method === 'GET') {
     if (!guard(PERM.distributionRead)) return deny(PERM.distributionRead)
     return send(res, pageSettlements({
-      distributorUserId: Number(url.searchParams.get('distributorUserId') ?? 0) || undefined,
+      distributorUserId: intOf(url.searchParams.get('distributorUserId') ?? 0, 0, 0) || undefined,
       status: url.searchParams.get('status') || undefined,
-      page: Number(url.searchParams.get('page') ?? 1),
-      pageSize: Number(url.searchParams.get('pageSize') ?? 20),
+      page: intOf(url.searchParams.get('page') ?? 1, 1, 1),
+      pageSize: intOf(url.searchParams.get('pageSize') ?? 20, 20, 1, 200),
     }))
   }
 
   if (pathname === '/admin/api/distribution/settlements' && method === 'POST') {
     if (!guard(PERM.distributionSettle)) return deny(PERM.distributionSettle)
     const result = createSettlement({
-      distributorUserId: Number(body.distributorUserId),
+      distributorUserId: intOf(body.distributorUserId, 0, 1),
       periodStart: body.periodStart,
       periodEnd: body.periodEnd,
       createdBy: principal.admin.id,
@@ -778,17 +840,44 @@ const deny = (perm) => {
     const safePage = Math.min(page, pages)
     const offset = (safePage - 1) * pageSize
     const rows = all(`SELECT * FROM dramas ${filters.clause} ORDER BY id DESC LIMIT ? OFFSET ?`, ...filters.args, pageSize, offset)
+    // 每页一次批量聚合，替掉逐行 COUNT + policyOf（100 行曾经要 400+ 次查询）
+    const ids = rows.map((drama) => drama.id)
+    const marks = ids.map(() => '?').join(', ')
+    const episodeStats = new Map()
+    const policyMap = new Map()
+    if (ids.length) {
+      for (const stats of all(`SELECT drama_id, COUNT(*) AS episode_count,
+          SUM(CASE WHEN status = 'ready' AND hls_path IS NOT NULL THEN 1 ELSE 0 END) AS ready_episodes
+        FROM episodes WHERE drama_id IN (${marks}) GROUP BY drama_id`, ...ids)) {
+        episodeStats.set(stats.drama_id, stats)
+      }
+      for (const policy of all(`SELECT p.drama_id, p.policy_group_id, p.updated_at, g.name AS policy_group_name,
+          COALESCE(g.access_mode, p.access_mode) AS access_mode,
+          COALESCE(g.free_episodes, p.free_episodes) AS free_episodes,
+          COALESCE(g.trial_seconds, p.trial_seconds) AS trial_seconds,
+          COALESCE(g.single_price_cny, p.single_price_cny) AS single_price_cny,
+          COALESCE(g.purchase_kind, p.purchase_kind) AS purchase_kind,
+          COALESCE(g.rental_hours, p.rental_hours) AS rental_hours
+        FROM content_policies p LEFT JOIN policy_groups g ON g.id = p.policy_group_id
+        WHERE p.drama_id IN (${marks})`, ...ids)) {
+        policyMap.set(policy.drama_id, policy)
+      }
+    }
     return send(res, {
-      list: rows.map((drama) => ({
-        ...drama,
-        isAdult: Boolean(drama.is_adult),
-        releaseDate: drama.release_date ?? null,
-        updatedAt: drama.updated_at ?? null,
-        episodeCount: one('SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ?', drama.id).n,
-        readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE drama_id = ? AND status = 'ready' AND hls_path IS NOT NULL", drama.id).n,
-        policy: policyOf(drama.id) ?? null,
-        completeness: dramaCompleteness(drama),
-      })),
+      list: rows.map((drama) => {
+        const policy = policyMap.get(drama.id) ?? null
+        const stats = episodeStats.get(drama.id)
+        return {
+          ...drama,
+          isAdult: Boolean(drama.is_adult),
+          releaseDate: drama.release_date ?? null,
+          updatedAt: drama.updated_at ?? null,
+          episodeCount: Number(stats?.episode_count ?? 0),
+          readyEpisodes: Number(stats?.ready_episodes ?? 0),
+          policy,
+          completeness: dramaCompleteness(drama, policy),
+        }
+      }),
       options: ADMIN_OPTIONS,
       total,
       page: safePage,
@@ -821,9 +910,8 @@ const deny = (perm) => {
     const name = String(body?.name ?? '').trim()
     if (!name) return send(res, {}, '0400', '策略组名称必填', 400)
     if (one('SELECT id FROM policy_groups WHERE name = ?', name)) return send(res, {}, '0409', '策略组名称已存在', 409)
-    const policy = normalizePolicy(body)
-    const invalid = policyValidationError(policy)
-    if (invalid) return send(res, {}, '0400', invalid, 400)
+    const { policy, error } = resolvePolicy(body)
+    if (error) return send(res, {}, '0400', error, 400)
     const info = run(`INSERT INTO policy_groups
       (name, description, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
@@ -841,9 +929,8 @@ const deny = (perm) => {
     const name = String(body?.name ?? '').trim()
     if (!name) return send(res, {}, '0400', '策略组名称必填', 400)
     if (one('SELECT id FROM policy_groups WHERE name = ? AND id <> ?', name, id)) return send(res, {}, '0409', '策略组名称已存在', 409)
-    const policy = normalizePolicy(body)
-    const invalid = policyValidationError(policy)
-    if (invalid) return send(res, {}, '0400', invalid, 400)
+    const { policy, error } = resolvePolicy(body)
+    if (error) return send(res, {}, '0400', error, 400)
     run(`UPDATE policy_groups SET name = ?, description = ?, access_mode = ?, free_episodes = ?,
       trial_seconds = ?, single_price_cny = ?, purchase_kind = ?, rental_hours = ?, updated_at = datetime('now')
       WHERE id = ?`, name, String(body?.description ?? '').trim(), policy.accessMode, policy.freeEpisodes,
@@ -891,7 +978,7 @@ const deny = (perm) => {
     const sample = all(`SELECT id, title FROM dramas ${clause} ORDER BY id DESC LIMIT 5`, ...args)
     if (body?.dryRun) return send(res, { dryRun: true, matched, sample, filters, dramaIds, group })
     if (!matched) return send(res, { dryRun: false, matched: 0, updated: 0, sample: [], filters, group })
-    const invalidGroup = policyValidationError(policyFromGroup(group))
+    const { error: invalidGroup } = resolvePolicy({ group })
     if (invalidGroup) return send(res, {}, '0400', invalidGroup, 400)
     const updated = writePolicyGroup(group, clause, args)
     log('content.policyGroup.assign', 'policy_group', group.id, filters ?? { dramaIds }, { matched, updated })
@@ -915,44 +1002,40 @@ const deny = (perm) => {
     if (!title) return send(res, {}, '0400', '请先填写剧集标题', 400)
     const releaseDate = String(body.releaseDate ?? '').trim()
     if (!validDate(releaseDate)) return send(res, {}, '0400', '发行日期格式应为 YYYY-MM-DD', 400)
-    const policyGroupId = Number(body.policyGroupId ?? 0) || null
+    const policyGroupId = intOf(body.policyGroupId, 0, 0)
     const policyGroup = policyGroupId ? one('SELECT * FROM policy_groups WHERE id = ?', policyGroupId) : null
     if (policyGroupId && !policyGroup) return send(res, {}, '0404', '付费策略组不存在', 404)
     const contentType = ['series', 'movie', 'comic_drama'].includes(body.contentType)
       ? body.contentType
       : (body.category === 'MOVIE' ? 'movie' : body.category === 'ANIME' ? 'comic_drama' : 'series')
-    const policy = policyGroup
-      ? policyFromGroup(policyGroup)
-      : normalizePolicy({ freeEpisodes: contentType === 'movie' ? 0 : 1, ...body }, { contentType, category: body.category })
-    // 电影没有分集，任何来源（策略组/表单）都不能带「首集免费」
-    const effectivePolicy = contentType === 'movie' ? { ...policy, freeEpisodes: 0 } : policy
-    const invalidPolicy = policyValidationError(effectivePolicy)
+    // 电影没有分集，任何来源（策略组/表单）都不能带「首集免费」——统一由 resolvePolicy 归零
+    const { policy: effectivePolicy, error: invalidPolicy } = resolvePolicy(
+      policyGroup ? { group: policyGroup } : { freeEpisodes: contentType === 'movie' ? 0 : 1, ...body },
+      { contentType, category: body.category },
+    )
     if (invalidPolicy) return send(res, {}, '0400', invalidPolicy, 400)
     const adultFlag = adultFlagOf(body.category, Boolean(body.isAdult))
     const wanted = body.status === 'published' ? 'published' : 'draft'
-    const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, is_adult, release_date, score, status, sort, content_type, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-    title, body.subTitle ?? '', body.coverUrl ?? '', body.description ?? '',
-    Number(body.year ?? 0) || 0, body.area ?? '', body.category ?? '', adultFlag, releaseDate || null, Number(body.score ?? 0) || 0,
-    'draft', Number(body.sort ?? 0), contentType)
-    const dramaId = Number(info.lastInsertRowid)
-    run(`INSERT INTO content_policies
-      (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, dramaId, policyGroup?.id ?? null, effectivePolicy.accessMode, effectivePolicy.freeEpisodes,
-    effectivePolicy.trialSeconds, effectivePolicy.singlePrice, effectivePolicy.purchaseKind, effectivePolicy.rentalHours)
-    if (adultFlag) applyAdultPolicy(dramaId)
-    if (Array.isArray(body.tagIds) && body.tagIds.length) setDramaTags(dramaId, body.tagIds)
-    const created = one('SELECT * FROM dramas WHERE id = ?', dramaId)
-    const check = dramaCompleteness(created)
-    let statusNote = ''
-    if (wanted === 'published') {
-      if (check.complete) {
-        run("UPDATE dramas SET status = 'published' WHERE id = ?", dramaId)
-        statusNote = '已上架'
-      } else {
-        statusNote = `信息未补全（${labelMissing(check.missing)}），已保存为草稿`
-      }
-    }
+    // 「有剧必有策略」：剧 / 策略 / 成人策略 / 标签 / 状态同一个事务，任何一步失败整单回滚
+    const { dramaId, check } = tx(() => {
+      const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, is_adult, release_date, score, status, sort, content_type, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+      title, body.subTitle ?? '', body.coverUrl ?? '', body.description ?? '',
+      intOf(body.year, 0, 0, 9999), body.area ?? '', body.category ?? '', adultFlag, releaseDate || null, numOf(body.score ?? 0, 0, 0, 10),
+      'draft', intOf(body.sort, 0, 0), contentType)
+      const id = Number(info.lastInsertRowid)
+      run(`INSERT INTO content_policies
+        (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, policyGroup?.id ?? null, effectivePolicy.accessMode, effectivePolicy.freeEpisodes,
+      effectivePolicy.trialSeconds, effectivePolicy.singlePrice, effectivePolicy.purchaseKind, effectivePolicy.rentalHours)
+      if (adultFlag) applyAdultPolicy(id)
+      if (Array.isArray(body.tagIds) && body.tagIds.length) setDramaTags(id, body.tagIds)
+      const completeness = dramaCompleteness(one('SELECT * FROM dramas WHERE id = ?', id))
+      // 上架必须过完整性校验；不完整就留在草稿，不会出现「已发布但没有策略」的半成品
+      if (wanted === 'published' && completeness.complete) run("UPDATE dramas SET status = 'published' WHERE id = ?", id)
+      return { dramaId: id, check: completeness }
+    })
+    const statusNote = wanted !== 'published' ? '' : (check.complete ? '已上架' : `信息未补全（${labelMissing(check.missing)}），已保存为草稿`)
     log('content.drama.create', 'drama', dramaId, null, { title, wanted, isAdult: Boolean(body.isAdult), policyGroupId: policyGroup?.id ?? null, missing: check.missing })
     return send(res, { drama: dramaDto(one('SELECT * FROM dramas WHERE id = ?', dramaId)), completeness: check, statusNote })
   }
@@ -964,18 +1047,25 @@ const deny = (perm) => {
     if (!before) return send(res, {}, '0404', '剧集不存在', 404)
     const releaseDate = body.releaseDate === undefined ? (before.release_date ?? '') : String(body.releaseDate ?? '').trim()
     if (!validDate(releaseDate)) return send(res, {}, '0400', '发行日期格式应为 YYYY-MM-DD', 400)
-    const nextStatus = body.status ?? before.status
-    // 上架是独立权限 + 必须过资料完整性校验（否则编辑口可以绕过发布口的检查）
+    const nextStatus = String(body.status ?? before.status)
+    // 状态白名单：之前任意字符串都能写进 dramas.status（筛选器只认这 4 个值，写坏了查不出来）
+    if (!DRAMA_STATUSES.has(nextStatus)) {
+      return send(res, {}, '0400', `剧集状态不合法（可选：${[...DRAMA_STATUSES].join(' / ')}）`, 400)
+    }
+    // 上/下架都是独立权限：编辑口不能借「顺手改个字段」把剧悄悄发布或撤下
+    if ((nextStatus === 'published') !== (before.status === 'published') && !guard(PERM.dramaPublish)) {
+      return deny(PERM.dramaPublish)
+    }
+    // 上架还必须过资料完整性校验（否则编辑口可以绕过发布口的检查）
     if (nextStatus === 'published' && before.status !== 'published') {
-      if (!guard(PERM.dramaPublish)) return deny(PERM.dramaPublish)
       const check = dramaCompleteness({
         ...before,
         title: body.title ?? before.title,
         category: body.category ?? before.category,
         cover_url: body.coverUrl ?? before.cover_url,
-        year: Number(body.year ?? before.year),
+        year: intOf(body.year ?? before.year, before.year ?? 0, 0, 9999),
         area: body.area ?? before.area,
-        score: Number(body.score ?? before.score),
+        score: numOf(body.score ?? before.score, before.score ?? 0, 0, 10),
       })
       if (!check.complete) {
         return send(res, { completeness: check, fields: Object.keys(check.fields).filter((key) => !check.fields[key]), missing: check.missing },
@@ -988,15 +1078,18 @@ const deny = (perm) => {
     const isAdult = body.isAdult === undefined ? before.is_adult : (body.isAdult ? 1 : 0)
     const nextCategory = body.category ?? before.category
     const nextAdultFlag = adultFlagOf(nextCategory, Boolean(isAdult))
-    run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, is_adult = ?, release_date = ?, score = ?, status = ?, sort = ?, content_type = ?,
-      updated_at = datetime('now'),
-      published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, datetime('now')) ELSE published_at END
-      WHERE id = ?`,
-    body.title ?? before.title, body.subTitle ?? before.sub_title, body.coverUrl ?? before.cover_url,
-    body.description ?? before.description, Number(body.year ?? before.year), body.area ?? before.area,
-    body.category ?? before.category, nextAdultFlag, releaseDate || null, Number(body.score ?? before.score), nextStatus,
-    Number(body.sort ?? before.sort), contentType, nextStatus, dramaId)
-    if (nextAdultFlag) applyAdultPolicy(dramaId)
+    // 改剧 + 成人策略兜底写在同一个事务里，避免「状态/分类改了但成人策略没跟上」
+    tx(() => {
+      run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, is_adult = ?, release_date = ?, score = ?, status = ?, sort = ?, content_type = ?,
+        updated_at = datetime('now'),
+        published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, datetime('now')) ELSE published_at END
+        WHERE id = ?`,
+      body.title ?? before.title, body.subTitle ?? before.sub_title, body.coverUrl ?? before.cover_url,
+      body.description ?? before.description, intOf(body.year, before.year ?? 0, 0, 9999), body.area ?? before.area,
+      body.category ?? before.category, nextAdultFlag, releaseDate || null, numOf(body.score ?? before.score, before.score ?? 0, 0, 10), nextStatus,
+      intOf(body.sort, before.sort ?? 0, 0), contentType, nextStatus, dramaId)
+      if (nextAdultFlag) applyAdultPolicy(dramaId)
+    })
     log('content.drama.update', 'drama', dramaId, before, { ...body, status: nextStatus })
     return send(res, dramaDto(one('SELECT * FROM dramas WHERE id = ?', dramaId)))
   }
@@ -1049,13 +1142,26 @@ const deny = (perm) => {
     if (drama.category === 'MOVIE' && one('SELECT id FROM episodes WHERE drama_id = ? LIMIT 1', dramaId)) {
       return send(res, {}, '0400', '电影只能有一个正片', 400)
     }
-    const nextNo = Number(one('SELECT COALESCE(MAX(no),0) + 1 AS n FROM episodes WHERE drama_id = ?', dramaId).n)
-    const title = body.title ?? (drama.category === 'MOVIE' ? '正片' : `第 ${nextNo} 集`)
-    const info = run("INSERT INTO episodes (drama_id, no, title, status) VALUES (?, ?, ?, 'ready')",
-      dramaId, Number(body.no ?? nextNo), title)
-    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", dramaId)
-    log('content.episode.create', 'episode', Number(info.lastInsertRowid), null, { dramaId, no: body.no ?? nextNo })
-    return send(res, one('SELECT * FROM episodes WHERE id = ?', Number(info.lastInsertRowid)))
+    // 取号 + 落库 + 刷新 dramas.updated_at 必须原子：中途失败不能留下空号或孤儿集
+    let created
+    try {
+      created = tx(() => {
+        const nextNo = intOf(one('SELECT COALESCE(MAX(no),0) + 1 AS n FROM episodes WHERE drama_id = ?', dramaId).n, 1, 1)
+        const no = body.no === undefined || body.no === null || body.no === '' ? nextNo : intOf(body.no, nextNo, 1)
+        // 同剧集号唯一：否则列表里会出现两个「第 3 集」，续播按 no 记录会串集
+        if (one('SELECT id FROM episodes WHERE drama_id = ? AND no = ?', dramaId, no)) {
+          throw Object.assign(new Error(`第 ${no} 集已存在`), { status: 409 })
+        }
+        const title = body.title ?? (drama.category === 'MOVIE' ? '正片' : `第 ${no} 集`)
+        const info = run("INSERT INTO episodes (drama_id, no, title, status) VALUES (?, ?, ?, 'ready')", dramaId, no, title)
+        run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", dramaId)
+        return { id: Number(info.lastInsertRowid), no }
+      })
+    } catch (error) {
+      return fail(res, error, '新增分集失败')
+    }
+    log('content.episode.create', 'episode', created.id, null, { dramaId, no: created.no })
+    return send(res, one('SELECT * FROM episodes WHERE id = ?', created.id))
   }
 
   if (seg[0] === 'episodes' && seg[1] && seg[2] === 'tracks' && method === 'GET') {
@@ -1145,8 +1251,8 @@ const deny = (perm) => {
     if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
     try {
       const ids = Array.isArray(body?.ids) ? body.ids.map(Number).filter(Boolean) : []
-      const result = await refreshArtwork({ only: ids, limit: Math.min(200, Number(body?.limit) || 100), force: Boolean(body?.force) })
-      const banners = autofillBanners({ limit: Number(body?.bannerLimit) || 6 })
+      const result = await refreshArtwork({ only: ids, limit: intOf(body?.limit ?? 100, 100, 1, 200), force: Boolean(body?.force) })
+      const banners = autofillBanners({ limit: intOf(body?.bannerLimit ?? 6, 6, 0, 50) })
       log('content.artwork.refresh', 'drama', ids.length === 1 ? ids[0] : null, null, {
         updated: result.updated, failed: result.failed, banners: banners.created,
       })
@@ -1158,23 +1264,25 @@ const deny = (perm) => {
 
   if (seg[0] === 'banners' && seg[1] === 'autofill' && method === 'POST') {
     if (!guard(PERM.dramaWrite)) return deny(PERM.dramaWrite)
-    const result = autofillBanners({ limit: Math.min(10, Number(body?.limit) || 6) })
+    const result = autofillBanners({ limit: intOf(body?.limit ?? 6, 6, 0, 10) })
     log('content.banner.autofill', 'banner', null, null, result)
     return send(res, result)
   }
 
   /* ---------- 下拉选项 ---------- */
   if (seg[0] === 'options' && method === 'GET') {
+    // 全量段里唯一没 guard 的路由：字典本身不敏感，但不该让任何登录态都能拉全站枚举
+    if (!guard(PERM.dramas)) return deny(PERM.dramas)
     return send(res, ADMIN_OPTIONS)
   }
 
   /* ---------- 埋点数据 ---------- */
   if (seg[0] === 'events' && method === 'GET') {
     if (!guard(PERM.events)) return deny(PERM.events)
-    const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days') ?? 7)))
+    const days = intOf(url.searchParams.get('days') ?? 7, 7, 1, 90)
     const type = url.searchParams.get('type')
-    const page = Math.max(1, Number(url.searchParams.get('page') ?? 1))
-    const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get('pageSize') ?? 20)))
+    const page = intOf(url.searchParams.get('page') ?? 1, 1, 1)
+    const pageSize = intOf(url.searchParams.get('pageSize') ?? 20, 20, 10, 100)
     const since = `-${days} days`
     const where = ["te.created_at >= datetime('now', ?)"]
     const args = [since]
@@ -1206,7 +1314,7 @@ const deny = (perm) => {
   /* ---------- 榜单刷新 ---------- */
   if (seg[0] === 'ranks' && seg[1] === 'refresh' && method === 'POST') {
     if (!guard(PERM.ranks)) return deny(PERM.ranks)
-    const all_ = refreshAutoRanks({ limit: Number(body?.limit ?? 20) })
+    const all_ = refreshAutoRanks({ limit: intOf(body?.limit ?? 20, 20, 1, 100) })
     log('ops.rank.refresh', 'rank', null, null, all_)
     return send(res, { results: all_, strategies: RANK_STRATEGIES })
   }
@@ -1214,7 +1322,7 @@ const deny = (perm) => {
   if (seg[0] === 'ranks' && seg[1] && seg[2] === 'refresh' && method === 'POST') {
     if (!guard(PERM.ranks)) return deny(PERM.ranks)
     try {
-      const result = refreshRank(Number(seg[1]), { limit: Number(body?.limit ?? 20) })
+      const result = refreshRank(intOf(seg[1], 0, 1), { limit: intOf(body?.limit ?? 20, 20, 1, 100) })
       log('ops.rank.refresh', 'rank', Number(seg[1]), null, result)
       return send(res, result)
     } catch (error) {
@@ -1225,7 +1333,7 @@ const deny = (perm) => {
   if (seg[0] === 'ranks' && seg[1] && seg[2] === 'lock' && method === 'POST') {
     if (!guard(PERM.ranks)) return deny(PERM.ranks)
     const listId = Number(seg[1])
-    const dramaId = Number(body?.dramaId)
+    const dramaId = intOf(body?.dramaId, 0, 1)
     const locked = body?.locked === false ? 0 : 1
     const row = one('SELECT * FROM rank_items WHERE list_id = ? AND drama_id = ?', listId, dramaId)
     if (!row) return send(res, {}, '0404', '该榜单里没有这部剧', 404)
@@ -1240,42 +1348,41 @@ const deny = (perm) => {
     const drama = one('SELECT * FROM dramas WHERE id = ?', dramaId)
     if (!drama) return send(res, {}, '0404', '剧集不存在', 404)
     const before = policyOf(dramaId)
-    const groupId = Number(body?.policyGroupId ?? 0) || null
+    const groupId = intOf(body?.policyGroupId ?? 0, 0, 0) || null
     const group = groupId ? one('SELECT * FROM policy_groups WHERE id = ?', groupId) : null
     if (groupId && !group) return send(res, {}, '0404', '策略组不存在', 404)
-    const movieDrama = isMovieMeta(drama.content_type, drama.category)
-    let policy
-    if (group) {
-      policy = policyFromGroup(group)
-      if (movieDrama) policy.freeEpisodes = 0
-      const invalid = policyValidationError(policy)
-      if (invalid) return send(res, {}, '0400', invalid, 400)
-      writePolicyGroup(group, 'WHERE id = ?', [dramaId])
-      if (movieDrama) run('UPDATE content_policies SET free_episodes = 0 WHERE drama_id = ?', dramaId)
-    } else {
-      policy = normalizePolicy(body, { contentType: drama.content_type, category: drama.category })
-      if (movieDrama) policy.freeEpisodes = 0
-      const invalid = policyValidationError(policy)
-      if (invalid) return send(res, {}, '0400', invalid, 400)
-      run(`INSERT INTO content_policies
-        (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
-        VALUES (?, NULL, ?, ?, ?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(drama_id) DO UPDATE SET policy_group_id = NULL,
-          access_mode = excluded.access_mode, free_episodes = excluded.free_episodes,
-          trial_seconds = excluded.trial_seconds, single_price_cny = excluded.single_price_cny,
-          purchase_kind = excluded.purchase_kind, rental_hours = excluded.rental_hours, updated_at = datetime('now')`,
-      dramaId, policy.accessMode, policy.freeEpisodes, policy.trialSeconds,
-      policy.singlePrice, policy.purchaseKind, policy.rentalHours)
-    }
-    if (drama.is_adult) applyAdultPolicy(dramaId)
+    const { policy, error: invalid } = resolvePolicy(
+      group ? { group } : { ...body },
+      { contentType: drama.content_type, category: drama.category },
+    )
+    if (invalid) return send(res, {}, '0400', invalid, 400)
+    tx(() => {
+      if (group) {
+        writePolicyGroup(group, 'WHERE id = ?', [dramaId])
+        // 策略组自带 free_episodes，电影/单片仍要强制 0（写组值会把它盖回去）
+        if (isMovieMeta(drama.content_type, drama.category)) {
+          run('UPDATE content_policies SET free_episodes = 0 WHERE drama_id = ?', dramaId)
+        }
+      } else {
+        run(`INSERT INTO content_policies
+          (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
+          VALUES (?, NULL, ?, ?, ?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(drama_id) DO UPDATE SET policy_group_id = NULL,
+            access_mode = excluded.access_mode, free_episodes = excluded.free_episodes,
+            trial_seconds = excluded.trial_seconds, single_price_cny = excluded.single_price_cny,
+            purchase_kind = excluded.purchase_kind, rental_hours = excluded.rental_hours, updated_at = datetime('now')`,
+        dramaId, policy.accessMode, policy.freeEpisodes, policy.trialSeconds,
+        policy.singlePrice, policy.purchaseKind, policy.rentalHours)
+      }
+      if (drama.is_adult) applyAdultPolicy(dramaId)
+    })
     log('content.policy.update', 'drama', dramaId, before, { policyGroupId: groupId, ...policy })
     return send(res, policyOf(dramaId))
   }
 
   if (pathname === '/admin/api/policies/bulk' && method === 'POST') {
     if (!guard(PERM.policy)) return deny(PERM.policy)
-    const policy = normalizePolicy(body?.policy ?? {})
-    const invalid = policyValidationError(policy)
+    const { policy, error: invalid } = resolvePolicy(body?.policy ?? {})
     if (invalid) return send(res, {}, '0400', invalid, 400)
     const filters = dramaFilters(body?.filters ?? {})
     if (!filters.keyword && (!filters.category || filters.category === 'all') && (!filters.status || filters.status === 'all')) {
@@ -1285,19 +1392,22 @@ const deny = (perm) => {
     const sample = all(`SELECT id, title FROM dramas ${filters.clause} ORDER BY id DESC LIMIT 5`, ...filters.args)
     if (body?.dryRun) return send(res, { dryRun: true, matched, sample, filters, policy })
     if (!matched) return send(res, { dryRun: false, matched: 0, updated: 0, sample: [], filters, policy })
-    const result = run(`INSERT INTO content_policies
-      (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
-      SELECT id, NULL, ?, CASE WHEN content_type = 'movie' OR category = 'MOVIE' THEN 0 ELSE ? END,
-        ?, ?, ?, ?, datetime('now') FROM dramas ${filters.clause}
-      ON CONFLICT(drama_id) DO UPDATE SET policy_group_id = NULL, access_mode = excluded.access_mode, free_episodes = excluded.free_episodes,
-        trial_seconds = excluded.trial_seconds, single_price_cny = excluded.single_price_cny,
-        purchase_kind = excluded.purchase_kind, rental_hours = excluded.rental_hours, updated_at = datetime('now')`,
-    policy.accessMode, policy.freeEpisodes, policy.trialSeconds, policy.singlePrice,
-    policy.purchaseKind, policy.rentalHours, ...filters.args)
-    // 批量策略可能命中成人内容：落库后按成人策略纠正（会员专享、无免费集）
-    ensureAdultPolicyInvariant()
+    const result = tx(() => {
+      const info = run(`INSERT INTO content_policies
+        (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
+        SELECT id, NULL, ?, CASE WHEN content_type = 'movie' OR category = 'MOVIE' THEN 0 ELSE ? END,
+          ?, ?, ?, ?, datetime('now') FROM dramas ${filters.clause}
+        ON CONFLICT(drama_id) DO UPDATE SET policy_group_id = NULL, access_mode = excluded.access_mode, free_episodes = excluded.free_episodes,
+          trial_seconds = excluded.trial_seconds, single_price_cny = excluded.single_price_cny,
+          purchase_kind = excluded.purchase_kind, rental_hours = excluded.rental_hours, updated_at = datetime('now')`,
+      policy.accessMode, policy.freeEpisodes, policy.trialSeconds, policy.singlePrice,
+      policy.purchaseKind, policy.rentalHours, ...filters.args)
+      // 批量策略可能命中成人内容：落库后补齐缺失的成人策略（已有显式策略不覆盖）
+      ensureAdultPolicyInvariant()
+      return info
+    })
     log('content.policy.bulk', 'drama', null, filters, { ...policy, matched })
-    return send(res, { dryRun: false, matched, updated: Number(result.changes ?? matched), sample, filters, policy })
+    return send(res, { dryRun: false, matched, updated: Number(result.changes ?? matched), sample, filters, policy, note: '已补齐缺失策略' })
   }
 
   // 外部片源：整集指向别人站点的播放页或 m3u8，播放时由 /media/remote 网关代理
@@ -1307,10 +1417,13 @@ const deny = (perm) => {
     if (!episode) return send(res, {}, '0404', '分集不存在', 404)
     const remoteUrl = String(body.url ?? '').trim()
     if (remoteUrl && !/^https?:\/\//i.test(remoteUrl)) return send(res, {}, '0400', '片源地址必须是 http(s)', 400)
-    run(`UPDATE episodes SET remote_url = ?, remote_referer = ?, remote_ua = ?, remote_cookie = ?, status = 'ready'
-      WHERE id = ?`,
-    remoteUrl || null, body.referer || null, body.ua || null, body.cookie || null, episode.id)
-    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    // 片源与「剧集最近更新时间」同事务：别出现改了一半、列表排序还停在旧时间
+    tx(() => {
+      run(`UPDATE episodes SET remote_url = ?, remote_referer = ?, remote_ua = ?, remote_cookie = ?, status = 'ready'
+        WHERE id = ?`,
+      remoteUrl || null, body.referer || null, body.ua || null, body.cookie || null, episode.id)
+      run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    })
     log('content.episode.remote', 'episode', episode.id, { remote_url: episode.remote_url }, { remote_url: remoteUrl })
     return send(res, one('SELECT * FROM episodes WHERE id = ?', episode.id))
   }
@@ -1318,10 +1431,12 @@ const deny = (perm) => {
   if (seg[0] === 'episodes' && seg[1] && method === 'DELETE') {
     if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
     const before = one('SELECT * FROM episodes WHERE id = ?', Number(seg[1]))
-    run('DELETE FROM episodes WHERE id = ?', Number(seg[1]))
-    if (before?.drama_id) run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", before.drama_id)
+    // 不存在就别报「删除成功」：前端会以为清理掉了，实际什么也没发生
+    if (!before) return send(res, {}, '0404', '分集不存在', 404)
+    const info = run('DELETE FROM episodes WHERE id = ?', Number(seg[1]))
+    if (before.drama_id) run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", before.drama_id)
     log('content.episode.delete', 'episode', seg[1], before, null, body.reason)
-    return send(res, { deleted: true })
+    return send(res, { deleted: Number(info.changes ?? 0), id: Number(seg[1]) })
   }
 
   if (seg[0] === 'episodes' && seg[1] && seg[2] === 'upload' && method === 'POST') {
@@ -1330,9 +1445,12 @@ const deny = (perm) => {
     if (!episode) return send(res, {}, '0404', '分集不存在', 404)
     if (!opts.uploadPath) return send(res, {}, '0400', '未收到上传文件', 400)
     const info = await probe(opts.uploadPath)
-    run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, opts.uploadPath, episode.id)
-    enqueueEpisode({ ...episode, source_path: opts.uploadPath, duration: info?.duration ?? 0 })
-    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    // 分集元数据 + 入队 + 剧集时间戳一次提交，避免留下「文件写了但没入队」的孤儿状态
+    tx(() => {
+      run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, opts.uploadPath, episode.id)
+      enqueueEpisode({ ...episode, source_path: opts.uploadPath, duration: info?.duration ?? 0 })
+      run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    })
     log('content.episode.upload', 'episode', episode.id, null, { size: opts.uploadSize, probe: info })
     return send(res, { ok: true, probe: info, queue: queueState() })
   }
@@ -1352,9 +1470,11 @@ const deny = (perm) => {
       try { unlinkSync(download.path) } catch { /* ignore */ }
       return send(res, {}, '0400', 'URL 内容不是可识别的视频文件', 400)
     }
-    run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info.duration, download.path, episode.id)
-    enqueueEpisode({ ...episode, source_path: download.path, duration: info.duration })
-    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    tx(() => {
+      run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info.duration, download.path, episode.id)
+      enqueueEpisode({ ...episode, source_path: download.path, duration: info.duration })
+      run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    })
     const host = (() => { try { return new URL(download.sourceUrl).host } catch { return '' } })()
     log('content.episode.importUrl', 'episode', episode.id, null, {
       host, size: download.size, probe: info, contentType: download.contentType,
@@ -1366,11 +1486,13 @@ const deny = (perm) => {
     if (!guard(PERM.episodeWrite)) return deny(PERM.episodeWrite)
     const episode = one('SELECT * FROM episodes WHERE id = ?', Number(seg[1]))
     if (!episode) return send(res, {}, '0404', '分集不存在', 404)
-    const file = await generateSample(Number(body.seconds ?? 20), `ep-${episode.id}`)
+    const file = await generateSample(intOf(body.seconds ?? 20, 20, 1, 600), `ep-${episode.id}`)
     const info = await probe(file)
-    run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, file, episode.id)
-    enqueueEpisode({ ...episode, source_path: file, duration: info?.duration ?? 0 })
-    run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    tx(() => {
+      run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, file, episode.id)
+      enqueueEpisode({ ...episode, source_path: file, duration: info?.duration ?? 0 })
+      run("UPDATE dramas SET updated_at = datetime('now') WHERE id = ?", episode.drama_id)
+    })
     log('content.episode.sample', 'episode', episode.id, null, { file })
     return send(res, { ok: true, source: file, probe: info, queue: queueState() })
   }
@@ -1389,8 +1511,8 @@ const deny = (perm) => {
     if (!guard(PERM.plans)) return deny(PERM.plans)
     // 编码由服务端生成（雪花风格纯数字，12 位以上），不接受人工输入，避免重复与英文码。
     const info = run('INSERT INTO plans (code, name, price_cny, duration_days, scope, description, sort, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      genCode(''), body.name ?? '新套餐', Number(body.price ?? 0), Number(body.days ?? 30),
-      body.scope ?? 'all', body.description ?? '', Number(body.sort ?? 0), body.status ?? 'active')
+      genCode(''), body.name ?? '新套餐', numOf(body.price ?? 0, 0, 0, 1e7), intOf(body.days ?? 30, 30, 1, 3650),
+      body.scope ?? 'all', body.description ?? '', intOf(body.sort ?? 0, 0, 0, 9999), body.status ?? 'active')
     log('commerce.plan.create', 'plan', Number(info.lastInsertRowid), null, { ...body, code: 'auto' })
     return send(res, one('SELECT * FROM plans WHERE id = ?', Number(info.lastInsertRowid)))
   }
@@ -1399,8 +1521,9 @@ const deny = (perm) => {
     const before = one('SELECT * FROM plans WHERE id = ?', Number(seg[1]))
     if (!before) return send(res, {}, '0404', '套餐不存在', 404)
     run('UPDATE plans SET name = ?, price_cny = ?, duration_days = ?, scope = ?, description = ?, sort = ?, status = ? WHERE id = ?',
-      body.name ?? before.name, Number(body.price ?? before.price_cny), Number(body.days ?? before.duration_days),
-      body.scope ?? before.scope, body.description ?? before.description, Number(body.sort ?? before.sort),
+      body.name ?? before.name, numOf(body.price ?? before.price_cny, before.price_cny, 0, 1e7),
+      intOf(body.days ?? before.duration_days, before.duration_days, 1, 3650),
+      body.scope ?? before.scope, body.description ?? before.description, intOf(body.sort ?? before.sort, before.sort, 0, 9999),
       body.status ?? before.status, Number(seg[1]))
     log('commerce.plan.update', 'plan', seg[1], before, body)
     return send(res, one('SELECT * FROM plans WHERE id = ?', Number(seg[1])))
@@ -1418,7 +1541,8 @@ const deny = (perm) => {
     const info = run(`INSERT INTO coupons (code, name, discount_type, discount_value, min_amount, total, valid_from, valid_to, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     code, body.name ?? '优惠券', body.discountType ?? 'amount',
-    Number(body.discountValue ?? 0), Number(body.minAmount ?? 0), Number(body.total ?? 0),
+    numOf(body.discountValue ?? 0, 0, 0, 1e7),
+    numOf(body.minAmount ?? 0, 0, 0, 1e7), intOf(body.total ?? 0, 0, 0, 1000000),
     body.validFrom ?? null, body.validTo ?? null, body.status ?? 'active')
     log('commerce.coupon.create', 'coupon', Number(info.lastInsertRowid), null, { ...body, code })
     return send(res, one('SELECT * FROM coupons WHERE id = ?', Number(info.lastInsertRowid)))
@@ -1428,7 +1552,7 @@ const deny = (perm) => {
     const before = one('SELECT * FROM coupons WHERE id = ?', Number(seg[1]))
     if (!before) return send(res, {}, '0404', '优惠券不存在', 404)
     run('UPDATE coupons SET status = ?, valid_to = ?, total = ? WHERE id = ?',
-      body.status ?? before.status, body.validTo ?? before.valid_to, Number(body.total ?? before.total), Number(seg[1]))
+      body.status ?? before.status, body.validTo ?? before.valid_to, intOf(body.total ?? before.total, before.total, 0, 1000000), Number(seg[1]))
     log('commerce.coupon.update', 'coupon', seg[1], before, body)
     return send(res, one('SELECT * FROM coupons WHERE id = ?', Number(seg[1])))
   }
@@ -1472,7 +1596,16 @@ const deny = (perm) => {
   if (pathname === '/admin/api/refunds' && method === 'POST') {
     if (!guard(PERM.refundCreate)) return deny(PERM.refundCreate)
     if (!body.reason) return send(res, {}, '0400', '退款原因必填', 400)
-    const refund = createRefund({ orderId: Number(body.orderId), amount: body.amount, reason: body.reason, operatorId: principal.admin.id })
+    let refund
+    try {
+      refund = createRefund({ orderId: intOf(body.orderId, 0, 1), amount: body.amount, reason: body.reason, operatorId: principal.admin.id })
+    } catch (error) {
+      // refunds 上有「同单只允许一笔 pending/approved」的部分唯一索引，冲突按 409 回，别 500
+      if (/SQLITE_CONSTRAINT|UNIQUE constraint/i.test(String(error?.message ?? ''))) {
+        return send(res, { error: 'refund_pending_exists' }, '0409', '该订单已有待处理退款', 409)
+      }
+      return fail(res, error, '创建退款失败')
+    }
     log('finance.refund.create', 'refund', refund.id, null, refund, body.reason)
     return send(res, refund)
   }
@@ -1482,6 +1615,11 @@ const deny = (perm) => {
     if (seg[2] === 'approve') {
       const result = approveRefund({ refundId: Number(seg[1]), approverId: principal.admin.id })
       log('finance.refund.approve', 'refund', seg[1], null, result, body.reason)
+      // 渠道退款开关没开时 approveRefund 返回 ok:false（单据停在 approved 等人工去网关执行），
+      // 这时必须按失败语义回（409 + reason/warning），否则前端会提示「已退款」而钱没动。
+      if (result?.ok === false) {
+        return send(res, result, '0409', result.warning ?? '退款未执行', 409)
+      }
       return send(res, result)
     }
     const result = rejectRefund({ refundId: Number(seg[1]), approverId: principal.admin.id, reason: body.reason })
@@ -1497,7 +1635,8 @@ const deny = (perm) => {
   }
 
   if (pathname === '/admin/api/close-expired' && method === 'POST') {
-    if (!guard(PERM.orders)) return deny(PERM.orders)
+    // 批量关单是写操作，不能挂在 finance.order.read 上（只读财务号也能把单关掉）
+    if (!guard(PERM.orderWrite)) return deny(PERM.orderWrite)
     const closed = closeExpiredOrders()
     log('finance.order.closeExpired', 'order', null, null, { closed })
     return send(res, { closed })
@@ -1511,26 +1650,32 @@ const deny = (perm) => {
   if (seg[0] === 'banners' && method === 'POST') {
     if (!guard(PERM.banners)) return deny(PERM.banners)
     const info = run('INSERT INTO banners (name, title, image, target_drama_id, sort, enabled) VALUES (?, ?, ?, ?, ?, ?)',
-      body.name ?? '', body.title ?? '', body.image ?? '', Number(body.targetDramaId ?? 0) || null, Number(body.sort ?? 0), body.enabled === false ? 0 : 1)
+      body.name ?? '', body.title ?? '', body.image ?? '', intOf(body.targetDramaId ?? 0, 0, 0) || null, intOf(body.sort ?? 0, 0, 0, 9999), body.enabled === false ? 0 : 1)
     log('ops.banner.create', 'banner', Number(info.lastInsertRowid), null, body)
     return send(res, { id: Number(info.lastInsertRowid) })
   }
   if (seg[0] === 'banners' && seg[1] && method === 'PUT') {
     if (!guard(PERM.banners)) return deny(PERM.banners)
     const before = one('SELECT * FROM banners WHERE id = ?', Number(seg[1]))
-    run('UPDATE banners SET name = ?, title = ?, image = ?, target_drama_id = ?, sort = ?, enabled = ? WHERE id = ?',
+    // 不存在时直接 404：旧代码会去读 before.name 抛 TypeError，前端只看到一个 500
+    if (!before) return send(res, {}, '0404', 'Banner 不存在', 404)
+    const info = run('UPDATE banners SET name = ?, title = ?, image = ?, target_drama_id = ?, sort = ?, enabled = ? WHERE id = ?',
       body.name ?? before.name, body.title ?? before.title, body.image ?? before.image,
-      Number(body.targetDramaId ?? before.target_drama_id) || null, Number(body.sort ?? before.sort),
+      intOf(body.targetDramaId ?? before.target_drama_id, before.target_drama_id ?? 0, 0) || null, intOf(body.sort, before.sort ?? 0, 0, 9999),
       body.enabled === undefined ? before.enabled : (body.enabled ? 1 : 0), Number(seg[1]))
+    if (Number(info.changes ?? 0) === 0) return send(res, {}, '0404', 'Banner 不存在', 404)
     log('ops.banner.update', 'banner', seg[1], before, body)
     return send(res, { ok: true })
   }
   if (seg[0] === 'banners' && seg[1] && method === 'DELETE') {
     if (!guard(PERM.banners)) return deny(PERM.banners)
     const before = one('SELECT * FROM banners WHERE id = ?', Number(seg[1]))
-    run('DELETE FROM banners WHERE id = ?', Number(seg[1]))
+    if (!before) return send(res, {}, '0404', 'Banner 不存在', 404)
+    const info = run('DELETE FROM banners WHERE id = ?', Number(seg[1]))
+    const deleted = Number(info.changes ?? 0)
+    if (deleted === 0) return send(res, {}, '0404', 'Banner 不存在', 404)
     log('ops.banner.delete', 'banner', seg[1], before, null, body.reason)
-    return send(res, { deleted: true })
+    return send(res, { deleted, id: Number(seg[1]) })
   }
 
   if (seg[0] === 'sections' && method === 'GET') {
@@ -1546,21 +1691,35 @@ const deny = (perm) => {
   if (seg[0] === 'sections' && method === 'POST') {
     if (!guard(PERM.sections)) return deny(PERM.sections)
     if (body.action === 'attach') {
-      run('INSERT INTO section_items (section_id, drama_id, sort) VALUES (?, ?, ?)',
-        Number(body.sectionId), Number(body.dramaId), Number(body.sort ?? 0))
-      log('ops.section.attach', 'section', body.sectionId, null, body)
-      return send(res, { ok: true })
+      const sectionId = intOf(body.sectionId, 0, 1)
+      const dramaId = intOf(body.dramaId, 0, 1)
+      // 挂载前先确认楼层与剧都真实存在：否则会插出一条 JOIN 不出来的孤儿关联
+      if (!one('SELECT id FROM sections WHERE id = ?', sectionId)) return send(res, {}, '0404', '楼层不存在', 404)
+      if (!one('SELECT id FROM dramas WHERE id = ?', dramaId)) return send(res, {}, '0404', '剧集不存在', 404)
+      if (one('SELECT id FROM section_items WHERE section_id = ? AND drama_id = ?', sectionId, dramaId)) {
+        return send(res, {}, '0409', '该剧已在楼层中', 409)
+      }
+      const info = run('INSERT INTO section_items (section_id, drama_id, sort) VALUES (?, ?, ?)',
+        sectionId, dramaId, intOf(body.sort, 0, 0))
+      log('ops.section.attach', 'section', sectionId, null, body)
+      return send(res, { ok: true, id: Number(info.lastInsertRowid) })
     }
-    const info = run('INSERT INTO sections (title, sort, enabled) VALUES (?, ?, 1)', body.title ?? '新楼层', Number(body.sort ?? 0))
+    const info = run('INSERT INTO sections (title, sort, enabled) VALUES (?, ?, 1)', body.title ?? '新楼层', intOf(body.sort, 0, 0))
     log('ops.section.create', 'section', Number(info.lastInsertRowid), null, body)
     return send(res, { id: Number(info.lastInsertRowid) })
   }
   if (seg[0] === 'sections' && seg[1] && method === 'DELETE') {
     if (!guard(PERM.sections)) return deny(PERM.sections)
-    run('DELETE FROM section_items WHERE section_id = ?', Number(seg[1]))
-    run('DELETE FROM sections WHERE id = ?', Number(seg[1]))
-    log('ops.section.delete', 'section', seg[1], null, null, body.reason)
-    return send(res, { deleted: true })
+    const sectionId = Number(seg[1])
+    if (!one('SELECT id FROM sections WHERE id = ?', sectionId)) return send(res, {}, '0404', '楼层不存在', 404)
+    // 楼层与它的挂载项一起删，避免删一半
+    const counts = tx(() => ({
+      items: Number(run('DELETE FROM section_items WHERE section_id = ?', sectionId).changes ?? 0),
+      sections: Number(run('DELETE FROM sections WHERE id = ?', sectionId).changes ?? 0),
+    }))
+    if (counts.sections === 0) return send(res, {}, '0404', '楼层不存在', 404)
+    log('ops.section.delete', 'section', sectionId, null, counts, body.reason)
+    return send(res, { deleted: counts.sections, itemsDeleted: counts.items })
   }
 
   if (seg[0] === 'ranks' && method === 'GET') {
@@ -1575,12 +1734,16 @@ const deny = (perm) => {
   if (seg[0] === 'ranks' && method === 'POST') {
     if (!guard(PERM.ranks)) return deny(PERM.ranks)
     if (body.action === 'attach') {
-      run('INSERT INTO rank_items (list_id, drama_id, rank_no) VALUES (?, ?, ?)',
-        Number(body.listId), Number(body.dramaId), Number(body.rankNo ?? 0))
-      log('ops.rank.attach', 'rank', body.listId, null, body)
-      return send(res, { ok: true })
+      const listId = intOf(body.listId, 0, 1)
+      const dramaId = intOf(body.dramaId, 0, 1)
+      if (!one('SELECT id FROM rank_lists WHERE id = ?', listId)) return send(res, {}, '0404', '榜单不存在', 404)
+      if (!one('SELECT id FROM dramas WHERE id = ?', dramaId)) return send(res, {}, '0404', '剧集不存在', 404)
+      const info = run('INSERT INTO rank_items (list_id, drama_id, rank_no) VALUES (?, ?, ?)',
+        listId, dramaId, intOf(body.rankNo, 0, 0))
+      log('ops.rank.attach', 'rank', listId, null, body)
+      return send(res, { ok: true, id: Number(info.lastInsertRowid) })
     }
-    const info = run('INSERT INTO rank_lists (name, type, sort) VALUES (?, ?, ?)', body.name ?? '新榜单', body.type ?? 'HOT', Number(body.sort ?? 0))
+    const info = run('INSERT INTO rank_lists (name, type, sort) VALUES (?, ?, ?)', body.name ?? '新榜单', body.type ?? 'HOT', intOf(body.sort, 0, 0))
     log('ops.rank.create', 'rank', Number(info.lastInsertRowid), null, body)
     return send(res, { id: Number(info.lastInsertRowid) })
   }
@@ -1598,7 +1761,9 @@ const deny = (perm) => {
     })
   }
   if (seg[0] === 'danmus' && seg[1] && method === 'POST') {
-    if (!guard(PERM.review)) return deny(PERM.review)
+    if (!guard(PERM.reviewWrite)) return deny(PERM.reviewWrite)
+    const target = one('SELECT id FROM danmus WHERE id = ?', Number(seg[1]))
+    if (!target) return send(res, {}, '0404', '弹幕不存在', 404)
     const status = seg[2] === 'approve' ? 'approved' : 'rejected'
     run('UPDATE danmus SET status = ? WHERE id = ?', status, Number(seg[1]))
     log('content.danmu.review', 'danmu', seg[1], null, { status })
@@ -1616,7 +1781,9 @@ const deny = (perm) => {
     })
   }
   if (seg[0] === 'comments' && seg[1] && method === 'POST') {
-    if (!guard(PERM.review)) return deny(PERM.review)
+    if (!guard(PERM.reviewWrite)) return deny(PERM.reviewWrite)
+    const target = one('SELECT id FROM comments WHERE id = ?', Number(seg[1]))
+    if (!target) return send(res, {}, '0404', '评论不存在', 404)
     const status = seg[2] === 'approve' ? 'approved' : 'rejected'
     run('UPDATE comments SET status = ? WHERE id = ?', status, Number(seg[1]))
     log('content.comment.review', 'comment', seg[1], null, { status })
@@ -1705,32 +1872,94 @@ const deny = (perm) => {
     log('user.password.set', 'user', user.id, null, { revokedSessions: revoked }, body?.reason)
     return send(res, { ok: true, mode, revokedSessions: revoked })
   }
-  // 邮件通道异常时的运维兜底：给指定用户签发一次性登录码（明文只返回这一次，写审计）
+  // 邮件通道异常时的运维兜底：给指定用户签发一次性登录码
   if (seg[0] === 'users' && seg[1] && seg[2] === 'login-code' && method === 'POST') {
     if (!guard(PERM.userAssist)) return deny(PERM.userAssist)
-    const user = one('SELECT * FROM users WHERE id = ?', Number(seg[1]))
-    if (!user) return send(res, {}, '0404', '用户不存在', 404)
-    if (!user.email) return send(res, {}, '0400', '该用户未绑定邮箱', 400)
-    const result = issueAssistCode(user.email, { operator: principal.admin.username })
-    log('user.login.code.issue', 'user', user.id, null, { email: result.email, expiresIn: result.expiresIn }, body.reason)
-    return send(res, { ...result, nickname: user.nickname, userId: user.id })
+    const target = one('SELECT * FROM users WHERE id = ?', Number(seg[1]))
+    if (!target) return send(res, {}, '0404', '用户不存在', 404)
+    if (!target.email) return send(res, {}, '0400', '该用户未绑定邮箱', 400)
+    let result
+    try {
+      // 代发码走独立用途 cs_assist：不再伪装成用户自己触发的 login，审计/风控才能区分
+      result = issueAssistCode(target.email, {
+        operator: principal.admin.username,
+        purpose: 'cs_assist',
+        // 默认不给明文：码由 otp 侧按用途投递，接口只回元数据
+        withPlainCode: otpTestHookEnabled() || process.env.MH_CS_ASSIST_PLAINTEXT === '1',
+      })
+    } catch (error) {
+      return fail(res, error, '签发登录码失败')
+    }
+    const operator = `${principal.admin.username}#${principal.admin.id}`
+    const plaintext = typeof result.code === 'string' && result.code.length > 0
+    // 不论是否回明文都留一条安全事件：谁在什么时候给哪个账号发了登录码
+    run(`INSERT INTO security_events (kind, ip, path, ua, detail) VALUES (?, ?, ?, ?, ?)`,
+      'cs_assist_login_code', ipOf(req), pathname, String(req.headers?.['user-agent'] ?? '').slice(0, 400),
+      JSON.stringify({ operator, operatorId: principal.admin.id, userId: target.id, email: target.email, purpose: result.purpose, plaintext }))
+    // 谁给谁发了码：无论是否回明文都记一条 warn 级日志，方便 SIEM/巡检抓异常代发
+    logWarn('cs_assist.issue_code', { operator, operatorId: principal.admin.id, userId: target.id, email: target.email, purpose: result.purpose, plaintext })
+    log('user.login.code.issue', 'user', target.id, null, { email: result.email, purpose: result.purpose, plaintext }, body?.reason)
+    const payload = { ...result, nickname: target.nickname, userId: target.id }
+    if (!plaintext) delete payload.code
+    return send(res, payload)
   }
   if (pathname === '/admin/api/cs/grant' && method === 'POST') {
-    if (!guard(PERM.cs)) return deny(PERM.cs)
-    const userId = Number(body.userId)
+    // 补发权益是写操作：只持有客服工具箱（cs.toolkit）不够，必须 cs.toolkit.grant
+    if (!guard(PERM.csGrant)) return deny(PERM.csGrant)
+    const userId = intOf(body.userId, 0, 1)
     if (!userId) return send(res, {}, '0400', 'userId 必填', 400)
+    if (!one('SELECT id FROM users WHERE id = ?', userId)) return send(res, {}, '0404', '用户不存在', 404)
     if (body.kind === 'subscription') {
-      const plan = one('SELECT * FROM plans WHERE id = ?', Number(body.planId))
+      const planId = intOf(body.planId, 0, 1)
+      const plan = planId ? one('SELECT * FROM plans WHERE id = ?', planId) : null
       if (!plan) return send(res, {}, '0404', '套餐不存在', 404)
-      const validTo = new Date(Date.now() + Number(body.days ?? plan.duration_days) * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
-      run(`INSERT INTO subscriptions (user_id, plan_id, order_id, scope, valid_to, status) VALUES (?, ?, NULL, ?, ?, 'active')`,
-        userId, plan.id, plan.scope ?? 'all', validTo)
-    } else {
-      run(`INSERT INTO purchases (user_id, drama_id, order_id, kind, status) VALUES (?, ?, NULL, 'single', 'active')`,
-        userId, Number(body.dramaId))
+      // 天数必须显式合法：负数 / NaN / 36500（100 年）以前都会静默算进 valid_to
+      const days = Number(body.days ?? plan.duration_days ?? 30)
+      if (!Number.isInteger(days) || days < 1 || days > 3650) {
+        return send(res, {}, '0400', 'days 必须是 1–3650 的整数', 400)
+      }
+      const validTo = new Date(Date.now() + days * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
+      let granted
+      try {
+        granted = tx(() => {
+          const active = one(`SELECT id, user_id, plan_id, valid_to, status FROM subscriptions
+            WHERE user_id = ? AND status = 'active' AND datetime(valid_to) > datetime('now')
+            ORDER BY datetime(valid_to) DESC LIMIT 1`, userId)
+          if (active) return { ok: true, alreadyOwned: true, subscription: active }
+          const info = run(`INSERT INTO subscriptions (user_id, plan_id, order_id, scope, valid_to, status) VALUES (?, ?, NULL, ?, ?, 'active')`,
+            userId, plan.id, plan.scope ?? 'all', validTo)
+          return { ok: true, alreadyOwned: false, subscriptionId: Number(info.lastInsertRowid), days, validTo }
+        })
+      } catch (error) {
+        return fail(res, error, '补发订阅失败')
+      }
+      log('cs.grant.entitlement', 'user', userId, null, { kind: 'subscription', planId: plan.id, days, alreadyOwned: Boolean(granted.alreadyOwned) }, body?.reason)
+      return send(res, granted)
     }
-    log('cs.grant.entitlement', 'user', userId, null, body, body.reason)
-    return send(res, { ok: true })
+    const dramaId = intOf(body.dramaId, 0, 1)
+    if (!dramaId) return send(res, {}, '0400', 'dramaId 必填', 400)
+    if (!one('SELECT id FROM dramas WHERE id = ?', dramaId)) return send(res, {}, '0404', '剧集不存在', 404)
+    let granted
+    try {
+      granted = tx(() => {
+        // 已有 active 权益直接回「已拥有」：purchases 上有 active 部分唯一索引，重复插必冲突
+        const owned = one(`SELECT * FROM purchases WHERE user_id = ? AND drama_id = ? AND status = 'active'
+          AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))
+          ORDER BY id DESC LIMIT 1`, userId, dramaId)
+        if (owned) return { ok: true, alreadyOwned: true, purchase: owned }
+        const info = run(`INSERT INTO purchases (user_id, drama_id, order_id, kind, status) VALUES (?, ?, NULL, 'single', 'active')`,
+          userId, dramaId)
+        return { ok: true, alreadyOwned: false, purchase: one('SELECT * FROM purchases WHERE id = ?', Number(info.lastInsertRowid)) }
+      })
+    } catch (error) {
+      // 唯一索引兜底（并发重复发放）：按 409 语义回，别变成 500
+      if (/SQLITE_CONSTRAINT|UNIQUE constraint/i.test(String(error?.message ?? ''))) {
+        return send(res, { error: 'already_owned' }, '0409', '该用户已拥有此剧', 409)
+      }
+      return fail(res, error, '补发权益失败')
+    }
+    log('cs.grant.entitlement', 'user', userId, null, { kind: 'single', dramaId, alreadyOwned: Boolean(granted.alreadyOwned) }, body?.reason)
+    return send(res, granted)
   }
 
   /* ---------- RBAC ---------- */
@@ -1747,7 +1976,13 @@ const deny = (perm) => {
   if (seg[0] === 'roles' && seg[1] && seg[2] === 'menus' && method === 'PUT') {
     if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
     const before = roleMenuBinding(seg[1]).checked
-    const updated = updateRoleMenus(seg[1], body.codes ?? body.permissions ?? [])
+    let updated
+    try {
+      // 带上操作者主体：rbac 侧要判「非超管不得授予高危权限」
+      updated = updateRoleMenus(seg[1], body.codes ?? body.permissions ?? [], principal)
+    } catch (error) {
+      return fail(res, error, '保存角色权限失败')
+    }
     log('admin.role.menus', 'role', seg[1], before, updated)
     return send(res, updated)
   }
@@ -1758,23 +1993,39 @@ const deny = (perm) => {
   }
   if (pathname === '/admin/api/roles' && method === 'POST') {
     if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
-    const created = createRole(body)
+    let created
+    try {
+      created = createRole(body)
+    } catch (error) {
+      return fail(res, error, '新建角色失败')
+    }
     log('admin.role.create', 'role', created.id, null, created)
     return send(res, created)
   }
   if (seg[0] === 'roles' && seg[1] && method === 'PUT') {
     if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
     const before = listRoles().find((role) => role.id === Number(seg[1]))
-    const updated = Array.isArray(body.permissions)
-      ? updateRolePermissions(Number(seg[1]), body.permissions)
-      : updateRole(Number(seg[1]), body)
+    let updated
+    try {
+      // 整体替换权限必须把 actor 传下去：unknown_permission → 400、protected_permission → 403
+      updated = Array.isArray(body.permissions)
+        ? updateRolePermissions(Number(seg[1]), body.permissions, principal)
+        : updateRole(Number(seg[1]), body)
+    } catch (error) {
+      return fail(res, error, '保存角色失败')
+    }
     log('admin.role.update', 'role', seg[1], before, updated)
     return send(res, updated)
   }
   if (seg[0] === 'roles' && seg[1] && seg.length === 2 && method === 'DELETE') {
     if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
     const before = listRoles().find((role) => role.id === Number(seg[1]))
-    const deleted = deleteRole(Number(seg[1]))
+    let deleted
+    try {
+      deleted = deleteRole(Number(seg[1]))
+    } catch (error) {
+      return fail(res, error, '删除角色失败')
+    }
     log('admin.role.delete', 'role', seg[1], before, deleted)
     return send(res, deleted)
   }
@@ -1803,14 +2054,15 @@ const deny = (perm) => {
     const salt = randomBytes(8).toString('hex')
     let admin
     try {
-      admin = createAdmin({
+      // 建号 + 分角色必须同生共死：角色校验失败时不能留一个没角色的半截账号
+      admin = tx(() => createAdmin({
         username,
         displayName: body.displayName,
         passwordHash: hashPassword(password, salt),
         salt,
         roleCodes: roleCodes.filter((code) => one('SELECT id FROM roles WHERE code = ?', code)),
         mustChange: body.mustChange === false ? 0 : 1,
-      })
+      }, principal))
     } catch (error) {
       return fail(res, error, '新建后台账号失败')
     }
@@ -1824,11 +2076,11 @@ const deny = (perm) => {
     if (!before) return send(res, {}, '0404', '管理员不存在', 404)
     let updated
     try {
-      updated = updateAdminBasic(Number(seg[1]), {
+      updated = tx(() => updateAdminBasic(Number(seg[1]), {
         displayName: body.displayName,
         status: body.status,
         roleCodes: Array.isArray(body.roles) ? body.roles.filter((code) => one('SELECT id FROM roles WHERE code = ?', code)) : undefined,
-      })
+      }, principal))
     } catch (error) {
       return fail(res, error, '保存失败')
     }
@@ -1929,8 +2181,15 @@ const deny = (perm) => {
     return send(res, result)
   }
   if (seg[0] === 'admins' && seg[1] && seg[2] === 'roles' && method === 'PUT') {
-    if (!guard(PERM.rolesWrite)) return deny(PERM.rolesWrite)
-    const updated = setAdminRoles(Number(seg[1]), body.roles ?? [])
+    // 改别人的角色等于改他的全部权限：和建号/改号同一把锁（system.admin），
+    // 否则只有 admin.write 的账号就能把自己提成超管
+    if (!guard(PERM.adminAccounts)) return deny(PERM.adminAccounts)
+    let updated
+    try {
+      updated = setAdminRoles(Number(seg[1]), body.roles ?? [], principal)
+    } catch (error) {
+      return fail(res, error, '保存角色分配失败')
+    }
     log('admin.roles.update', 'admin', seg[1], null, body)
     return send(res, updated)
   }
@@ -2054,7 +2313,8 @@ const deny = (perm) => {
   }
 
   if (/^\/admin\/api\/email-channels\/[\w-]+\/test$/.test(pathname) && method === 'POST') {
-    if (!guard(PERM.emailRead)) return deny(PERM.emailRead)
+    // 真发一封信出去（有副作用、能当垃圾邮件跳板），不能挂只读的 email.read
+    if (!guard(PERM.emailWrite)) return deny(PERM.emailWrite)
     const id = pathname.split('/')[4]
     const channel = channelList().find((item) => item.id === id)
     if (!channel) return send(res, {}, '0404', '通道不存在', 404)
@@ -2121,7 +2381,8 @@ const deny = (perm) => {
   /* ---------------- 经营数据（播放 / 用户 / 订单 / 订阅 / 收款） ---------------- */
   if (pathname === '/admin/api/analytics' && method === 'GET') {
     if (!guard(PERM.analytics)) return deny(PERM.analytics)
-    const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days') ?? 7)))
+    // days=abc 以前会变成 NaN 一路传进 analyticsReport，new Date(NaN).toISOString() 直接抛 RangeError → 500
+    const days = intOf(url.searchParams.get('days') ?? 7, 7, 1, 90)
     // 收款/订阅/退款这些经营口径归到这里，概览页不再显示支付数据。
     return send(res, {
       ...analyticsReport({ days }),
@@ -2136,7 +2397,7 @@ const deny = (perm) => {
   /* ---------------- 风控 / 安全事件 ---------------- */
   if (pathname === '/admin/api/security' && method === 'GET') {
     if (!guard(PERM.audit)) return deny(PERM.audit)
-    const events = all("SELECT * FROM security_events ORDER BY id DESC LIMIT ?", Math.min(200, Number(url.searchParams.get('limit') ?? 50)))
+    const events = all('SELECT * FROM security_events ORDER BY id DESC LIMIT ?', intOf(url.searchParams.get('limit') ?? 50, 50, 1, 200))
     return send(res, { ...guardStats(), usdtWatch: usdtWatchStatus(), events })
   }
 
@@ -2149,7 +2410,7 @@ const deny = (perm) => {
     const level = url.searchParams.get('level') ?? 'all'
     const requestedScope = url.searchParams.get('scope') ?? 'general'
     const scope = ['general', 'adult', 'all'].includes(requestedScope) ? requestedScope : 'general'
-    const paged = page ? listTags({ withCount: true, includeDisabled, scope, page: Number(page), pageSize: Number(url.searchParams.get('pageSize') ?? 20), keyword, level }) : null
+    const paged = page ? listTags({ withCount: true, includeDisabled, scope, page: intOf(page, 1, 1), pageSize: intOf(url.searchParams.get('pageSize') ?? 20, 20, 1, 200), keyword, level }) : null
     const list = paged ? paged.list : listTags({ withCount: true, includeDisabled, scope, keyword, level })
     return send(res, {
       list,
@@ -2178,7 +2439,7 @@ const deny = (perm) => {
 
   if (pathname === '/admin/api/tags' && method === 'DELETE') {
     if (!guard(PERM.tagWrite)) return deny(PERM.tagWrite)
-    const id = Number(url.searchParams.get('id') ?? 0)
+    const id = intOf(url.searchParams.get('id') ?? 0, 0, 0)
     if (!id) return send(res, {}, '0400', '缺少 id', 400)
     deleteTag(id)
     log('admin.tag.delete', 'tag', id, null, null)

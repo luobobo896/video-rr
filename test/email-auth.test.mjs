@@ -10,6 +10,8 @@ process.env.MH_DB = join(dir, 'test.db')
 process.env.MH_ADMIN_INIT_PASSWORD = 'admin123'
 process.env.MH_SECRET = 'test-secret'
 process.env.MH_OTP_SECRET = 'otp-secret'
+// 明文验证码钩子需要 MH_OTP_TEST=1 **且** NODE_ENV=test 两个条件
+process.env.NODE_ENV = 'test'
 process.env.MH_OTP_TEST = '1'
 
 let db, otp, auth
@@ -82,13 +84,30 @@ test('验证码过期：返回 code_expired', async () => {
   })
 })
 
-test('每日上限 20 条', async () => {
+test('同一邮箱 24 小时最多 5 条：第 6 条被 rate_limited 拦下并给出真实剩余秒数', async () => {
   const email = newEmail()
   const today = new Date().toISOString().slice(0, 10)
-  const insert = db.prepare('INSERT INTO email_send_log (email, purpose, ip, sent_date, created_at) VALUES (?, ?, ?, ?, datetime(\'now\',\'-2 hours\'))')
-  for (let i = 0; i < 20; i++) insert.run(email, 'login', '9.9.9.9', today)
-  await assert.rejects(() => otp.sendCode({ email, purpose: 'login' }), (error) => {
-    assert.equal(error.code, 'daily_limit')
+  const insert = db.prepare("INSERT INTO email_send_log (email, purpose, ip, sent_date, created_at) VALUES (?, ?, ?, ?, datetime('now','-2 hours'))")
+  // 每条换一个来源 IP，避免先撞上 IP 维度的上限，专门验邮箱维度
+  for (let i = 0; i < 5; i++) insert.run(email, 'login', `10.0.0.${i + 1}`, today)
+  await assert.rejects(() => otp.sendCode({ email, purpose: 'login', ip: '10.0.0.99' }), (error) => {
+    assert.equal(error.code, 'rate_limited')
+    assert.equal(error.extra?.scope, 'email')
+    assert.equal(error.extra?.limit, 5)
+    assert.ok(Number(error.retryAfterSeconds) > 0, '应给出真实剩余秒数')
+    return true
+  })
+})
+
+test('同一 IP 24 小时最多 20 条：换邮箱也发不出去（防第三方邮箱轰炸）', async () => {
+  const ip = '203.0.113.7'
+  const today = new Date().toISOString().slice(0, 10)
+  const insert = db.prepare("INSERT INTO email_send_log (email, purpose, ip, sent_date, created_at) VALUES (?, 'login', ?, ?, datetime('now','-2 hours'))")
+  for (let i = 0; i < 20; i++) insert.run(`ipcap${i}@example.com`, ip, today)
+  await assert.rejects(() => otp.sendCode({ email: newEmail(), purpose: 'login', ip }), (error) => {
+    assert.equal(error.code, 'rate_limited')
+    assert.equal(error.extra?.scope, 'ip')
+    assert.equal(error.extra?.limit, 20)
     return true
   })
 })

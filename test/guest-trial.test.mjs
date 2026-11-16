@@ -8,6 +8,9 @@ const dir = mkdtempSync(join(tmpdir(), 'mh-guest-trial-'))
 process.env.MH_DB = join(dir, 'test.db')
 process.env.MH_SECRET = 'test-secret'
 process.env.MH_LINK_SECRET = 'test-link-secret-0123456789'
+// 访客标识改为服务端签发的签名 Cookie 后，直接调 handlePublic 的单元测试没有 Cookie 罐：
+// 只能用测试/本地调试专用的 x-mh-visitor 兜底（生产默认关闭，见 MH_ALLOW_VISITOR_HEADER）。
+process.env.MH_ALLOW_VISITOR_HEADER = '1'
 
 let db
 let api
@@ -35,7 +38,7 @@ async function callTrial(visitorId = 'visitor-trial-test') {
     socket: { remoteAddress: '127.0.0.1' },
   }
   await api.handlePublic('/api/play/' + dramaId + '/1', new URL(`http://localhost${path}`), req, res)
-  return { status: res.status, ...JSON.parse(res.rawBody) }
+  return { status: res.status, setCookie: res.getHeader('set-cookie') ?? '', ...JSON.parse(res.rawBody) }
 }
 
 before(async () => {
@@ -55,27 +58,32 @@ before(async () => {
 
 after(() => { try { db?.close() } catch { /* ignore */ } })
 
-test('游客试看 15 秒、复用剩余时长、到期后 24 小时内拦截', async () => {
+test('游客试看每次 15 秒、同一访客三个窗口后限额', async () => {
   const first = await callTrial()
   assert.equal(first.status, 200, first.msg)
   assert.equal(first.data.source, 'trial')
   assert.equal(first.data.trialSeconds, 15)
+  assert.equal(first.data.trialBudget.windows, 1)
 
-  const active = await callTrial()
-  assert.equal(active.status, 200, active.msg)
-  assert.ok(active.data.trialSeconds >= 1 && active.data.trialSeconds <= 15)
+  const second = await callTrial()
+  assert.equal(second.status, 200, second.msg)
+  assert.equal(second.data.trialBudget.windows, 2)
 
-  db.prepare("UPDATE guest_trials SET expires_at = datetime('now', '-1 second') WHERE visitor_id = 'visitor-trial-test'").run()
-  const expired = await callTrial()
-  assert.equal(expired.status, 403)
-  assert.equal(expired.code, '0403')
-  assert.match(expired.msg, /试看已结束/)
+  const third = await callTrial()
+  assert.equal(third.status, 200, third.msg)
+  assert.equal(third.data.trialBudget.windows, 3)
+
+  const exhausted = await callTrial()
+  assert.equal(exhausted.status, 402)
+  assert.equal(exhausted.data.code, 'trial_exhausted')
+  assert.ok(Number(exhausted.data.retryAfterSeconds) >= 4 && Number(exhausted.data.retryAfterSeconds) <= 15)
 })
 
-test('游客试看缺少访客标识时拒绝', async () => {
+test('游客没有访客标识时由服务端签发签名 Cookie', async () => {
   const result = await callTrial('')
-  assert.equal(result.status, 400)
-  assert.match(result.msg, /访客/)
+  assert.equal(result.status, 200, result.msg)
+  assert.match(result.setCookie, /mh_visitor=/)
+  assert.match(result.setCookie, /HttpOnly/i)
 })
 
 test('游客播放免费集不再查空用户观看进度', async () => {

@@ -59,13 +59,31 @@ async function callAdmin(method, path, body) {
   return { status: res.status, ...res.json() }
 }
 
-async function callPublic(path, token = '', lang = 'zh') {
+/**
+ * 年龄凭证改为服务端 HttpOnly 签名 Cookie 后，「audience=adult」不再凭 query 就放行。
+ * 这里走一次确认接口拿到 mh_adult，再带着它请求成人列表/标签（契约变更理由见测试报告）。
+ */
+async function confirmAdultCookie() {
+  const res = fakeResponse()
+  const url = new URL('http://localhost/api/adult/confirm')
+  await publicApi.handlePublic(url.pathname, url, {
+    method: 'POST',
+    headers: { 'user-agent': 'node-test', 'x-mh-lang': 'zh' },
+    socket: { remoteAddress: '127.0.0.1' },
+  }, res)
+  const header = res.getHeader('set-cookie')
+  const list = Array.isArray(header) ? header : [header]
+  return list.filter(Boolean).map((row) => String(row).split(';')[0]).join('; ')
+}
+
+async function callPublic(path, token = '', lang = 'zh', cookie = '') {
   const res = fakeResponse()
   const url = new URL(`http://localhost${path}`)
   const req = {
     method: 'GET',
     headers: {
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(cookie ? { cookie } : {}),
       'user-agent': 'node-test',
       'x-mh-lang': lang,
     },
@@ -207,7 +225,8 @@ test('成人内容只进入成人列表，普通分类、搜索与标签计数�
   assert.ok(!general.data.list.some((item) => item.dramaId === adultDramaId))
   assert.ok(!general.data.list.some((item) => item.dramaId === posterAdultId))
 
-  const adult = await callPublic('/api/category?audience=adult&pageSize=60')
+  const adultCookie = await confirmAdultCookie()
+  const adult = await callPublic('/api/category?audience=adult&pageSize=60', '', 'zh', adultCookie)
   assert.equal(adult.code, '0000')
   assert.equal(adult.data.active.audience, 'adult')
   const adultIds = adult.data.list.map((item) => item.dramaId)
@@ -217,15 +236,15 @@ test('成人内容只进入成人列表，普通分类、搜索与标签计数�
   assert.ok(adult.data.list.every((item) => item.isAdult === true))
   assert.ok(adult.data.list.find((item) => item.dramaId === adultDramaId)?.stats)
 
-  const adultTags = await callPublic('/api/tags?scope=adult')
+  const adultTags = await callPublic('/api/tags?scope=adult', '', 'zh', adultCookie)
   assert.equal(adultTags.data.list.filter((tag) => !tag.parent_id).length, 8)
   assert.equal(adultTags.data.list.filter((tag) => tag.parent_id).length, 111)
   assert.ok(adultTags.data.list.some((tag) => tag.name === 'Cosplay' && tag.dramaCount === 1))
-  const adultTagsEn = await callPublic('/api/tags?scope=adult', '', 'en')
+  const adultTagsEn = await callPublic('/api/tags?scope=adult', '', 'en', adultCookie)
   assert.equal(adultTagsEn.data.list.find((tag) => tag.name === '衣著')?.label, 'Clothing')
   assert.equal(adultTagsEn.data.list.find((tag) => tag.name === '漁網')?.label, 'Fishnet')
 
-  const adultTagFiltered = await callPublic(`/api/category?audience=adult&tag=${adultTagId}&pageSize=60`)
+  const adultTagFiltered = await callPublic(`/api/category?audience=adult&tag=${adultTagId}&pageSize=60`, '', 'zh', adultCookie)
   assert.deepEqual(adultTagFiltered.data.list.map((item) => item.dramaId), [adultDramaId])
 
   const search = await callPublic(`/api/search?keyword=${encodeURIComponent('成人独占测试片')}`)

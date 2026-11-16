@@ -7,7 +7,7 @@
  *   /media/hls/*HLS 切片：必须带 sign+expires（与 nginx secure_link 同规则）
  */
 import { createServer } from 'node:http'
-import { createReadStream, createWriteStream, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import { db, seedIfEmpty, ROOT, ensureSettings, ensurePaySafety, ensureUserSchema, ensureAdminSchema, ensureAdminCredentials, ensureLinkSecret, ensureOpsSchema, migrateCodesToNumeric, migratePayChannels, syncMenuCatalog } from './db.mjs'
 import { cleanupCodes } from './otp.mjs'
@@ -17,7 +17,8 @@ import { HLS_DIR, UPLOAD_DIR } from './media.mjs'
 import { processCommissionOutbox, processCommissionReversalOutbox } from './commerce.mjs'
 import { PREVIEW_DIR } from './previews.mjs'
 import { verifyLink } from './entitlements.mjs'
-import { handleRemoteRequest } from './stream-proxy.mjs'
+import { handleRemoteRequest, parseRangeHeader, pipeFile } from './stream-proxy.mjs'
+import { normalizePlaylistUri, stampPlaylist, truncatePlaylist } from './trial-playlist.mjs'
 import { ensureFreshForPlay, staleOf, warmProfile } from './jable-refresh.mjs'
 import { closeExpiredOrders, reconcile } from './commerce.mjs'
 import { refreshAutoRanks } from './rank.mjs'
@@ -109,40 +110,57 @@ function streamToUpload(req) {
   })
 }
 
+/**
+ * URL 解码：畸形百分号编码（%zz、%E4%B8）不能把请求打进 catch 变成 500，
+ * 解不开就按原串处理，交给后面的路径解析判 403/404。
+ */
+function safeDecode(value) {
+  const raw = String(value ?? '')
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
+
+/**
+ * nginx 传进来的 x-original-uri 带站点子路径（如 /video/media/hls/1/index.m3u8）。
+ * 按配置的 MH_BASE_PATH 裁掉才是签名用的媒体路径；base path 为空时原样返回，
+ * 不能像以前那样硬编码 /video，换子路径部署就整站播放签名 403。
+ */
+function stripBasePath(uri) {
+  const value = String(uri ?? '')
+  if (!BASE_PATH) return value
+  if (value === BASE_PATH) return '/'
+  if (value.startsWith(`${BASE_PATH}/`)) return value.slice(BASE_PATH.length)
+  return value
+}
+
 function serveFileWithRange(req, res, filePath, cacheControl = 'no-cache') {
   const stat = statSync(filePath)
   const type = MIME[extname(filePath)] ?? 'application/octet-stream'
-  const range = req.headers.range
-  if (!range) {
-    res.writeHead(200, { 'content-type': type, 'content-length': stat.size, 'accept-ranges': 'bytes', 'cache-control': cacheControl })
-    createReadStream(filePath).pipe(res)
-    return
-  }
-  const match = /bytes=(\d*)-(\d*)/.exec(range)
-  const start = match && match[1] !== '' ? Number(match[1]) : 0
-  const end = match && match[2] !== '' ? Number(match[2]) : stat.size - 1
-  if (start >= stat.size || end >= stat.size) {
-    res.writeHead(416, { 'content-range': `bytes */${stat.size}` })
+  const range = parseRangeHeader(req.headers.range, stat.size)
+  if (range === 'unsatisfiable') {
+    res.writeHead(416, { 'content-range': `bytes */${stat.size}`, 'cache-control': 'no-store' })
     res.end()
     return
   }
+  if (!range) {
+    res.writeHead(200, { 'content-type': type, 'content-length': stat.size, 'accept-ranges': 'bytes', 'cache-control': cacheControl })
+    return pipeFile(res, filePath)
+  }
   res.writeHead(206, {
     'content-type': type,
-    'content-range': `bytes ${start}-${end}/${stat.size}`,
-    'content-length': end - start + 1,
+    'content-range': `bytes ${range.start}-${range.end}/${stat.size}`,
+    'content-length': range.end - range.start + 1,
     'accept-ranges': 'bytes',
     'cache-control': cacheControl,
   })
-  createReadStream(filePath, { start, end }).pipe(res)
+  return pipeFile(res, filePath, { start: range.start, end: range.end })
 }
 
 function serveStatic(rootDir, pathname, res) {
-  let relative
-  try { relative = decodeURIComponent(pathname).replace(/^\/+/, '') } catch {
-    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
-    res.end('400')
-    return
-  }
+  const relative = safeDecode(pathname).replace(/^\/+/, '')
   const safe = resolveInside(rootDir, relative || 'index.html')
   if (!safe || !existsSync(safe) || !statSync(safe).isFile()) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
@@ -150,8 +168,130 @@ function serveStatic(rootDir, pathname, res) {
     return
   }
   res.writeHead(200, { 'content-type': MIME[extname(safe)] ?? 'application/octet-stream', 'cache-control': 'no-cache' })
-  createReadStream(safe).pipe(res)
+  return pipeFile(res, safe)
 }
+
+/** 试看清单/分片白名单：按 (集号, 秒数) 缓存 5 秒，避免每个分片请求都把清单重读一遍 */
+const TRIAL_CACHE_TTL_MS = 5000
+const TRIAL_ALLOWED = new Map()
+
+function denyTrial(res, status, message) {
+  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(String(message))
+}
+
+/**
+ * 剩余试看秒数。接口把秒数签进了 scope（`/media/trial/<id>/<sec>/`），所以 query 上的 sec
+ * 是可信的：直接按它截断，播放过程中窗口不会随时间缩水（早期实现与 expires 取 min，
+ * 结果看到第 100 秒时预算回落到几十秒，后面的分片突然 403）。
+ * 没有 sec 的旧链接退回「expires 剩余秒数」。向下取 5 秒的整数倍，让同一窗口命中同一份缓存。
+ */
+function trialBudgetOf(url, expires) {
+  const leftSeconds = Number(expires) - Math.floor(Date.now() / 1000)
+  const signed = Math.trunc(Number(url.searchParams.get('sec') ?? NaN))
+  const budget = Number.isFinite(signed) && signed > 0 ? Math.min(signed, 3600) : leftSeconds
+  if (!Number.isFinite(budget) || budget <= 0) return 0
+  return Math.floor(budget / 5) * 5
+}
+
+/**
+ * 本地 HLS 目录里「试看窗口内可取的分片」集合。
+ * 目录结构与 /media/hls/<id>/ 完全一致：master index.m3u8 → <rendition>/index.m3u8 → seg_xxx.ts。
+ * master 与变体清单用同一份秒数预算各自截断，分片名带目录前缀，才能跟请求路径对上。
+ */
+function trialAllowedOf(episodeId, seconds) {
+  const key = `${episodeId}:${seconds}`
+  const hit = TRIAL_ALLOWED.get(key)
+  if (hit && Date.now() - hit.at < TRIAL_CACHE_TTL_MS) return hit.allowed
+  const root = join(HLS_DIR, String(episodeId))
+  const allowed = new Set()
+  const readManifest = (relPath, depth) => {
+    const manifestPath = resolveInside(root, relPath)
+    if (!manifestPath || !existsSync(manifestPath)) return
+    let text = ''
+    try {
+      text = readFileSync(manifestPath, 'utf8')
+    } catch {
+      return
+    }
+    const cut = truncatePlaylist(text, { seconds })
+    const dirPrefix = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/') + 1) : ''
+    for (const rawUri of cut.allowed) {
+      const full = `${dirPrefix}${normalizePlaylistUri(rawUri)}`
+      allowed.add(full)
+      if (/\.m3u8$/i.test(full) && depth > 0) readManifest(full, depth - 1)
+    }
+  }
+  readManifest('index.m3u8', 1)
+  if (TRIAL_ALLOWED.size > 128) TRIAL_ALLOWED.delete(TRIAL_ALLOWED.keys().next().value)
+  TRIAL_ALLOWED.set(key, { allowed, at: Date.now() })
+  return allowed
+}
+
+/**
+ * GET /media/trial/<episodeId>/<name>
+ * 公网接口给试看请求签的 scope 是 /media/trial/<episodeId>/<sec>/，与 /media/hls/ 的整集 scope 不同：
+ * 秒数进签名，客户端改 sec 参数只会让整条链接失效；这里只放行「前 N 秒清单里出现过的分片」，
+ * 其余一律 403，从服务端真正限制能拉多少内容。
+ */
+function serveTrialMedia(req, res, url, pathname) {
+  const match = /^\/media\/trial\/(\d+)\/(.*)$/.exec(pathname)
+  if (!match) {
+    denyTrial(res, 403, '403 试看链接无效')
+    return
+  }
+  const episodeId = Number(match[1])
+  const name = safeDecode(match[2])
+  if (!name || name.includes('..') || name.startsWith('/')) {
+    denyTrial(res, 403, '403 非法路径')
+    return
+  }
+  const cookies = cookiesOf(req)
+  const sign = url.searchParams.get('sign') ?? cookies[`mh_link_${episodeId}`]
+  const expires = url.searchParams.get('expires') ?? cookies[`mh_exp_${episodeId}`]
+  // 秒数进 scope：签成 /media/trial/<id>/<sec>/ 后，改 query 里的 sec 会导致签名对不上
+  const signedSeconds = Math.trunc(Number(url.searchParams.get('sec') ?? NaN))
+  const secPart = Number.isFinite(signedSeconds) && signedSeconds > 0 ? `${signedSeconds}/` : ''
+  const scope = `/media/trial/${episodeId}/${secPart}`
+  const ok = ALLOW_UNSIGNED || verifyLink(scope, sign, expires, String(req.headers['user-agent'] ?? ''))
+  if (!ok) {
+    denyTrial(res, 403, '403 试看链接无效或已过期')
+    return
+  }
+  const budget = trialBudgetOf(url, expires)
+  const root = join(HLS_DIR, String(episodeId))
+  const filePath = resolveInside(root, name)
+  if (!filePath) {
+    denyTrial(res, 403, '403 非法路径')
+    return
+  }
+  if (/\.m3u8$/i.test(name)) {
+    if (!existsSync(filePath)) {
+      denyTrial(res, 404, '404')
+      return
+    }
+    const cut = truncatePlaylist(readFileSync(filePath, 'utf8'), { seconds: budget })
+    // 分片/子清单地址带上同一张票：播放器解析相对地址会丢掉页面 query，只靠 Cookie 在换码率时会漏
+    const ticket = url.searchParams.toString()
+    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' })
+    res.end(stampPlaylist(cut.text, ticket))
+    return
+  }
+  if (!/\.(ts|m4s|mp4|aac|key)$/i.test(name)) {
+    denyTrial(res, 403, '403 试看只提供清单与分片')
+    return
+  }
+  if (budget <= 0 || !trialAllowedOf(episodeId, budget).has(name)) {
+    denyTrial(res, 403, '403 试看已结束，购买后可看完整剧集')
+    return
+  }
+  if (!existsSync(filePath)) {
+    denyTrial(res, 404, '404')
+    return
+  }
+  serveFileWithRange(req, res, filePath, 'private, max-age=60')
+}
+
 
 /** 模拟支付页（仅测试环境；生产关闭 mock 渠道后本页 404）。 */
 function mockPayPage(outTradeNo, res) {
@@ -295,13 +435,18 @@ const server = createServer(async (req, res) => {
     // nginx auth_request：校验播放签名（Cookie 或 query），命中返回 204
     if (pathname === '/media-auth') {
       const original = String(req.headers['x-original-uri'] ?? '')
-      const mediaPath = original.replace(/^\/video/, '').split('?')[0]
+      const mediaPath = stripBasePath(original).split('?')[0]
       const { sign, expires } = linkCredentials(req, mediaPath, url)
       const ua = String(req.headers['user-agent'] ?? '')
       const ok = ALLOW_UNSIGNED || verifyLink(mediaPath, sign, expires, ua)
       res.writeHead(ok ? 204 : 403, { 'cache-control': 'no-store' })
       res.end()
       return
+    }
+
+    // 试看：清单按秒截断 + 分片白名单（scope 是 /media/trial/<episodeId>/）
+    if (pathname.startsWith('/media/trial/')) {
+      return serveTrialMedia(req, res, url, pathname)
     }
 
     if (pathname.startsWith('/media/hls/')) {
@@ -311,7 +456,7 @@ const server = createServer(async (req, res) => {
         res.end('403 播放链接无效或已过期')
         return
       }
-      const relative = decodeURIComponent(pathname.replace('/media/hls/', ''))
+      const relative = safeDecode(pathname.replace('/media/hls/', ''))
       // 归一化后再校验前缀，堵住 ..%2f 之类的穿越（签名本身不覆盖路径语义）
       const filePath = resolveInside(HLS_DIR, relative)
       if (!filePath) {
@@ -423,7 +568,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/media/previews/')) {
-      const relative = decodeURIComponent(pathname.replace('/media/previews/', ''))
+      const relative = safeDecode(pathname.replace('/media/previews/', ''))
       const filePath = resolveInside(PREVIEW_DIR, relative)
       if (!filePath) {
         res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
@@ -521,6 +666,29 @@ const server = createServer(async (req, res) => {
   }
 })
 
+/**
+ * 进程级兜底：一次读文件失败（构建时原子替换 dist、转码清理、管理员删集）不能让 Node
+ * 直接退出——那会把所有在途请求一起带走，nginx 侧表现为整站 502。
+ * 记录完整栈后停止接新请求，5 秒内没关完就强杀（卡住的连接不阻塞退出）。
+ */
+function fatalShutdown(event, error) {
+  try {
+    logError(event, { error, pid: process.pid })
+  } catch {
+    console.error(`[${event}]`, error?.stack ?? error)
+  }
+  const force = setTimeout(() => process.exit(1), 5000)
+  force.unref?.()
+  try {
+    server.close(() => process.exit(1))
+  } catch {
+    process.exit(1)
+  }
+}
+
+process.on('uncaughtException', (error) => fatalShutdown('process.uncaught_exception', error))
+process.on('unhandledRejection', (reason) => fatalShutdown('process.unhandled_rejection', reason))
+
 // 每分钟关掉超时未支付的订单
 setInterval(() => {
   try { closeExpiredOrders() } catch (error) { console.error('[closeExpiredOrders]', error) }
@@ -596,6 +764,18 @@ connectRedis().catch(() => {})
   const stuck = db.prepare("UPDATE episodes SET status = 'pending', progress = 0 WHERE status IN ('transcoding', 'queued')").run()
   if (stuck.changes) console.log(`[media] 复位 ${stuck.changes} 个中断的转码任务`)
 }
+
+// 端口被占用时 listen 会发 error 事件：没有监听就是未捕获的 'error' 直接崩，连原因都没有
+server.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE') {
+    console.error(`[启动失败] 端口 ${PORT} 已被占用：先停掉占用该端口的进程，或用 PORT=<其它端口> 重启`)
+  } else if (error?.code === 'EACCES') {
+    console.error(`[启动失败] 没有权限监听端口 ${PORT}（1024 以下端口需要管理员权限或能力位）`)
+  } else {
+    console.error('[启动失败]', error?.stack ?? error)
+  }
+  process.exit(1)
+})
 
 server.listen(PORT, '127.0.0.1', () => {
   const stats = {

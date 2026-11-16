@@ -1,20 +1,117 @@
 /** 账号与会话：scrypt 口令哈希 + HMAC 签名 token（无第三方依赖）。 */
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto'
+import { promisify } from 'node:util'
 import { db } from './db.mjs'
 
 const SECRET = process.env.MH_SECRET ?? 'mh-clone-dev-secret-change-me'
 const TOKEN_TTL_MS = 7 * 24 * 3600 * 1000
+// scrypt 默认参数（N=16384, r=8, p=1）与成本写进摘要串，将来调参不影响老数据校验
+const SCRYPT_COST = 16384
+const SCRYPT_KEYLEN = 32
+const HASH_PREFIX = 'scrypt'
+const scryptAsync = promisify(scrypt)
 
-export function hashPassword(password, salt = randomBytes(8).toString('hex')) {
-  const hash = scryptSync(String(password), salt, 32).toString('hex')
-  return hash
+/** 定时安全比较：长度不等直接 false，等长才走 timingSafeEqual（避免抛异常泄露长度）。 */
+function safeEqualBytes(left, right) {
+  if (!left || !right || left.length !== right.length) return false
+  return timingSafeEqual(left, right)
 }
 
-export function verifyPassword(password, salt, expectedHash) {
-  const actual = scryptSync(String(password), salt, 32)
-  const expected = Buffer.from(expectedHash, 'hex')
-  if (actual.length !== expected.length) return false
-  return timingSafeEqual(actual, expected)
+/** 同上，用于 MAC / 摘要这类文本比较。 */
+function safeEqualText(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false
+  return safeEqualBytes(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+}
+
+function scryptOptions(cost) {
+  return cost === SCRYPT_COST ? undefined : { N: cost }
+}
+
+/** 自描述摘要：scrypt$<cost>$<salt>$<hexhash>，salt 跟着哈希走，不再依赖单独的 salt 列。 */
+function encodeHash(salt, key) {
+  return `${HASH_PREFIX}$${SCRYPT_COST}$${salt}$${Buffer.from(key).toString('hex')}`
+}
+
+/**
+ * 解析存储的摘要：
+ * - 新格式 `scrypt$cost$salt$hex` 自带 salt；
+ * - 历史数据是裸 hex 摘要，必须由调用方补 salt（第二个参数），否则无法校验。
+ */
+function parseStoredHash(stored, fallbackSalt) {
+  const text = String(stored ?? '')
+  if (!text) return undefined
+  if (text.startsWith(`${HASH_PREFIX}$`)) {
+    const parts = text.split('$')
+    if (parts.length !== 4) return undefined
+    const cost = Number(parts[1])
+    const salt = parts[2]
+    const hex = parts[3]
+    if (!Number.isInteger(cost) || cost < 1024 || !salt || !/^[0-9a-f]+$/i.test(hex) || hex.length % 2 !== 0) return undefined
+    const hash = Buffer.from(hex, 'hex')
+    if (hash.length !== SCRYPT_KEYLEN) return undefined
+    return { cost, salt, hash }
+  }
+  if (fallbackSalt === undefined || fallbackSalt === null || fallbackSalt === '') return undefined
+  if (!/^[0-9a-f]+$/i.test(text) || text.length % 2 !== 0) return undefined
+  const hash = Buffer.from(text, 'hex')
+  if (hash.length !== SCRYPT_KEYLEN) return undefined
+  return { cost: SCRYPT_COST, salt: String(fallbackSalt), hash }
+}
+
+function verifyParsed(parsed, password) {
+  const keylen = parsed.hash.length || SCRYPT_KEYLEN
+  const key = scryptSync(String(password), parsed.salt, keylen, scryptOptions(parsed.cost))
+  return safeEqualBytes(key, parsed.hash)
+}
+
+function verifyParsedAsync(parsed, password) {
+  const keylen = parsed.hash.length || SCRYPT_KEYLEN
+  return scryptAsync(String(password), parsed.salt, keylen, scryptOptions(parsed.cost))
+    .then((key) => safeEqualBytes(Buffer.from(key), parsed.hash))
+}
+
+/**
+ * 口令哈希。
+ * - `hashPassword(password)` → `Promise<string>`：走异步 scrypt，不占用事件循环（新代码一律用这个）。
+ * - `hashPassword(password, salt)` → `string`：同步兼容形态，只服务仍然同步的种子/脚本调用
+ *   （server/db.mjs 的 seedIfEmpty / ensureAdminCredentials、scripts/reset-admin-password.mjs）。
+ *   这些调用点改成 `await` 之后必须删掉这条同步分支。
+ */
+export function hashPassword(password, salt) {
+  if (salt === undefined) {
+    const asyncSalt = randomBytes(8).toString('hex')
+    return scryptAsync(String(password), asyncSalt, SCRYPT_KEYLEN, scryptOptions(SCRYPT_COST))
+      .then((key) => encodeHash(asyncSalt, key))
+  }
+  return encodeHash(String(salt), scryptSync(String(password), String(salt), SCRYPT_KEYLEN, scryptOptions(SCRYPT_COST)))
+}
+
+/**
+ * 口令校验。
+ * - `verifyPassword(password, stored)` → `Promise<boolean>`：契约形态，异步 scrypt。
+ * - `verifyPassword(password, salt, storedHash)` → `boolean`：历史三参形态，同步返回；
+ *   仍被 api-public/api-admin/auth 内部未 await 的调用点使用，迁移到 await 后删除。
+ * 两条路径都用 timingSafeEqual（先比长度）。
+ */
+export function verifyPassword(password, second, third) {
+  if (third === undefined) {
+    const parsed = parseStoredHash(second)
+    if (!parsed) return Promise.resolve(false)
+    return verifyParsedAsync(parsed, password)
+  }
+  const parsed = parseStoredHash(third, second)
+  if (!parsed) return false
+  return verifyParsed(parsed, password)
+}
+
+/**
+ * 历史数据（salt 与摘要在两列里）的异步校验：迁移期给 api-public / api-admin 的登录、改密接口用，
+ * 避免 scryptSync 卡住事件循环。`hash` 已是新格式时会被优先解析，salt 参数可忽略。
+ */
+export function verifyPasswordAsync(password, salt, hash) {
+  const parsed = parseStoredHash(hash, salt)
+  if (!parsed) return Promise.resolve(false)
+  return verifyParsedAsync(parsed, password)
 }
 
 const b64 = (value) => Buffer.from(value).toString('base64url')
@@ -29,13 +126,16 @@ export function verifyToken(token) {
   if (typeof token !== 'string' || !token.includes('.')) return undefined
   const [body, mac] = token.split('.')
   const expected = createHmac('sha256', SECRET).update(body).digest('base64url')
-  if (mac !== expected) return undefined
+  // MAC 必须定时安全比较（长度不等直接失败），`!==` 会被逐字节计时差异泄露签名前缀
+  if (!safeEqualText(mac, expected)) return undefined
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'))
     if (!payload.exp || payload.exp < Date.now()) return undefined
     // 会话必须仍在库中：改密 / 封号 / 主动登出后旧 token 立即失效
-    const session = db.prepare('SELECT expires_at FROM sessions WHERE token = ?').get(token)
+    const session = db.prepare('SELECT token, expires_at FROM sessions WHERE token = ?').get(token)
     if (!session) return undefined
+    // 库里取回的行再按字节比一次，避免任何按前缀命中的宽松比较
+    if (!safeEqualText(session.token, token)) return undefined
     if (Number(session.expires_at) < Date.now()) return undefined
     return payload
   } catch { return undefined }

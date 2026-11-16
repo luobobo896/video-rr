@@ -1,6 +1,7 @@
 /** 内容统计：点击、有效观看会话、收藏事件、聚合报表和榜单快照。 */
 import { createHash, randomUUID } from 'node:crypto'
 import { db } from './db.mjs'
+import { parseDays } from './analytics.mjs'
 import { adultVisibilitySql } from './content-visibility.mjs'
 
 const all = (sql, ...args) => db.prepare(sql).all(...args)
@@ -97,7 +98,12 @@ export function applyHeartbeat({
     }
   }
   const threshold = viewThresholdSeconds(duration)
-  const position = Math.max(0, Number(positionSeconds ?? 0))
+  // 播放位置来自客户端：夹在 [0, duration]。明显越界（比整片还长 2 秒以上，如 positionSeconds=1e9）
+  // 视为伪造心跳——不推进进度、不置完播，只能沿用已累计的最远位置。
+  const rawPosition = Number(positionSeconds ?? 0)
+  const storedPosition = Number(session.max_position_seconds ?? 0)
+  const plausible = Number.isFinite(rawPosition) && rawPosition >= 0 && rawPosition <= duration + 2
+  const position = plausible ? Math.min(duration, rawPosition) : Math.min(duration, Math.max(0, storedPosition))
   const last = new Date(String(session.last_heartbeat_at).replace(' ', 'T') + 'Z').getTime()
   const elapsedSinceLast = Number.isFinite(last) ? Math.max(0, (Date.now() - last) / 1000) : 0
   if (elapsedSinceLast > 45) {
@@ -113,7 +119,8 @@ export function applyHeartbeat({
   const rate = Math.max(0.25, Math.min(4, Number(playbackRate) || 1))
   const effectiveDelta = playing && visible && progressDelta > 0.05 ? Math.min(elapsed, 20) : 0
   const effective = Number(session.effective_seconds ?? 0) + effectiveDelta
-  const completed = duration > 0 ? position / duration >= 0.9 : Number(session.completed ?? 0)
+  // 完播一旦达成就保持（回拖不该把已有的完播抹掉），且伪造心跳永远不算完播
+  const completed = Number(session.completed ?? 0) || (plausible && position / duration >= 0.9) ? 1 : 0
   let valid = Number(session.is_valid ?? 0)
   let validAt = session.valid_at
   if (!valid && effective >= threshold) {
@@ -235,34 +242,60 @@ export function rebuildContentStats({ days = 2 } = {}) {
   return { contents: contents.length, days: dates.length }
 }
 
-function analyticsRows({ days = 7, contentType, category, contentId } = {}) {
-  const since = new Date(Date.now() - Math.max(1, Number(days) || 7) * 86400_000)
-    .toISOString().slice(0, 19).replace('T', ' ')
+/** 内容分析用的公共 SELECT：9 个时间窗参数在前，筛选参数在后（占位符顺序与 SQL 文本一致）。 */
+function analyticsSelect({ since, contentType, category, contentId }) {
   const clauses = ["d.status = 'published'"]
-  const args = Array(9).fill(since)
-  if (contentType && contentType !== 'all') { clauses.push('d.content_type = ?'); args.push(contentType) }
-  if (category && category !== 'all') { clauses.push('d.category = ?'); args.push(category) }
-  if (contentId) { clauses.push('d.id = ?'); args.push(Number(contentId)) }
-  const rows = all(`SELECT d.id AS contentId, d.title, d.content_type AS contentType, d.category,
+  const filters = []
+  if (contentType && contentType !== 'all') { clauses.push('d.content_type = ?'); filters.push(contentType) }
+  if (category && category !== 'all') { clauses.push('d.category = ?'); filters.push(category) }
+  if (contentId) { clauses.push('d.id = ?'); filters.push(Number(contentId)) }
+  const sql = `SELECT d.id AS contentId, d.title, d.content_type AS contentType, d.category,
       d.score, d.published_at AS publishedAt,
       (SELECT COUNT(*) FROM content_click_events e WHERE e.content_id = d.id AND e.occurred_at >= ?) AS clickCount,
       (SELECT COUNT(DISTINCT e.viewer_key) FROM content_click_events e WHERE e.content_id = d.id AND e.occurred_at >= ?) AS clickUv,
       (SELECT COUNT(*) FROM content_view_sessions s WHERE s.content_id = d.id AND s.is_valid = 1 AND s.source NOT IN ('trial','preview') AND s.started_at >= ?) AS viewCount,
       (SELECT COUNT(DISTINCT s.viewer_key) FROM content_view_sessions s WHERE s.content_id = d.id AND s.is_valid = 1 AND s.source NOT IN ('trial','preview') AND s.started_at >= ?) AS viewerCount,
       (SELECT COUNT(*) FROM content_view_sessions s WHERE s.content_id = d.id AND s.is_valid = 1 AND s.source NOT IN ('trial','preview') AND s.completed = 1 AND s.started_at >= ?) AS completionCount,
-      (SELECT COALESCE(AVG(s.effective_seconds),0) FROM content_view_sessions s WHERE s.content_id = d.id AND s.is_valid = 1 AND s.source NOT IN ('trial','preview') AND s.started_at >= ?) AS avgWatchSeconds,
+      (SELECT COALESCE(SUM(s.effective_seconds), 0) FROM content_view_sessions s WHERE s.content_id = d.id AND s.is_valid = 1 AND s.source NOT IN ('trial','preview') AND s.started_at >= ?) AS watchSeconds,
       (SELECT COUNT(*) FROM content_favorite_events f WHERE f.content_id = d.id AND f.is_migration = 0 AND f.action = 'add' AND f.occurred_at >= ?) AS favoriteAddCount,
       (SELECT COUNT(*) FROM content_favorite_events f WHERE f.content_id = d.id AND f.is_migration = 0 AND f.action = 'remove' AND f.occurred_at >= ?) AS favoriteRemoveCount,
       (SELECT COUNT(DISTINCT f.user_id) FROM content_favorite_events f WHERE f.content_id = d.id AND f.is_migration = 0 AND f.action = 'add' AND f.occurred_at >= ?) AS favoriteAddUv,
       (SELECT COUNT(*) FROM favorites fv WHERE fv.drama_id = d.id) AS favoriteCount
-    FROM dramas d WHERE ${clauses.join(' AND ')}
-    ORDER BY d.id ASC`, ...args)
+    FROM dramas d WHERE ${clauses.join(' AND ')}`
+  return { sql, args: [...Array(9).fill(since), ...filters], since }
+}
+
+const TOTAL_KEYS = ['clickCount', 'clickUv', 'viewCount', 'viewerCount', 'completionCount', 'watchSeconds', 'favoriteAddCount', 'favoriteRemoveCount', 'favoriteCount']
+
+/** 全量合计：一次聚合查询算完，分页只影响 rows，不影响口径。 */
+function analyticsTotals({ since, contentType, category, contentId }) {
+  const { sql, args } = analyticsSelect({ since, contentType, category, contentId })
+  const row = one(`SELECT COUNT(*) AS contents, ${TOTAL_KEYS.map((key) => `COALESCE(SUM(${key}), 0) AS ${key}`).join(', ')}
+    FROM (${sql})`, ...args) ?? {}
+  const totals = { contents: Number(row.contents ?? 0) }
+  for (const key of TOTAL_KEYS) totals[key] = Number(row[key] ?? 0)
+  totals.completionRate = totals.viewCount ? totals.completionCount / totals.viewCount : 0
+  totals.favoriteRate = totals.viewerCount ? totals.favoriteAddCount / totals.viewerCount : 0
+  // 平均观看时长按「总观看秒数 / 有效播放数」算：先按剧求均值再求平均是错的（长剧会带偏整体）
+  totals.avgWatchSeconds = totals.viewCount ? totals.watchSeconds / totals.viewCount : 0
+  return totals
+}
+
+function analyticsRows({ days = 7, contentType, category, contentId, limit = 0, offset = 0 } = {}) {
+  const span = parseDays(days, 7, 1, 365)
+  const since = new Date(Date.now() - span * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
+  const { sql, args } = analyticsSelect({ since, contentType, category, contentId })
+  const paged = Number(limit) > 0
+  const rows = paged
+    ? all(`${sql} ORDER BY d.id ASC LIMIT ? OFFSET ?`, ...args, Math.trunc(Number(limit)), Math.max(0, Math.trunc(Number(offset)) || 0))
+    : all(`${sql} ORDER BY d.id ASC`, ...args)
   return rows.map((row) => {
     const viewCount = Number(row.viewCount ?? 0)
     const viewerCount = Number(row.viewerCount ?? 0)
     const completionCount = Number(row.completionCount ?? 0)
     const clickUv = Number(row.clickUv ?? 0)
     const favoriteAddUv = Number(row.favoriteAddUv ?? 0)
+    const watchSeconds = Number(row.watchSeconds ?? 0)
     const interim = one(`SELECT COUNT(*) AS n FROM (
       SELECT viewer_key AS id FROM content_view_sessions
       WHERE content_id = ? AND is_valid = 1 AND source NOT IN ('trial','preview') AND started_at >= ?
@@ -273,9 +306,9 @@ function analyticsRows({ days = 7, contentType, category, contentId } = {}) {
     return {
       ...row,
       contentId: Number(row.contentId), clickCount: Number(row.clickCount ?? 0), clickUv,
-      viewCount, viewerCount, completionCount,
+      viewCount, viewerCount, completionCount, watchSeconds,
       completionRate: viewCount ? completionCount / viewCount : 0,
-      avgWatchSeconds: Number(row.avgWatchSeconds ?? 0),
+      avgWatchSeconds: viewCount ? watchSeconds / viewCount : 0,
       favoriteAddCount: Number(row.favoriteAddCount ?? 0),
       favoriteRemoveCount: Number(row.favoriteRemoveCount ?? 0),
       favoriteAddUv, favoriteCount: Number(row.favoriteCount ?? 0),
@@ -286,18 +319,18 @@ function analyticsRows({ days = 7, contentType, category, contentId } = {}) {
 }
 
 export function contentAnalytics(options = {}) {
-  const rows = analyticsRows(options)
-  const totals = rows.reduce((acc, row) => {
-    for (const key of ['clickCount', 'clickUv', 'viewCount', 'viewerCount', 'completionCount', 'favoriteAddCount', 'favoriteRemoveCount', 'favoriteCount']) {
-      acc[key] += Number(row[key] ?? 0)
-    }
-    acc.avgWatchSeconds += Number(row.avgWatchSeconds ?? 0)
-    return acc
-  }, { clickCount: 0, clickUv: 0, viewCount: 0, viewerCount: 0, completionCount: 0, favoriteAddCount: 0, favoriteRemoveCount: 0, favoriteCount: 0, avgWatchSeconds: 0 })
-  totals.completionRate = totals.viewCount ? totals.completionCount / totals.viewCount : 0
-  totals.favoriteRate = totals.viewerCount ? totals.favoriteAddCount / totals.viewerCount : 0
-  totals.avgWatchSeconds = rows.length ? totals.avgWatchSeconds / rows.length : 0
-  return { rows, totals, range: { days: Number(options.days) || 7 } }
+  const days = parseDays(options.days, 7, 1, 365)
+  // 默认 50、上限 200：早期一次性把整站内容连 INTERSECT 全部算完，库一大后台就超时
+  const limit = Math.min(200, Math.max(1, Math.trunc(Number(options.limit)) || 50))
+  const offset = Math.max(0, Math.trunc(Number(options.offset)) || 0)
+  const rows = analyticsRows({ ...options, days, limit, offset })
+  const totals = analyticsTotals({ ...options, since: new Date(Date.now() - days * 86400_000).toISOString().slice(0, 19).replace('T', ' ') })
+  const total = totals.contents
+  return {
+    rows, totals, total,
+    page: { limit, offset, hasMore: offset + rows.length < total },
+    range: { days },
+  }
 }
 
 const RANK_META = {
@@ -312,7 +345,7 @@ export const CONTENT_RANK_TYPES = Object.fromEntries(Object.entries(RANK_META).m
 
 export function buildContentRank({ rankType = 'hot', contentType = 'all', days, limit = 20 } = {}) {
   const meta = RANK_META[rankType] ?? RANK_META.hot
-  const windowDays = Number(days) || meta.windowDays
+  const windowDays = parseDays(days, meta.windowDays, 1, 365)
   let rows = analyticsRows({ days: windowDays, contentType })
   rows = rows.filter((row) => Boolean(row.contentType))
   if (rankType === 'hot') rows = rows.filter((row) => row.viewerCount > 0)
@@ -345,22 +378,26 @@ export function buildContentRank({ rankType = 'hot', contentType = 'all', days, 
       || b.completionRate - a.completionRate || b.favoriteCount - a.favoriteCount || a.contentId - b.contentId)
   }
   rows = rows.slice(0, Math.max(1, Math.min(100, Number(limit) || 20)))
-  const runInfo = run(`INSERT INTO content_rank_runs
-    (rank_type, dimension_type, dimension_value, window_start, window_end, strategy_version, status, generated_at)
-    VALUES (?, 'content_type', ?, datetime('now', ?), datetime('now'), 'v1', 'success', datetime('now'))`,
-  rankType, contentType, `-${windowDays} days`)
-  const runId = Number(runInfo.lastInsertRowid)
-  for (let index = 0; index < rows.length; index += 1) {
-    const row = rows[index]
-    const metrics = {
-      viewerCount: row.viewerCount, viewCount: row.viewCount, completionRate: row.completionRate,
-      favoriteAddUv: row.favoriteAddUv, favoriteCount: row.favoriteCount, score: row.score ?? null,
+  // 一次榜单生成要写 runs + snapshots 两张表：中途失败不能留下「有 run 没快照」的半截榜单
+  const runId = tx(() => {
+    const runInfo = run(`INSERT INTO content_rank_runs
+      (rank_type, dimension_type, dimension_value, window_start, window_end, strategy_version, status, generated_at)
+      VALUES (?, 'content_type', ?, datetime('now', ?), datetime('now'), 'v1', 'success', datetime('now'))`,
+    rankType, contentType, `-${windowDays} days`)
+    const id = Number(runInfo.lastInsertRowid)
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]
+      const metrics = {
+        viewerCount: row.viewerCount, viewCount: row.viewCount, completionRate: row.completionRate,
+        favoriteAddUv: row.favoriteAddUv, favoriteCount: row.favoriteCount, score: row.score ?? null,
+      }
+      run(`INSERT INTO content_rank_snapshots
+        (run_id, content_id, rank_no, score, metrics_json, generated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+      id, row.contentId, index + 1, Number(row.score ?? row.viewerCount ?? 0), JSON.stringify(metrics))
     }
-    run(`INSERT INTO content_rank_snapshots
-      (run_id, content_id, rank_no, score, metrics_json, generated_at)
-      VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-    runId, row.contentId, index + 1, Number(row.score ?? row.viewerCount ?? 0), JSON.stringify(metrics))
-  }
+    return id
+  })
   return { runId, rankType, label: meta.label, contentType, windowDays, items: rows.map((row, index) => ({ rankNo: index + 1, ...row })) }
 }
 

@@ -14,6 +14,8 @@ import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { db } from './db.mjs'
+import { expiryOf } from './jable.mjs'
+import { logInfo, logWarn } from './logger.mjs'
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'jable-import.mjs')
 const REFRESH_AHEAD_MS = Number(process.env.MH_REFRESH_AHEAD_MS || 10 * 60 * 1000)
@@ -31,11 +33,22 @@ const MAX_CONCURRENT = Math.max(1, Number(process.env.MH_REFRESH_CONCURRENCY || 
 let attempts = 0
 const inflight = new Map()
 const failing = new Map()
+// failing 是"按剧 id 记冷却"，长期运行会随库里剧数增长；给个上限，超了就丢最早写入的条目。
+const MAX_FAILING = Math.max(100, Number(process.env.MH_REFRESH_FAILING_MAX || 5000))
+
+function rememberFailure(dramaId, value) {
+  failing.delete(dramaId)
+  failing.set(dramaId, value)
+  while (failing.size > MAX_FAILING) failing.delete(failing.keys().next().value)
+}
 const waiting = []
 let active = 0
 
 /** 从直链里取签名到期时间戳（秒）；取不到返回 0。 */
-export const expiryOf = (url) => Number(/\/hls\/[^/]+\/(\d{9,})\//.exec(String(url ?? ''))?.[1] ?? 0)
+// expiryOf 统一由 jable.mjs 提供：这里曾经自己写了一份正则，和导入侧漂移成
+// `\d{9,}` vs `\d{9,11}`，同一个直链两边算出不同的过期时间。保留 re-export 是为了
+// 不改 test/jable-refresh.test.mjs 与其它调用方的导入路径。
+export { expiryOf }
 
 /** sub_title 形如「MIKR-134 · 白川美玲」，取前面的番号（连字符和下划线都算）。 */
 export const codeOf = (subTitle) => /^([A-Za-z0-9]+[-_]\d+)/.exec(String(subTitle ?? '').trim())?.[1] ?? ''
@@ -196,9 +209,12 @@ async function renew(row, episodeId, timeoutMs) {
   const ok = expiryOf(current) > before && leftMsOf(current) > 0
   if (ok) {
     failing.delete(row.dramaId)
+    logInfo('jable.refresh_ok', { episodeId, leftMs: leftMsOf(current) })
   } else {
     const prev = failureCountOf(row.dramaId)
-    failing.set(row.dramaId, { until: Date.now() + cooldownFor(prev + 1), count: prev + 1 })
+    rememberFailure(row.dramaId, { until: Date.now() + cooldownFor(prev + 1), count: prev + 1 })
+    // 只记番号与阈值，别把带签名的直链写进日志
+    logWarn('jable.refresh_failed', { episodeId, code, attempt: prev + 1, cooldownMs: cooldownFor(prev + 1) })
   }
   return { refreshed: true, ok, leftMs: leftMsOf(current || own?.remoteUrl), failureCount: failureCountOf(row.dramaId) }
 }

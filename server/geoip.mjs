@@ -1,7 +1,16 @@
-/** IP 归属地：批量查询 + 内存/SQLite 双层缓存，外部不可用时静默降级为空。 */
+/**
+ * IP 归属地：批量查询 + 内存/SQLite 双层缓存，外部不可用时静默降级为空。
+ *
+ * 用户 IP 属于个人信息，默认不外发；要开必须显式给两个开关之一：
+ *   MH_GEOIP=1      打开外发
+ *   MH_GEOIP_URL=…  指定端点（缺省见 DEFAULT_API_URL）
+ * 端点一律走 https：原来硬编码 http://ip-api.com/batch，会把用户 IP 明文发到公网。
+ * 免费版 ip-api 只支持 http，需要它的话自己填 MH_GEOIP_URL 并接受明文这一后果。
+ */
 import { db } from './db.mjs'
+import { logWarn } from './logger.mjs'
 
-const API_URL = 'http://ip-api.com/batch?lang=zh-CN&fields=status,country,regionName,city,query'
+const DEFAULT_API_URL = 'https://pro.ip-api.com/batch?lang=zh-CN&fields=status,country,regionName,city,query'
 const BATCH = 100
 const OK_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const FAIL_TTL_MS = 10 * 60 * 1000
@@ -14,7 +23,26 @@ const memory = new Map()
 let chain = Promise.resolve()
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
-const off = () => String(process.env.MH_GEOIP ?? '').trim().toLowerCase() === 'off'
+/** 默认关闭：只有显式 MH_GEOIP=1 才允许外发查询 */
+const enabled = () => String(process.env.MH_GEOIP ?? '').trim() === '1'
+const apiUrl = () => String(process.env.MH_GEOIP_URL ?? '').trim() || DEFAULT_API_URL
+
+/** 日志里的 IP 只留前两段（v4）/ 前两组（v6）：归属地统计不需要精确到主机 */
+export function maskIp(ip) {
+  const value = String(ip ?? '').trim()
+  if (!value) return ''
+  if (value.includes(':')) return `${value.split(':').filter(Boolean).slice(0, 2).join(':')}:…`
+  const parts = value.split('.')
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.x.x` : value
+}
+
+function endpointHost(endpoint) {
+  try {
+    return new URL(endpoint).host
+  } catch {
+    return 'invalid'
+  }
+}
 
 /** 内网/本机/保留地址：不打外部接口。IPv6 只做粗判（ULA 与链路本地）。 */
 export function isPrivateIp(ip) {
@@ -50,18 +78,29 @@ function writeRow(ip, label, now) {
 }
 
 async function queryBatch(ips) {
+  const endpoint = apiUrl()
+  if (!/^https:\/\//i.test(endpoint)) {
+    // 明文端点会把用户 IP 抖给链路上的任何人：只说不做，让运维显式改配置
+    logWarn('geoip.insecure_endpoint', { host: endpointHost(endpoint), count: ips.length })
+    return null
+  }
   try {
-    const res = await fetch(API_URL, {
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(ips),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      // 只记主机名与状态码：URL 里可能带 API key，按 docs/LOGGING.md 一律不外泄
+      logWarn('geoip.query_failed', { host: endpointHost(endpoint), status: res.status, count: ips.length, sample: maskIp(ips[0]) })
+      return null
+    }
     const data = await res.json()
     if (!Array.isArray(data)) return null
     return data
-  } catch {
+  } catch (error) {
+    logWarn('geoip.query_error', { host: endpointHost(endpoint), count: ips.length, sample: maskIp(ips[0]), message: error?.message ?? 'unknown' })
     return null
   }
 }
@@ -102,7 +141,7 @@ export async function resolveRegions(ips) {
     need.push(ip)
   }
   if (!need.length) return out
-  if (off()) {
+  if (!enabled()) {
     for (const ip of need) out.set(ip, '')
     return out
   }
@@ -113,8 +152,10 @@ export async function resolveRegions(ips) {
     const rows = await serialize(() => queryBatch(slice))
     const stamp = Date.now()
     for (const ip of slice) {
-      const row = rows?.find((item) => item?.query === ip)
-      const label = row && row.status === 'success' ? regionLabel({ country: row.country, region: row.regionName, city: row.city }) : ''
+      // 端点可换（MH_GEOIP_URL），按 ip-api 版式解析，同时兼容 ipwho.is 的 success/ip 字段
+      const row = rows?.find((item) => (item?.query ?? item?.ip) === ip)
+      const hit = row && (row.status === 'success' || row.success === true)
+      const label = hit ? regionLabel({ country: row.country, region: row.regionName ?? row.region, city: row.city }) : ''
       memory.set(ip, { label, at: stamp, ok: Boolean(label) })
       if (label) writeRow(ip, label, stamp)
       out.set(ip, label)

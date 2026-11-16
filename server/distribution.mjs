@@ -49,15 +49,33 @@ export class DistributionError extends Error {
   }
 }
 
+const BUSY_BACKOFF_MS = [20, 60, 150]
+const sleepSync = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+const isBusyError = (error) => /\bSQLITE_BUSY\b|\bSQLITE_LOCKED\b|database (?:table )?is locked/i
+  .test(`${error?.code ?? ''} ${error?.message ?? ''}`)
+
+/**
+ * 分销写事务：BEGIN IMMEDIATE 先拿写锁，busy 时按 20/60/150ms 退避重试共 3 次
+ * （导入/批处理进程占着写锁时排队而不是直接失败），非 busy 错误立即回滚抛出。
+ */
 function tx(fn) {
-  db.exec('BEGIN IMMEDIATE')
-  try {
-    const result = fn()
-    db.exec('COMMIT')
-    return result
-  } catch (error) {
-    db.exec('ROLLBACK')
-    throw error
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      db.exec('BEGIN IMMEDIATE')
+    } catch (error) {
+      if (!isBusyError(error) || attempt >= BUSY_BACKOFF_MS.length) throw error
+      sleepSync(BUSY_BACKOFF_MS[attempt])
+      continue
+    }
+    try {
+      const result = fn()
+      db.exec('COMMIT')
+      return result
+    } catch (error) {
+      try { db.exec('ROLLBACK') } catch { /* 回滚失败不能掩盖原始错误 */ }
+      if (!isBusyError(error) || attempt >= BUSY_BACKOFF_MS.length) throw error
+      sleepSync(BUSY_BACKOFF_MS[attempt])
+    }
   }
 }
 
@@ -558,14 +576,37 @@ export function bindReferral({ userId, visitorId, code, inviterUserId } = {}) {
   })
 }
 
+/**
+ * 逐级上游链：沿 distribution_relations 一跳一跳往上走，每一级都取「该层级那一条关系」的 id。
+ * 以前每一级都塞直属关系 id（`? AS sourceRelationId` 传的是 direct.id），导致：
+ *  - 直属关系被风控冻结时，上上级的佣金一起被冻（风控按错误的层级判定）；
+ *  - 关系行被置空（source_relation_id ON DELETE SET NULL）后，风控判定靠 COALESCE 默认放行。
+ * 现在按真实层级取行，并连同该行的 status / risk_status 一起带回。
+ * 断链（找不到上一层关系，或关系成环）就停止：选 fail-closed——上上级不再出佣，
+ * 绝不会因为「查不到关系」而给佣金放行。
+ */
 export function getUplineChain(userId, maxLevel = 5) {
-  const direct = one('SELECT * FROM distribution_relations WHERE invitee_user_id = ?', Number(userId))
-  if (!direct) return []
-  return all(`SELECT c.ancestor_user_id AS distributorUserId, c.depth AS commissionLevel, ? AS sourceRelationId
-    FROM distribution_tree_closure c JOIN distributor_profiles dp
-      ON dp.user_id = c.ancestor_user_id AND dp.status = 'active'
-    WHERE c.descendant_user_id = ? AND c.depth <= ?
-    ORDER BY c.depth ASC`, direct.id, Number(userId), Math.max(1, Number(maxLevel) || 5))
+  const levels = Math.max(1, Number(maxLevel) || 5)
+  const chain = []
+  const seen = new Set()
+  let invitee = Number(userId)
+  for (let level = 1; level <= levels; level += 1) {
+    const relation = one('SELECT * FROM distribution_relations WHERE invitee_user_id = ?', invitee)
+    if (!relation || seen.has(Number(relation.id))) break
+    seen.add(Number(relation.id))
+    const profile = getDistributorProfile(relation.inviter_user_id)
+    if (profile && profile.status === 'active') {
+      chain.push({
+        distributorUserId: relation.inviter_user_id,
+        commissionLevel: level,
+        sourceRelationId: relation.id,
+        relationStatus: relation.status,
+        relationRiskStatus: relation.risk_status,
+      })
+    }
+    invitee = Number(relation.inviter_user_id)
+  }
+  return chain
 }
 
 export function getDistributionSnapshot(userId) {
@@ -652,10 +693,12 @@ export function createCommissionsForOrder(order, { paidAt = nowSql() } = {}) {
 }
 
 export function markCommissionsAvailable() {
+  // 冻结判定按佣金记录自己那一层的真实关系算（getUplineChain 写入的 source_relation_id），
+  // 用 JOIN 而不是 LEFT JOIN + COALESCE：关系行被删/被置空时永远不放行 = fail-closed。
   const rows = all(`SELECT c.* FROM commission_records c
-    LEFT JOIN distribution_relations r ON r.id = c.source_relation_id
+    JOIN distribution_relations r ON r.id = c.source_relation_id
     WHERE c.status = 'frozen' AND c.available_at IS NOT NULL AND c.available_at <= datetime('now')
-      AND COALESCE(r.status, 'active') = 'active' AND COALESCE(r.risk_status, 'normal') = 'normal'`)
+      AND r.status = 'active' AND r.risk_status = 'normal'`)
   for (const row of rows) {
     run("UPDATE commission_records SET status = 'available', updated_at = datetime('now') WHERE id = ? AND status = 'frozen'", row.id)
     run(`INSERT INTO commission_events (commission_id, event_type, amount_fen, reason, reference_type, reference_id)
@@ -806,7 +849,10 @@ export function reviewSettlement({ settlementId, action, reviewerId, payoutRef, 
       for (const item of all('SELECT * FROM commission_settlement_items WHERE settlement_id = ?', settlement.id)) {
         const commission = one('SELECT * FROM commission_records WHERE id = ? AND status = ?', item.commission_id, 'settling')
         if (!commission) continue
-        const relation = one('SELECT status, risk_status FROM distribution_relations WHERE invitee_user_id = ?', commission.invitee_user_id)
+        // 恢复可提现前，按该笔佣金自己那一层的关系重新判风控；关系缺失即保持 frozen。
+        const relation = commission.source_relation_id
+          ? one('SELECT status, risk_status FROM distribution_relations WHERE id = ?', commission.source_relation_id)
+          : null
         const nextStatus = relation?.status === 'active' && relation?.risk_status === 'normal' ? 'available' : 'frozen'
         run("UPDATE commission_records SET status = ?, settlement_id = NULL, updated_at = datetime('now') WHERE id = ? AND status = 'settling'",
           nextStatus, item.commission_id)
@@ -1001,7 +1047,9 @@ export function applyRiskAction({ relationId, action, reason, operatorId } = {})
 export function distributionAnalytics({ days = 7 } = {}) {
   const since = new Date(Date.now() - Math.max(1, Number(days) || 7) * 86400_000)
     .toISOString().slice(0, 19).replace('T', ' ')
-  const rows = all(`SELECT dp.user_id AS distributorUserId, u.nickname, u.email, dp.status,
+  // 同一段逐推广员 SQL 用 CTE 复用两次：一次取展示用的前 200 行，一次在**全量**上做 SQL 汇总。
+  // 以前是 LIMIT 200 之后在 JS 里 reduce，推广员超过 200 个时 totals 直接偏低。
+  const perDistributor = `SELECT dp.user_id AS distributorUserId, u.nickname, u.email, dp.status,
       (SELECT COUNT(DISTINCT c.descendant_user_id) FROM distribution_tree_closure c
         WHERE c.ancestor_user_id = dp.user_id AND c.depth = 1) AS directInvitees,
       (SELECT COUNT(DISTINCT c.descendant_user_id) FROM distribution_tree_closure c
@@ -1025,21 +1073,27 @@ export function distributionAnalytics({ days = 7 } = {}) {
         WHERE tc.ancestor_user_id = dp.user_id AND tc.depth <= (SELECT max_enabled_level FROM distribution_config WHERE site_code='default')
           AND r.status = 'done' AND r.done_at >= ?) AS refundAmount,
       (SELECT COUNT(*) FROM distribution_clicks dc WHERE dc.distributor_user_id = dp.user_id AND dc.occurred_at >= ?) AS inviteClicks
-    FROM distributor_profiles dp LEFT JOIN users u ON u.id = dp.user_id
-    ORDER BY netCommissionFen DESC, dp.user_id ASC LIMIT 200`, since, since, since, since, since, since, since)
-  const totals = rows.reduce((acc, row) => {
-    acc.directInvitees += Number(row.directInvitees ?? 0)
-    acc.teamSize += Number(row.teamSize ?? 0)
-    acc.commissions += Number(row.commissions ?? 0)
-    acc.netCommissionFen += Number(row.netCommissionFen ?? 0)
-    acc.availableFen += Number(row.availableFen ?? 0)
-    acc.paidOrders += Number(row.paidOrders ?? 0)
-    acc.paidUsers += Number(row.paidUsers ?? 0)
-    acc.paidAmount += Number(row.paidAmount ?? 0)
-    acc.refundAmount += Number(row.refundAmount ?? 0)
-    acc.inviteClicks += Number(row.inviteClicks ?? 0)
-    return acc
-  }, { directInvitees: 0, teamSize: 0, commissions: 0, netCommissionFen: 0, availableFen: 0, paidOrders: 0, paidUsers: 0, paidAmount: 0, refundAmount: 0, inviteClicks: 0 })
+    FROM distributor_profiles dp LEFT JOIN users u ON u.id = dp.user_id`
+  const args = [since, since, since, since, since, since, since]
+  const rows = all(`WITH per AS (${perDistributor}) SELECT * FROM per
+    ORDER BY netCommissionFen DESC, distributorUserId ASC LIMIT 200`, ...args)
+  const totalsRow = one(`WITH per AS (${perDistributor}) SELECT
+      COALESCE(SUM(directInvitees),0) AS directInvitees,
+      COALESCE(SUM(teamSize),0) AS teamSize,
+      COALESCE(SUM(commissions),0) AS commissions,
+      COALESCE(SUM(netCommissionFen),0) AS netCommissionFen,
+      COALESCE(SUM(availableFen),0) AS availableFen,
+      COALESCE(SUM(paidOrders),0) AS paidOrders,
+      COALESCE(SUM(paidUsers),0) AS paidUsers,
+      COALESCE(SUM(paidAmount),0) AS paidAmount,
+      COALESCE(SUM(refundAmount),0) AS refundAmount,
+      COALESCE(SUM(inviteClicks),0) AS inviteClicks
+    FROM per`, ...args)
+  const totals = {}
+  for (const key of ['directInvitees', 'teamSize', 'commissions', 'netCommissionFen', 'availableFen',
+    'paidOrders', 'paidUsers', 'paidAmount', 'refundAmount', 'inviteClicks']) {
+    totals[key] = Number(totalsRow?.[key] ?? 0)
+  }
   return { since, rows: rows.map((row) => ({ ...row, email: maskEmail(row.email) })), totals }
 }
 
@@ -1117,23 +1171,28 @@ export function distributionDashboard({ days = 30 } = {}) {
     const item = dailyMap.get(row.day)
     if (item) item.commissionFen = Number(row.commissionFen)
   }
+  // 支付金额一律按净额（订单金额 - 已退金额）统计：部分退款的订单不能继续按原价计入，
+  // 否则后台"支付金额"永远比实际入账高。grossAmount 保留原价供对账参考。
   const byLevel = all(`SELECT cr.commission_level AS level,
       COUNT(DISTINCT cr.invitee_user_id) AS invitees,
       COUNT(DISTINCT cr.order_id) AS paidOrders,
-      COALESCE(SUM(o.amount_cny),0) AS paidAmount,
+      COALESCE(SUM(o.amount_cny - o.refunded_amount),0) AS paidAmount,
+      COALESCE(SUM(o.amount_cny),0) AS grossAmount,
       COALESCE(SUM(cr.commission_amount_fen - cr.reversed_fen),0) AS commissionFen
     FROM commission_records cr LEFT JOIN orders o ON o.id = cr.order_id
     WHERE cr.created_at >= ? GROUP BY cr.commission_level ORDER BY cr.commission_level`, since)
   const byContentType = all(`SELECT COALESCE(d.content_type, 'subscription') AS contentType,
       COUNT(DISTINCT cr.order_id) AS paidOrders,
-      COALESCE(SUM(o.amount_cny),0) AS paidAmount,
+      COALESCE(SUM(o.amount_cny - o.refunded_amount),0) AS paidAmount,
+      COALESCE(SUM(o.amount_cny),0) AS grossAmount,
       COALESCE(SUM(cr.commission_amount_fen - cr.reversed_fen),0) AS commissionFen
     FROM commission_records cr LEFT JOIN orders o ON o.id = cr.order_id
     LEFT JOIN dramas d ON d.id = o.drama_id
     WHERE cr.created_at >= ? GROUP BY contentType ORDER BY commissionFen DESC`, since)
   const topContent = all(`SELECT COALESCE(d.title, '会员订阅') AS title,
       COUNT(DISTINCT o.id) AS paidOrders,
-      COALESCE(SUM(o.amount_cny),0) AS paidAmount,
+      COALESCE(SUM(o.amount_cny - o.refunded_amount),0) AS paidAmount,
+      COALESCE(SUM(o.amount_cny),0) AS grossAmount,
       COALESCE(SUM(cr.commission_amount_fen - cr.reversed_fen),0) AS commissionFen
     FROM orders o JOIN commission_records cr ON cr.order_id = o.id
     LEFT JOIN dramas d ON d.id = o.drama_id

@@ -51,16 +51,16 @@ async function callAdmin(method, path, body) {
   return { status: res.status, ...res.json() }
 }
 
-async function callPublic(path) {
+async function callPublic(path, { method = 'GET', cookie = '' } = {}) {
   const res = fakeResponse()
   const url = new URL(`http://localhost${path}`)
   const req = {
-    method: 'GET',
-    headers: { 'user-agent': 'node-test', 'x-mh-lang': 'zh' },
+    method,
+    headers: { 'user-agent': 'node-test', 'x-mh-lang': 'zh', ...(cookie ? { cookie } : {}) },
     socket: { remoteAddress: '127.0.0.1' },
   }
   await publicApi.handlePublic(url.pathname, url, req, res)
-  return { status: res.status, ...res.json() }
+  return { status: res.status, setCookie: res.getHeader('set-cookie') ?? '', ...res.json() }
 }
 
 async function createDrama(title, { category = 'MOVIE', isAdult = false } = {}) {
@@ -78,6 +78,8 @@ async function createDrama(title, { category = 'MOVIE', isAdult = false } = {}) 
     status: 'published',
   })
   assert.equal(result.code, '0000', result.msg)
+  // 后台创建接口落在草稿态，上架要走完整校验；这里直接置为已发布，专注验证「可见性」这一契约。
+  db.prepare("UPDATE dramas SET status = 'published' WHERE id = ?").run(Number(result.data.drama.id))
   return result.data.drama
 }
 
@@ -143,9 +145,23 @@ test('外层分类接口不暴露短剧频道，也不列成人内容', async ()
   assert.ok(!titles.includes('测试电影成人'))
 })
 
-test('成人专区（audience=adult）仍能看到短剧与成人标记内容', async () => {
-  const result = await callPublic('/api/category?audience=adult&type=PLAYLET')
+// 安全缺陷修复：原用例把「匿名只凭 query audience=adult 就能读成人内容」写成了契约。
+// 现在 audience 只是「想不想要」，真正的凭证是 POST /api/adult/confirm 种下的签名 Cookie。
+test('成人专区需先确认年龄凭证：未确认返回门禁，确认后能看到短剧与成人标记内容', async () => {
+  const gated = await callPublic('/api/category?audience=adult&type=PLAYLET')
+  assert.equal(gated.status, 200)
+  assert.equal(gated.data.gated, true, '未确认年龄时前端应收到门禁标记')
+  assert.equal(gated.data.total, 0)
+  assert.deepEqual(gated.data.list ?? [], [])
+
+  const confirm = await callPublic('/api/adult/confirm', { method: 'POST' })
+  assert.equal(confirm.status, 200)
+  const cookie = String(confirm.setCookie).split(';')[0]
+  assert.match(cookie, /^mh_adult=/)
+
+  const result = await callPublic('/api/category?audience=adult&type=PLAYLET', { cookie })
   assert.equal(result.status, 200)
+  assert.equal(result.data.gated, false)
   const titles = (result.data.list ?? []).map((item) => item.title)
   assert.ok(titles.includes('测试短剧一'), '成人专区应能看到短剧')
   const channels = result.data.facets.channels.map((row) => row.value)

@@ -173,13 +173,29 @@ export function recordEvent({
   } catch { return false }
 }
 
+/**
+ * 统计区间天数：`days=abc` / 0 / 负数一律回落到默认值，并夹在 [min, max]。
+ * 早期实现把 NaN 直接喂给 `new Date(...)`，`toISOString()` 抛 RangeError → 后台数据页 500。
+ */
+export function parseDays(value, def = 7, min = 1, max = 365) {
+  const fallback = Number.isFinite(Number(def)) ? Math.trunc(Number(def)) : 7
+  const raw = Number(value)
+  const days = Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : fallback
+  return Math.min(max, Math.max(min, days))
+}
+
 const dateRange = (days) => {
   const since = new Date(Date.now() - days * 86400_000).toISOString().slice(0, 10)
   return since
 }
 
+// 净额口径：部分退款扣掉 refunded_amount，全额退款的订单净额为 0 也要算进来，不能整单消失
+const NET_REVENUE = 'COALESCE(SUM(amount_cny - COALESCE(refunded_amount, 0)), 0)'
+const REALIZED_STATUS = "status IN ('paid','fulfilled','refunded')"
+
 export function analyticsReport({ days = 7 } = {}) {
-  const since = dateRange(days)
+  const span = parseDays(days, 7, 1, 365)
+  const since = dateRange(span)
   const identityOf = (table) => `COALESCE(NULLIF(${table}.visitor_id, ''),
     CASE WHEN ${table}.user_id IS NOT NULL THEN 'u:' || ${table}.user_id ELSE 'ip:' || COALESCE(${table}.ip, '') END)`
   const viewerExpr = identityOf('play_events')
@@ -204,15 +220,15 @@ export function analyticsReport({ days = 7 } = {}) {
 
   const ordersByDay = all(`SELECT date(created_at) AS day,
       COUNT(*) AS orders,
-      COALESCE(SUM(CASE WHEN status IN ('paid','fulfilled') THEN amount_cny ELSE 0 END), 0) AS revenue
+      COALESCE(SUM(CASE WHEN ${REALIZED_STATUS} THEN amount_cny - COALESCE(refunded_amount, 0) ELSE 0 END), 0) AS revenue
     FROM orders WHERE created_at >= ? GROUP BY day ORDER BY day`, since)
 
   const byChannel = all(`SELECT channel, COUNT(*) AS orders,
-      COALESCE(SUM(CASE WHEN status IN ('paid','fulfilled') THEN amount_cny ELSE 0 END), 0) AS revenue
+      COALESCE(SUM(CASE WHEN ${REALIZED_STATUS} THEN amount_cny - COALESCE(refunded_amount, 0) ELSE 0 END), 0) AS revenue
     FROM orders WHERE created_at >= ? GROUP BY channel ORDER BY revenue DESC`, since)
 
   const byProduct = all(`SELECT product_type, COUNT(*) AS orders,
-      COALESCE(SUM(CASE WHEN status IN ('paid','fulfilled') THEN amount_cny ELSE 0 END), 0) AS revenue
+      COALESCE(SUM(CASE WHEN ${REALIZED_STATUS} THEN amount_cny - COALESCE(refunded_amount, 0) ELSE 0 END), 0) AS revenue
     FROM orders WHERE created_at >= ? GROUP BY product_type`, since)
 
   const funnel = {
@@ -223,9 +239,9 @@ export function analyticsReport({ days = 7 } = {}) {
   }
   funnel.payRate = funnel.orders ? Number(((funnel.paid / funnel.orders) * 100).toFixed(2)) : 0
 
-  const revenue = one(`SELECT COALESCE(SUM(amount_cny),0) AS n FROM orders
-    WHERE created_at >= ? AND status IN ('paid','fulfilled')`, since).n
-  const paidCount = funnel.paid
+  const revenue = one(`SELECT ${NET_REVENUE} AS n FROM orders
+    WHERE created_at >= ? AND ${REALIZED_STATUS}`, since).n
+  const paidCount = one(`SELECT COUNT(*) AS n FROM orders WHERE created_at >= ? AND ${REALIZED_STATUS}`, since).n
   const money = {
     revenue,
     aov: paidCount ? Number((revenue / paidCount).toFixed(2)) : 0,
@@ -365,7 +381,7 @@ export function analyticsReport({ days = 7 } = {}) {
   })
 
   return {
-    range: { days, since }, totals: { ...totals, playsPerViewer: perViewer }, playsByDay: plays, topDramas, sourceSplit,
+    range: { days: span, since }, totals: { ...totals, playsPerViewer: perViewer }, playsByDay: plays, topDramas, sourceSplit,
     ordersByDay, byChannel, byProduct, funnel, money, users, visitors, subscriptions, content, conversion,
     tracking: { upstream, byType: trackByType, byDay: trackByDay, completion: completionStats, topDetailViews, searchTerms },
   }
