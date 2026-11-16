@@ -435,6 +435,13 @@ CREATE INDEX IF NOT EXISTS idx_track_events_time ON track_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_track_events_type ON track_events(type, created_at);
 CREATE INDEX IF NOT EXISTS idx_track_events_drama ON track_events(drama_id);
 
+-- ===== IP 归属地缓存（埋点列表展示，查一次存 30 天）=====
+CREATE TABLE IF NOT EXISTS ip_geo (
+  ip TEXT PRIMARY KEY,
+  label TEXT,
+  checked_at INTEGER NOT NULL
+);
+
 -- 匿名访客身份：不污染注册用户表；登录后回填 user_id，便于匿名 → 注册归因
 CREATE TABLE IF NOT EXISTS visitors (
   id TEXT PRIMARY KEY,

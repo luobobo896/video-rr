@@ -116,6 +116,7 @@
 - 埋点明细在「数据概览 → 埋点数据」（`#/events`）：访问开始、页面浏览、内容曝光、详情页浏览、选集点击、开始播放、播放结束/失败、付费墙展示/点击、登录打开/成功、收藏、搜索、分享、分类筛选、榜单浏览、创建订单、支付成功。
   - 每条事件带齐 12 个字段：用户 ID、用户账号（`account`，取 email 否则手机号）、用户 IP、设备信息（`device`，如 `SM-G991B · Chrome 131`）、用户系统（`os`，如 `Android 13`）、页面地址（`page_url`，完整含 hash）、事件 code（`event_code`）、事件类型（`event_type`：0 未知 / 1 页面 / 2 点击）、事件操作（`event_op`：0 默认 / 1 进入或开启 / 2 关闭或退出）、事件动作（`action`，点了什么）、事件描述（`description`，可读文案）、页面停留时间（`stay_ms`）。
   - C 端上报在 `public/src/track.js`：`initTracking()` 在 `App.vue` 挂载时启动，进页发 `page_view`(1/1)、离开或切 tab 发 `page_view`(1/2) 并带 `stay_ms`，全局点击委托发 `click`(2/1)，code 规则是 `data-track` 优先 → 有 href 用 `link:<hash>` → 否则 `click:<tag>.<class>`；关标签页用 `fetch keepalive` 兜底，埋点失败不影响页面。业务要标关键按钮，在元素上加 `data-track="play:start"` 与 `data-track-label="播放第1集"`。
+  - 列表的 `IP / 地区` 列会显示归属地（如 `日本 · 东京都 · 东京`）：服务端 `server/geoip.mjs` 按当前页 IP 批量查一次，内存 + `ip_geo` 表双层缓存 30 天，内网/本机显示「内网」，外部接口不可用时留空、不影响列表；`MH_GEOIP=off` 可整体关闭（只显示 IP）。
   - 设备与系统由服务端按 UA 解析（`server/analytics.mjs` 的 `parseUa`），账号由服务端按 `user_id` 查 `users`，客户端不传这两项，避免伪造。老库升级后启动时会自动补列并回填历史事件的类型/操作，不需要手工 ALTER。
 - 经营数据的转化漏斗按同一访客逐级去重，只统计完成前序步骤的人；相邻阶段转化率不会超过 100%，图表同时展示播放/访客趋势、关键事件趋势、收入趋势、播放来源和渠道分布。新数据按匿名访客 ID 归因，历史无访客 ID 的事件按 `user_id`/IP 回退，避免升级后漏斗全空。
 - 剧集列表的搜索、内容类型、状态、每页数量和分页全部在服务端执行。

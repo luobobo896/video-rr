@@ -24,6 +24,7 @@ import {
 } from './mail-channels.mjs'
 import { pollDeviceFlow, startDeviceFlow } from './mailer-oauth.mjs'
 import { analyticsReport } from './analytics.mjs'
+import { resolveRegions } from './geoip.mjs'
 import { buildCodeEmail, buildPasswordResetEmail } from './email-template.mjs'
 import { logError, logInfo } from './logger.mjs'
 import { createTag, deleteTag, listTags, setDramaTags, setTagStatus, tagTree, tagsOfDrama, updateTag } from './tags.mjs'
@@ -1144,15 +1145,18 @@ const deny = (perm) => {
       WHERE ${clause} ORDER BY te.id DESC LIMIT ? OFFSET ?`, ...args, pageSize, (page - 1) * pageSize)
     const visitors = Number(one(`SELECT COUNT(DISTINCT visitor_id) AS n FROM track_events
       WHERE created_at >= datetime('now', ?) AND visitor_id IS NOT NULL`, since)?.n ?? 0)
+    const rows = list.map((row) => {
+      const { meta_json: metaJson, ...rest } = row
+      return { ...rest, meta: metaJson ? safeJson(metaJson) : null, region: '' }
+    })
+    const regions = await resolveRegions(rows.map((row) => row.ip))
+    for (const row of rows) row.region = regions.get(String(row.ip ?? '').trim()) ?? ''
     return send(res, {
       total, page, pageSize, visitors,
       byType: all(`SELECT te.type, COUNT(*) AS n FROM track_events te WHERE ${clause} GROUP BY te.type ORDER BY n DESC`, ...args),
       byDay: all(`SELECT date(te.created_at) AS day, COUNT(*) AS n FROM track_events te
         WHERE te.created_at >= datetime('now', ?) GROUP BY day ORDER BY day`, since),
-      list: list.map((row) => {
-        const { meta_json: metaJson, ...rest } = row
-        return { ...rest, meta: metaJson ? safeJson(metaJson) : null }
-      }),
+      list: rows,
     })
   }
 

@@ -5290,7 +5290,7 @@ async function pageEvents() {
         </select>
       </div>
       <table style="margin-top:12px">
-        <thead><tr><th>时间</th><th>事件</th><th>类型</th><th>操作</th><th>账号</th><th>IP</th><th>设备 / 系统</th><th>页面</th><th>停留</th><th>动作 / 明细</th></tr></thead>
+        <thead><tr><th>时间</th><th>事件</th><th>类型</th><th>操作</th><th>账号</th><th>IP / 地区</th><th>设备 / 系统</th><th>页面</th><th>停留</th><th>动作 / 明细</th></tr></thead>
         <tbody>
           ${(data.list ?? []).map((row) => `<tr>
             <td class="muted">${esc(fmtTs(row.created_at))}</td>
@@ -5298,7 +5298,7 @@ async function pageEvents() {
             <td style="white-space:nowrap">${esc(EVENT_TYPE_LABEL[row.event_type ?? 0] ?? String(row.event_type ?? 0))}</td>
             <td style="white-space:nowrap">${esc(EVENT_OP_LABEL[row.event_op ?? 0] ?? String(row.event_op ?? 0))}</td>
             <td>${row.account ? esc(row.account) : (row.userEmail ? esc(row.userEmail) : (row.user_id ? `#${row.user_id}` : '游客'))}</td>
-            <td class="mono muted" style="white-space:nowrap">${esc(row.ip ?? '—')}</td>
+            <td style="white-space:nowrap"><span class="mono muted">${esc(row.ip ?? '—')}</span>${row.region ? `<div style="font-size:11px;opacity:.75">${esc(row.region)}</div>` : ''}</td>
             <td class="muted" style="max-width:200px">${esc([row.device, row.os].filter(Boolean).join(' / ') || '—')}</td>
             <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(row.page_url ?? row.path ?? '')}">${esc(row.path ?? '—')}</td>
             <td class="mono" style="white-space:nowrap">${row.stay_ms === null || row.stay_ms === undefined ? '—' : `${(Number(row.stay_ms) / 1000).toFixed(1)}s`}</td>
