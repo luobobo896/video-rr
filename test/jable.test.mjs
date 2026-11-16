@@ -118,3 +118,19 @@ test('番号转 slug，素材地址按千位分档', () => {
   assert.equal(artworkUrls('63332').cover, 'https://assets-cdn.jable.tv/contents/videos_screenshots/63000/63332/preview.jpg')
   assert.deepEqual(artworkUrls('bad'), {})
 })
+
+test('有直链但标题没番号时 slug 回退成 videoId，调用方必须判 code', () => {
+  // 这条记录一个真实事故：整改版页面能拿到 hlsUrl、slug 有值，但标题里没有番号，
+  // 于是 sub_title 也是空的 —— 入库就变成一条空壳。导入流程靠 meta.code 拦它。
+  const html = `<html><body>
+  <video poster="https://assets-cdn.jable.tv/contents/videos_screenshots/63000/63332/preview.jpg"></video>
+  <script>var hlsUrl = 'https://cdn-a.mushroomtrack.com/hls/T/1794769762/63000/63332/63332.m3u8';</script>
+  <section class="video-info"><h4>期間限定公開</h4></section>
+  </body></html>`
+  const meta = parseVideoPage(html, 'https://jable.tv/videos/x-1/')
+  assert.equal(meta.hlsUrl.startsWith('https://cdn-a.mushroomtrack.com/'), true)
+  assert.equal(meta.code, '')
+  assert.equal(meta.slug, 'jable-63332')
+  assert.equal(meta.subtitle, '')
+  assert.equal(meta.titleBody, '期間限定公開')
+})

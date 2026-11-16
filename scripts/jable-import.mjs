@@ -248,6 +248,8 @@ function linkTags(dramaId, names) {
 
 // ---------- 入库 ----------
 function upsertDrama(meta, artwork) {
+  // 兜底：解析失败时宁可抛错，也不要往库里写空标题条目
+  if (!meta.titleBody && !meta.subtitle) throw new Error('标题与副标题都为空，拒绝入库')
   // 番号在 sub_title（`CODE · 女優`）里，title 是去掉番号的正文，查重不能用 title
   const existing = meta.code
     ? one(`SELECT * FROM dramas WHERE is_adult = 1 AND (sub_title LIKE ? OR title LIKE ?) ORDER BY id LIMIT 1`,
@@ -312,6 +314,8 @@ async function importOne(browser, url) {
   if (!/hlsUrl\s*=\s*'/.test(html)) return { ok: false, url, reason: '页面没拿到 hlsUrl（挑战没过或页面改版）' }
   const meta = parseVideoPage(html, url)
   if (!meta.hlsUrl) return { ok: false, url, reason: '没有 hlsUrl' }
+  // 番号解析不出来的页面（改版、区域限制页）只会写进空标题条目，直接判失败
+  if (!meta.code) return { ok: false, url, reason: '标题里没有番号' }
   if (!meta.slug) return { ok: false, url, reason: '拿不到番号，无法生成 slug' }
   const expiry = expiryOf(meta.hlsUrl)
 
