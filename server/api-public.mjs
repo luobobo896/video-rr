@@ -11,11 +11,12 @@ import {
 } from './auth.mjs'
 import { OtpError, normalizeEmail, sendCode, verifyCode } from './otp.mjs'
 import {
-  LINK_TTL, decideEpisodes, entitlementsOf, policyOf, priceInfo, resolveAccess, rulesOfDrama, secureLink,
+  LINK_TTL, decideEpisodes, entitlementsOf, freeEpisodesOf, policyOf, priceInfo, resolveAccess, rulesOfDrama, secureLink,
   signPayTicket, verifyPayTicket,
 } from './entitlements.mjs'
 import { publicTracksOf, saveUserTrackPreference, userTrackPreferences } from './tracks.mjs'
 import { remotePlaybackPath } from './stream-proxy.mjs'
+import { ensureFreshForPlay, staleOf } from './jable-refresh.mjs'
 import { isClientTrackType, recordEvent, recordPlay } from './analytics.mjs'
 import { bindUserAcquisition, recordTouch } from './attribution.mjs'
 import {
@@ -41,6 +42,12 @@ const one = (sql, ...args) => db.prepare(sql).get(...args)
 
 /** 单次播放链接的最长有效期：覆盖整集时长，默认 2 小时（可用 MH_PLAY_TTL_MAX 调整）。 */
 const PLAY_TTL_MAX = Math.max(LINK_TTL, Math.min(4 * 3600, Number(process.env.MH_PLAY_TTL_MAX ?? 7200) || 7200))
+
+/**
+ * 播放接口愿意为「续期过期直链」等多久。
+ * 超过这个时间就先返回 409 让前端提示重试——比让用户盯着转圈 2 分钟要好。
+ */
+const PLAY_REFRESH_WAIT_MS = Math.max(0, Number(process.env.MH_PLAY_REFRESH_WAIT_MS ?? 8000) || 8000)
 
 /* ---------- 「全部分类」筛选taxonomy：固定枚举，空库也有完整分类树 ---------- */
 export const CATEGORY_CHANNELS = [
@@ -146,9 +153,9 @@ function cardOf(drama, userId, context = {}) {
     access,
     accessLabel: enumLabel(lang, 'access', access),
     accessMode: policy.access_mode,
-    freeEpisodes: policy.free_episodes,
+    freeEpisodes: freeEpisodesOf(policy, drama),
     trialSeconds: policy.trial_seconds,
-    singlePrice: policy.single_price_cny,
+    singlePrice: policy.access_mode === 'paid' ? Number(policy.single_price_cny) || 0 : 0,
     playCount: Number(drama.play_count ?? 0),
     previewUrl: previewUrlForCover(drama.cover_url),
     // 参考站海报左上角有「最新上线 / 独播 / 正在热播」角标：这里只发可判定的「最新上线」
@@ -429,6 +436,8 @@ export async function handlePublic(pathname, url, req, res) {
       const live = channels.filter((channel) => channel.usable)
       const site = getSetting('site', {}) ?? {}
       const adultMenu = adultMenuSettings()
+      // 外层不暴露「短剧」频道：该频道全部是成人内容，入口只在成人专区里（见 /api/category 的同款过滤）
+      const outerChannels = CATEGORY_CHANNELS.filter((row) => row.value !== 'PLAYLET')
       // 会员价优先取在售套餐里的最低月价，避免运营忘配 settings.site 时收银台显示「元/月」
       const plan = all("SELECT price_cny, duration_days FROM plans WHERE status = 'active' ORDER BY price_cny ASC LIMIT 1")[0]
       const planMonthly = plan ? (Number(plan.price_cny) / Math.max(1, Number(plan.duration_days) / 30)).toFixed(2) : ''
@@ -438,13 +447,13 @@ export async function handlePublic(pathname, url, req, res) {
         vipPrice: site.vipPrice ?? (plan ? Number(plan.price_cny).toFixed(2) : ''),
         vipMonthlyPrice: planMonthly,
         vipUnit: site.vipUnit ?? '元/月',
-        categories: CATEGORY_CHANNELS.filter((row) => row.value !== 'ALL').map((row) => ({ code: row.value, name: row.label })),
+        categories: outerChannels.filter((row) => row.value !== 'ALL').map((row) => ({ code: row.value, name: row.label })),
         adultMenu: {
           enabled: adultMenu.enabled,
           labels: { zh: adultMenu.labelZh, en: adultMenu.labelEn },
         },
         taxonomy: {
-          channels: CATEGORY_CHANNELS,
+          channels: outerChannels,
           sorts: CATEGORY_SORTS,
           regions: CATEGORY_REGIONS.map((row) => ({ value: row.value, label: row.label })),
           genres: CATEGORY_GENRES,
@@ -518,6 +527,26 @@ export async function handlePublic(pathname, url, req, res) {
             backdropUrl: backdropByDrama.get(drama.id) ?? wideArtworkForCover(drama.cover_url),
           })),
       }))
+      // 运营没配楼层时首页不能是空壳：按真实内容拼几个默认楼层（全部走外层可见性过滤，成人内容不会混进来）
+      if (!sections.length) {
+        const fallbackRows = (where, params, order) => withPlayCounts(all(
+          `SELECT d.* FROM dramas d WHERE d.status = 'published' AND ${adultVisibilitySql()} AND ${where} ORDER BY ${order} LIMIT 12`,
+          ...params,
+        )).map((drama) => ({
+          ...cardOf(drama, userId, context),
+          backdropUrl: backdropByDrama.get(drama.id) ?? wideArtworkForCover(drama.cover_url),
+        }))
+        const plans = [
+          { key: 'latest', title: '最新上架', where: '1 = 1', params: [], order: 'COALESCE(d.published_at, d.created_at) DESC, d.id DESC' },
+          { key: 'movie', title: '电影精选', where: "d.category = 'MOVIE'", params: [], order: 'COALESCE(d.score, 0) DESC, d.id DESC' },
+          { key: 'series', title: '剧集与纪录', where: "d.category IN ('TV', 'DOCUMENTARY')", params: [], order: 'COALESCE(d.score, 0) DESC, d.id DESC' },
+          { key: 'anime', title: '动漫与综艺', where: "d.category IN ('ANIME', 'VARIETY')", params: [], order: 'COALESCE(d.score, 0) DESC, d.id DESC' },
+        ]
+        for (const plan of plans) {
+          const items = fallbackRows(plan.where, plan.params, plan.order)
+          if (items.length) sections.push({ id: plan.key, title: plan.title, items })
+        }
+      }
       const hot = all(`SELECT title FROM dramas WHERE ${adultVisibilitySql('general', '')} ORDER BY score DESC LIMIT 8`).map((row) => row.title)
       return sendPublic(res, { banners, sections, hotwords: hot })
     }
@@ -612,12 +641,15 @@ export async function handlePublic(pathname, url, req, res) {
         ? `WHERE d.status = 'published' AND ${audienceSql} AND ${channelWhere.join(' AND ')}`
         : `WHERE d.status = 'published' AND ${audienceSql}`
       const countBy = (sql, argList = []) => Number(one(`SELECT COUNT(*) AS n ${FROM} ${channelClause} AND ${sql}`, ...channelParams, ...argList)?.n ?? 0)
+      // 外层（未确认 18+）只放当前可见内容：「短剧」这类整频道都是成人片的频道不能出现在外层的筛选栏里，
+      // 否则等于把成人专区的存在和片量直接摊在外层。成人 audience 保持全量枚举，方便运营切频道。
+      const channelRows = CATEGORY_CHANNELS.map((row) => ({
+        value: row.value, label: enumLabel(lang, 'category', row.value, row.label), count: row.value === 'ALL'
+          ? Number(one(`SELECT COUNT(*) AS n FROM dramas d WHERE d.status = 'published' AND ${audienceSql}`).n)
+          : Number(one(`SELECT COUNT(*) AS n FROM dramas d WHERE d.status = 'published' AND ${audienceSql} AND d.category = ?`, row.value).n),
+      }))
       const facets = {
-        channels: CATEGORY_CHANNELS.map((row) => ({
-          value: row.value, label: enumLabel(lang, 'category', row.value, row.label), count: row.value === 'ALL'
-            ? Number(one(`SELECT COUNT(*) AS n FROM dramas d WHERE d.status = 'published' AND ${audienceSql}`).n)
-            : Number(one(`SELECT COUNT(*) AS n FROM dramas d WHERE d.status = 'published' AND ${audienceSql} AND d.category = ?`, row.value).n),
-        })),
+        channels: audience === 'adult' ? channelRows : channelRows.filter((row) => row.value === 'ALL' || row.count > 0),
         sorts: CATEGORY_SORTS.map((row) => ({ value: row.value, label: enumLabel(lang, 'sort', row.value, row.label) })),
         regions: CATEGORY_REGIONS.map((row) => ({
           value: row.value,
@@ -655,7 +687,19 @@ export async function handlePublic(pathname, url, req, res) {
         name: row.name, type: row.type, label: enumLabel(lang, 'rank', row.type, row.name),
       }))
       const list = one('SELECT * FROM rank_lists WHERE type = ? ORDER BY sort LIMIT 1', type)
-      if (!list) return sendPublic(res, { type, listName: '', lists, items: [] })
+      // 运营没配榜单时也别给空页：按评分与热播度现算一份，外层过滤照旧
+      if (!list) {
+        const fallbackName = lang === 'en' ? 'Trending' : '热门榜'
+        const items = withPlayCounts(all(`SELECT d.* FROM dramas d
+          WHERE d.status = 'published' AND ${adultVisibilitySql()}
+          ORDER BY COALESCE(d.score, 0) DESC, d.id DESC LIMIT 20`))
+          .map((drama, index) => ({ ...cardOf(drama, userId, context), rankNo: index + 1 }))
+        return sendPublic(res, {
+          type, listName: fallbackName,
+          lists: lists.length ? lists : [{ name: fallbackName, type: 'HOT', label: fallbackName }],
+          items,
+        })
+      }
       const items = withPlayCounts(all(`SELECT d.*, ri.rank_no FROM rank_items ri JOIN dramas d ON d.id = ri.drama_id
         WHERE ri.list_id = ? AND ${adultVisibilitySql()} ORDER BY ri.rank_no`, list.id))
         .map((drama) => ({ ...cardOf(drama, userId, context), rankNo: drama.rank_no }))
@@ -745,7 +789,7 @@ export async function handlePublic(pathname, url, req, res) {
       const drama = one("SELECT * FROM dramas WHERE id = ? AND status = 'published'", dramaId)
       if (!drama) return fail(res, '0404', '内容不存在', 404)
       const policy = policyOf(drama.id) ?? { access_mode: 'subscription', free_episodes: 0, trial_seconds: 0, single_price_cny: 0, purchase_kind: 'single' }
-      const episodes = all("SELECT id, no, title, duration, status, hls_path FROM episodes WHERE drama_id = ? AND status != 'merged' ORDER BY no", drama.id)
+      const episodes = all("SELECT id, no, title, duration, status, hls_path, remote_url FROM episodes WHERE drama_id = ? AND status != 'merged' ORDER BY no", drama.id)
       const purchase = context.purchase.has(drama.id) ? one(`SELECT * FROM purchases WHERE user_id = ? AND drama_id = ? AND status = 'active'
         AND (expires_at IS NULL OR datetime(expires_at) > datetime('now')) ORDER BY id DESC LIMIT 1`, userId, drama.id) : undefined
       const decided = decideEpisodes({ drama, policy, subscription: context.subscription, purchase, episodes })
@@ -754,6 +798,8 @@ export async function handlePublic(pathname, url, req, res) {
       const favorite = userId ? one('SELECT 1 AS x FROM favorites WHERE user_id = ? AND drama_id = ?', userId, drama.id) : undefined
       const resume = userId ? one('SELECT episode_no, position, updated_at FROM history WHERE user_id = ? AND drama_id = ?', userId, drama.id) : undefined
       const card = cardOf(drama, userId, context)
+      // 单集内容同样不存在「首集免费」，按真实集数收敛一次
+      card.freeEpisodes = freeEpisodesOf(policy, drama, episodes.length)
       if (drama.is_adult) card.stats = adultStatsFor([drama.id]).get(drama.id)
       return sendPublic(res, {
         ...card,
@@ -764,6 +810,8 @@ export async function handlePublic(pathname, url, req, res) {
           reason: episode.reason ?? null,
           rule: episode.rule ? { mode: episode.rule.mode, price: Number(episode.rule.price_cny ?? 0) } : null,
           trialSeconds: episode.trialSeconds, price: episode.price,
+          // 外部片源的签名过期了：详情页据此提示「续期中」，别让人点进去才踩灰按钮
+          stale: staleOf(episode.remote_url),
         })),
         priceInfo: {
           ...priceInfo(drama),
@@ -848,6 +896,34 @@ export async function handlePublic(pathname, url, req, res) {
       }
       const tracks = publicTracksOf(episode.id, lang)
 
+      // 外部片源（jable）的直链带签名，过期后上游一律 410，前端只会拿到一个灰按钮。
+      // 只有票真的过期了才当场换（没过期一次都不刷，点开就能播）；换上了照常播，
+      // 换不上就把原因写清楚，让前端倒计时自动重试，而不是装死。
+      if (episode.remote_url) {
+        try {
+          const fresh = await ensureFreshForPlay(episode.id, { timeoutMs: PLAY_REFRESH_WAIT_MS })
+          episode = one('SELECT * FROM episodes WHERE id = ?', episode.id) ?? episode
+          if (staleOf(episode.remote_url)) {
+            // 连刷三次都拿不到新票：多半是源站把这部下了（404），再让用户每 30 秒回来自动重试就是折磨
+            if ((fresh?.failureCount ?? 0) >= 3) {
+              return send(res, {
+                dramaId, episodeId: episode.id, episodeStatus: episode.status,
+                reason: 'source_unavailable', permanent: true, retryAfterSeconds: 0,
+                message: '该集片源已下架或源站暂时无法获取，换一集试试',
+              }, '0409', '该集片源暂不可用', 409)
+            }
+            return send(res, {
+              dramaId, episodeId: episode.id, episodeStatus: episode.status, reason: 'source_link_expired',
+              // 换票通常 1～3 秒：让前端很快回来自动重试，而不是让用户干等半分钟
+              retryAfterSeconds: Math.max(4, Math.round((fresh?.cooldownMs ?? 0) / 1000) || (fresh?.busy ? 4 : 6)),
+              message: '片源签名已过期，服务器正在自动续期，请稍后重试',
+            }, '0409', '片源签名已过期', 409)
+          }
+        } catch (error) {
+          logWarn('play.refresh_failed', { requestId: res.getHeader?.('x-request-id'), episodeId: episode.id, error })
+        }
+      }
+
       const access = resolveAccess(userId, dramaId, no)
       const trialWanted = url.searchParams.get('trial') === '1'
       if (!access.allow && access.trialSeconds > 0 && trialWanted) {
@@ -898,7 +974,7 @@ export async function handlePublic(pathname, url, req, res) {
           reason: access.reason,
           trialSeconds: access.trialSeconds ?? 0,
           price: access.price ?? 0,
-          purchaseKind: access.purchaseKind ?? 'single',
+          purchaseKind: access.purchaseKind ?? null,
           plans: access.plans ?? [],
           membership: access.membership ?? false,
         }, '0402', access.reason === 'single_purchase_required' ? '该片需单独购买' : '需要开通会员', 402)
@@ -1092,7 +1168,7 @@ export async function handlePublic(pathname, url, req, res) {
       for (const order of listOrders({ userId, limit: 5 })) {
         messages.push({
           type: 'order', title: `订单 ${order.out_trade_no}`,
-          body: `${order.product_type === 'subscription' ? '会员订阅' : '单片购买'} ¥${Number(order.amount_cny).toFixed(2)} · ${ORDER_STATUS_TEXT[order.status] ?? order.status}`,
+          body: `${order.product_type === 'subscription' ? '会员订阅' : '一次性购买'} ¥${Number(order.amount_cny).toFixed(2)} · ${ORDER_STATUS_TEXT[order.status] ?? order.status}`,
           createdAt: order.created_at,
         })
       }

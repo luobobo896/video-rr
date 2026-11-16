@@ -51,6 +51,8 @@ const KEY_CACHE_MAX = 512
 const keyCache = new Map()
 
 const M3U8_RE = /\.m3u8(\?|$)/i
+/** 直链文件源（archive.org 这类）没有清单，走整文件 Range 转发，播放器用原生 mp4 播 */
+const DIRECT_FILE_RE = /\.(mp4|m4v|webm|mkv|mov|ogv|ogm)(?:\?|$)/i
 const PAGE_CANDIDATES = [
   /"file"\s*:\s*"([^"]+\.m3u8[^"]*)"/i,
   /"url"\s*:\s*"([^"]+\.m3u8[^"]*)"/i,
@@ -141,6 +143,8 @@ async function fetchUpstream(url, source, extraHeaders = {}) {
       ? `source rejected (${res.status}) 直链签名过期或凭证失效，跑 scripts/jable-import.mjs --refresh 换新链接`
       : `upstream ${res.status} ${url}`)
     err.status = rejected ? 502 : 504
+    // 标记成「临时性」：调用方据此丢掉缓存会话并回 Retry-After，让播放器等续期而不是判死
+    err.stale = rejected
     throw err
   }
   return res
@@ -558,6 +562,35 @@ async function pipeSegment(session, entry, name, req, res) {
 }
 
 /**
+ * 直链文件源：整文件透传（Range 由播放器发起、上游支持 206），不落盘缓存
+ * —— 单片动辄几百 MB，缓存既占盘又没必要，起播的第一跳反而更快。
+ */
+async function pipeDirectFile(req, res, session) {
+  const range = req.headers.range ? { range: String(req.headers.range) } : {}
+  const upstream = await fetchUpstream(session.source.pageUrl, session.source, range)
+  const headers = {
+    'content-type': upstream.headers.get('content-type') || 'video/mp4',
+    'accept-ranges': 'bytes',
+    'cache-control': 'private, max-age=3600',
+    'access-control-allow-origin': '*',
+  }
+  const length = upstream.headers.get('content-length')
+  if (length) headers['content-length'] = length
+  const contentRange = upstream.headers.get('content-range')
+  if (contentRange) headers['content-range'] = contentRange
+  res.writeHead(contentRange ? 206 : 200, headers)
+  if (req.method === 'HEAD' || !upstream.body) {
+    res.end()
+    return
+  }
+  const body = Readable.fromWeb(upstream.body)
+  // 播放器拖动进度条会反复中断请求：上游流要跟着销毁，别把跨境连接晾在那儿
+  req.on('close', () => body.destroy())
+  body.on('error', () => { try { res.destroy() } catch {} })
+  body.pipe(res)
+}
+
+/**
  * 处理一次 /media/remote/<id>/... 请求。
  * 调用方（index.mjs）已完成签名校验，这里只管取流。
  */
@@ -573,6 +606,10 @@ export async function handleRemoteRequest(req, res, { episodeId, episode, rest }
   const tail = String(rest ?? '')
 
   try {
+    if (/^file\.[a-z0-9]{2,5}$/.test(tail)) {
+      await pipeDirectFile(req, res, session)
+      return
+    }
     if (!tail || tail === 'index.m3u8') {
       const text = await loadEntryPlaylist(session)
       // 播放器拿到清单到真正点播放之间有几秒空档：先把开头几段拉到缓存，起播不再等跨境回源
@@ -608,14 +645,30 @@ export async function handleRemoteRequest(req, res, { episodeId, episode, rest }
     }
     await pipeSegment(session, entry, name, req, res)
   } catch (err) {
+    if (err.stale) {
+      // 票过期是临时状态：丢掉这份会话（下次会按库里的新直链重建），
+      // 回 503 + Retry-After，hls.js 会自带重试；比 502 更像"稍后再来"而不是"坏了"
+      sessions.delete(Number(episodeId))
+      res.writeHead(503, {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'access-control-allow-origin': '*',
+        'retry-after': '30',
+      })
+      res.end('503 片源签名已过期，正在自动续期，请 30 秒后重试')
+      return
+    }
     const status = err.status ?? 504
     sendText(res, status, `${status} 上游片源不可用：${err.message}`, 'text/plain; charset=utf-8')
   }
 }
 
-/** 播放接口用它决定 hls 入口：外部源优先，其次本地 HLS */
+/** 播放接口用它决定入口：外部源优先，其次本地 HLS；直链文件源给 file.<ext> */
 export function remotePlaybackPath(episode) {
-  if (!remoteSourceOf(episode)) return null
+  const source = remoteSourceOf(episode)
+  if (!source) return null
+  const ext = DIRECT_FILE_RE.exec(source.pageUrl)?.[1]
+  if (ext) return `/media/remote/${episode.id}/file.${ext.toLowerCase()}`
   return `/media/remote/${episode.id}/index.m3u8`
 }
 

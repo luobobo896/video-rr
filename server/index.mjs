@@ -18,7 +18,7 @@ import { processCommissionOutbox, processCommissionReversalOutbox } from './comm
 import { PREVIEW_DIR } from './previews.mjs'
 import { verifyLink } from './entitlements.mjs'
 import { handleRemoteRequest } from './stream-proxy.mjs'
-import { ensureFresh } from './jable-refresh.mjs'
+import { ensureFreshForPlay, staleOf, warmProfile } from './jable-refresh.mjs'
 import { closeExpiredOrders, reconcile } from './commerce.mjs'
 import { refreshAutoRanks } from './rank.mjs'
 import { inspect, sweep } from './ratelimit.mjs'
@@ -206,7 +206,7 @@ ${missing}
 <div class="muted">订单号 ${escapeHtml(outTradeNo)}</div>
 <div class="amount">¥ ${amount}</div>
 <div class="row"><span>收款方</span><span>影巢（沙箱）</span></div>
-<div class="row"><span>商品</span><span>会员 / 单片</span></div>
+<div class="row"><span>商品</span><span>会员 / 一次性</span></div>
 <div class="row"><span>支付方式</span><span>余额宝（模拟）</span></div>
 <button id="pay">确认付款</button>
 <button class="ghost" id="cancel">取消并返回</button>
@@ -350,11 +350,23 @@ const server = createServer(async (req, res) => {
       // 清单请求才判续期：直链签名有保鲜期，快过期了就在这里换一张新的票
       if (!rest || rest === 'index.m3u8') {
         try {
-          const result = await ensureFresh(episodeId)
+          const result = await ensureFreshForPlay(episodeId, { timeoutMs: 15000 })
           if (result.refreshed) {
             episode = db
               .prepare('SELECT id, drama_id, remote_url, remote_referer, remote_ua, remote_cookie FROM episodes WHERE id = ?')
               .get(episodeId)
+          }
+          // 票还是过期的：直接回 503 + Retry-After，hls.js 会按这个时间重试，
+          // 比让它收到上游 410 再报"网络错误"清楚得多
+          if (staleOf(episode?.remote_url)) {
+            const wait = Math.max(4, Math.round((result?.cooldownMs ?? 0) / 1000) || 5)
+            res.writeHead(503, {
+              'content-type': 'text/plain; charset=utf-8',
+              'cache-control': 'no-store',
+              'retry-after': String(wait),
+            })
+            res.end(`503 片源签名已过期，正在自动续期，请 ${wait} 秒后重试`)
+            return
           }
         } catch (error) {
           console.error('[refresh] 续期失败', episodeId, error.message)
@@ -607,6 +619,15 @@ server.listen(PORT, '127.0.0.1', () => {
     .filter((name) => String(process.env[name] ?? '').length < 32)
   if (weakSecrets.length > 0) {
     console.warn(`  ⚠ 密钥过短或缺失：${weakSecrets.join(', ')}（建议 ≥32 位随机值）`)
+  }
+
+  // 预热按需续期用的浏览器 profile：冷 profile 第一次点击要重吃 Cloudflare 挑战（40 秒级），
+  // 用户等不起。启动跑一次、之后每 20 分钟一次，让点开就能在 1～3 秒内换好票。
+  const warm = () => warmProfile().catch(() => false)
+  if (process.env.MH_WARM_PROFILE !== '0') {
+    void warm()
+    const timer = setInterval(warm, 20 * 60 * 1000)
+    timer.unref?.()
   }
 })
 

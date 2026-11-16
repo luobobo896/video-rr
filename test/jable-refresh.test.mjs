@@ -7,7 +7,7 @@ import { join } from 'node:path'
 const dir = mkdtempSync(join(tmpdir(), 'mh-jr-'))
 process.env.MH_DB = join(dir, 'test.db')
 
-const { expiryOf, codeOf, pageUrlOf, leftMsOf, needsRefresh } = await import('../server/jable-refresh.mjs')
+const { expiryOf, codeOf, pageUrlOf, leftMsOf, staleOf, needsRefresh } = await import('../server/jable-refresh.mjs')
 const { db } = await import('../server/db.mjs')
 
 test.after(() => {
@@ -43,8 +43,7 @@ test('剩余时间按到期时刻算，过期是负数', () => {
   assert.equal(leftMsOf(''), -1)
 })
 
-test('只剩几分钟的 jable 直链需要续期', () => {
-  const soon = Math.floor(Date.now() / 1000) + 300
+test('只剩几分钟的 jable 直链需要续期', () => {  const soon = Math.floor(Date.now() / 1000) + 300
   assert.equal(needsRefresh({ remote_url: HLS(String(soon)), remote_referer: 'https://jable.tv/' }), true)
 })
 
@@ -60,4 +59,19 @@ test('短剧的 huangguo 引用不走这条路', () => {
 test('不是 jable 的直链即使快过期也不管', () => {
   const soon = Math.floor(Date.now() / 1000) + 60
   assert.equal(needsRefresh({ remote_url: HLS(String(soon)), remote_referer: 'https://example.com/' }), false)
+})
+
+test('签名时间已过的直链才算过期', () => {
+  const past = Math.floor(Date.now() / 1000) - 60
+  const future = Math.floor(Date.now() / 1000) + 3600
+  assert.equal(staleOf(HLS(String(past))), true)
+  assert.equal(staleOf(HLS(String(future))), false)
+})
+
+test('解析不出签名时间的片源永远不算过期（huangguo 引用、直链 mp4）', () => {
+  // 回归用例：曾经把 -1 当过期，整批 remote_url 会被错报「签名已过期」
+  assert.equal(staleOf('huangguo://12988/1'), false)
+  assert.equal(staleOf('https://archive.org/download/x/clip.mp4'), false)
+  assert.equal(staleOf(''), false)
+  assert.equal(staleOf(null), false)
 })

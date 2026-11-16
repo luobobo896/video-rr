@@ -19,8 +19,7 @@
  */
 import { spawn } from 'node:child_process'
 import { execFile } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
@@ -97,7 +96,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function openBrowser() {
   const bin = findBrowser()
   const port = 9400 + Math.floor(Math.random() * 200)
-  const profile = mkdtempSync(join(tmpdir(), 'mh-jable-'))
+  // 复用同一份 profile：Cloudflare 的 cf_clearance 存在 cookie 里，每次都用临时目录的话
+  // 每个页面都要重新过一遍挑战（实测单页从 1.9s 掉到 77s）。串行跑时不会有两个进程抢同一个目录。
+  const profile = process.env.MH_CHROME_PROFILE
+    ? (mkdirSync(process.env.MH_CHROME_PROFILE, { recursive: true }), process.env.MH_CHROME_PROFILE)
+    : (() => { const dir = join(ROOT, 'storage', '.jable-chrome'); mkdirSync(dir, { recursive: true }); return dir })()
   const child = spawn(bin, [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
@@ -139,20 +142,32 @@ async function openBrowser() {
     urls: ['*.jpg', '*.jpeg', '*.png', '*.webp', '*.gif', '*.svg', '*.ico', '*.woff', '*.woff2', '*.ttf', '*.mp4', '*.ts', '*.m3u8'],
   })
 
-  const evaluate = async (expression) => {
-    const res = await send('Runtime.evaluate', { expression, returnByValue: true })
+  const evaluate = async (expression, { awaitPromise = false } = {}) => {
+    const res = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise })
     return res.result?.result?.value
   }
 
   return {
-    async navigate(url, { wantHls = true } = {}) {
+    /**
+     * 在页面里直接 fetch 详情页 HTML，只取文本、不渲染。
+     * 渲染一页要 1.5 秒上下，纯 fetch 只要一两百毫秒，而续期只关心 HTML 里那行 hlsUrl。
+     */
+    async pageText(url) {
+      try {
+        return await evaluate(`fetch(${JSON.stringify(url)}, { credentials: 'include' }).then((r) => r.text())`, { awaitPromise: true }) ?? ''
+      } catch {
+        return ''
+      }
+    },
+    async navigate(url, { wantHls = true, tries = 60 } = {}) {
       await send('Page.navigate', { url })
       let html = ''
       let best = 0
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < tries; i++) {
         await sleep(i < 8 ? 320 : 900)
         html = (await evaluate('document.documentElement.outerHTML')) ?? ''
         if (wantHls && /hlsUrl\s*=\s*'/.test(html)) return html
+        if (wantHls && gonePage(html)) return html
         // 列表页要等真的出现影片链接：Cloudflare 挑战页也有 4 万字符，只看长度会在挑战页上提前返回
         if (!wantHls && html.length === best && /\/videos\/[a-z0-9_]+-\d+\/?/.test(html)) return html
         best = html.length
@@ -309,9 +324,47 @@ async function probeDuration(meta) {
   }
 }
 
-async function importOne(browser, url) {
-  const html = await browser.navigate(url)
-  if (!/hlsUrl\s*=\s*'/.test(html)) return { ok: false, url, reason: '页面没拿到 hlsUrl（挑战没过或页面改版）' }
+// 页面明确说「没有这部片」时别重试：重试只是白等两轮轮询，一轮三分钟就白费了
+const gonePage = (html) => /404\s*頁面丟失|<title>[^<]*404/i.test(html)
+
+// 源站真的下架的番号记一份，之后刷新直接跳过：它们按到期时间永远排在最前面，会一直占住队头
+const GONE_FILE = join(ROOT, 'storage', 'jable-gone.json')
+const goneSet = (() => {
+  try { return new Set(Object.keys(JSON.parse(readFileSync(GONE_FILE, 'utf8')))) } catch { return new Set() }
+})()
+function markGone(url) {
+  const code = /\/videos\/([a-z0-9]+-\d+)\/?/i.exec(String(url))?.[1]?.toUpperCase()
+  if (!code || goneSet.has(code)) return
+  goneSet.add(code)
+  try {
+    mkdirSync(dirname(GONE_FILE), { recursive: true })
+    writeFileSync(GONE_FILE, `${JSON.stringify(Object.fromEntries([...goneSet].map((c) => [c, new Date().toISOString()])), null, 1)}\n`)
+  } catch {}
+}
+
+async function importOne(browser, url, options = {}) {
+  // Cloudflare 的 managed challenge 是概率性的：同一页面这一秒是挑战页、下一秒就正常。
+  // 刷新轮次必须重试，否则一次抽风就把一条链接判死，等下次再刷已是三小时后。
+  const retries = Number(options.retries ?? 0)
+  let html = ''
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    // 先走页面内 fetch：不渲染，快一个数量级；被 CF 拦或拿不到就退回真导航
+    if (options.fast && attempt === 0) {
+      const text = await browser.pageText(url)
+      if (/hlsUrl\s*=\s*'/.test(text)) { html = text; break }
+      if (gonePage(text)) { markGone(url); return { ok: false, url, gone: true, reason: '源站已下架（404）' } }
+    }
+    // 挑战要在几秒内自己解开，等不到就换下一次：60 次轮询白白拖掉 54 秒
+    html = await browser.navigate(url, { tries: attempt === 0 ? 22 : 12 })
+    if (/hlsUrl\s*=\s*'/.test(html)) break
+    if (gonePage(html)) { markGone(url); return { ok: false, url, gone: true, reason: '源站已下架（404）' } }
+    if (attempt < retries) {
+      const wait = 5000 + attempt * 5000
+      console.log(`    第 ${attempt + 1} 次没拿到 hlsUrl（被挑战），等 ${Math.round(wait / 1000)} 秒重试`)
+      await sleep(wait)
+    }
+  }
+  if (!/hlsUrl\s*=\s*'/.test(html)) return { ok: false, url, challenged: true, reason: '页面没拿到 hlsUrl（挑战没过或页面改版）' }
   const meta = parseVideoPage(html, url)
   if (!meta.hlsUrl) return { ok: false, url, reason: '没有 hlsUrl' }
   // 素人片和改版页的标题里没有番号，用详情页 URL 的 slug 兜底：
@@ -347,19 +400,54 @@ async function importOne(browser, url) {
 }
 
 // ---------- 入口 ----------
+/** 同一番号的重复剧共用一张票：把刚换到的新直链抄给它们，否则那些条目永远刷不到。 */
+function shareTicket(code, hlsUrl) {
+  const exp = expiryOf(hlsUrl)
+  if (!exp) return 0
+  const like = `${String(code).toUpperCase().replace(/_/g, '-')}%`
+  const rows = all(`SELECT e.id, e.remote_url AS remoteUrl FROM episodes e JOIN dramas d ON d.id = e.drama_id
+    WHERE upper(replace(d.sub_title, '_', '-')) LIKE ? AND e.remote_url LIKE '%/hls/%'`, like)
+  const update = db.prepare('UPDATE episodes SET remote_url = ? WHERE id = ?')
+  let shared = 0
+  for (const row of rows) {
+    if (expiryOf(row.remoteUrl) >= exp) continue
+    update.run(hlsUrl, row.id)
+    shared++
+  }
+  return shared
+}
+
 function refreshTargets() {
   const targets = []
+  let goneSkipped = 0
   // 番号存在 sub_title（`CODE · 女優`），title 已被去掉番号，别从 title 里找
   const pages = all(`SELECT DISTINCT d.id, d.sub_title, d.title, e.remote_url, e.id AS eid FROM episodes e JOIN dramas d ON d.id = e.drama_id
     WHERE e.remote_referer = ? OR e.remote_url LIKE '%mushroomtrack.com%'`, REFERER)
+  // 两轮并行跑时用 MH_SHARD=0/2、1/2 分片，避免两个进程抢同一批片子
+  const shard = /^(\d+)\/(\d+)$/.exec(String(process.env.MH_SHARD ?? ''))
+  // 同一番号在库里可能有多条剧：一个番号只刷一次，票由 shareTicket 抄给其它条目
+  const byCode = new Map()
   for (const row of pages) {
+    if (shard && row.id % Number(shard[2]) !== Number(shard[1])) continue
     const code = /^([A-Za-z0-9_]+-\d+)/.exec(String(row.sub_title ?? ''))?.[1]
     if (!code) {
       console.log(`  跳过 ${row.title}：sub_title 里没有番号，无法反推 jable 地址`)
       continue
     }
-    targets.push({ url: `https://jable.tv/videos/${code.toLowerCase().replace(/_/g, '-')}/`, expires: expiryOf(row.remote_url) })
+    if (goneSet.has(code.toUpperCase())) { goneSkipped++; continue }
+    const url = `https://jable.tv/videos/${code.toLowerCase().replace(/_/g, '-')}/`
+    const expires = expiryOf(row.remote_url)
+    const known = byCode.get(url)
+    if (known) {
+      // 同番号多条剧：只留一条（保留最早过期的那个时间点，别让重复条目拖后批次顺序）
+      if (expires < known.expires) known.expires = expires
+      continue
+    }
+    const target = { url, expires }
+    byCode.set(url, target)
+    targets.push(target)
   }
+  if (goneSkipped) console.log(`  已跳过源站下架的番号 ${goneSkipped} 条（storage/jable-gone.json）`)
   // 先刷最早过期的：中途被打断时，剩下的至少还活着
   return targets.sort((a, b) => a.expires - b.expires)
 }
@@ -418,21 +506,33 @@ async function runScoreBatch(browser, list) {
   console.log(`\n完成：成功 ${ok}，跳过 ${skipped}，失败 ${failed}`)
 }
 
-async function runBatch(browser, list) {
+async function runBatch(browser, list, options = {}) {
   let ok = 0
   let failed = 0
+  // 连续被挑战说明已经触发限流，继续跑只会让封禁更久：提前收工，交给下一轮 cron
+  let challengeStreak = 0
+  const stopAfter = Number(options.stopAfterChallenges ?? 0)
   for (const [index, item] of list.entries()) {
     const url = typeof item === 'string' ? item : item.url
     const label = `[${index + 1}/${list.length}] ${url}`
     try {
-      const result = await importOne(browser, url)
+      const result = await importOne(browser, url, { retries: options.retries ?? 0, fast: options.fast })
       if (!result.ok) {
         failed++
+        challengeStreak = result.challenged ? challengeStreak + 1 : 0
         console.log(`${label}\n  ✗ ${result.reason}`)
+        if (stopAfter && challengeStreak >= stopAfter) {
+          console.log(`  连续 ${challengeStreak} 次被 Cloudflare 挑战，本轮提前结束（剩下的下一轮再刷）`)
+          break
+        }
         continue
       }
       ok++
+      challengeStreak = 0
       const m = result.meta
+      // 同一个番号可能有多条剧（历史导入留下 194 组重复），刷新的票只会写进其中一条。
+      // 这里按番号把最新鲜的票抄给同番号的其它条目，否则那些剧点进去永远是「续期中」。
+      if (!result.dry && m.code) shareTicket(m.code, m.hlsUrl)
       console.log(`${label}\n  ✓ ${m.code || '(无番号)'} ${m.title.slice(0, 60)}`)
       console.log(`    hls: ${m.hlsUrl}`)
       console.log(`    时长 ${Math.round(m.duration / 60)} 分钟 · 链接有效至 ${result.expiry ? new Date(result.expiry * 1000).toLocaleString('zh-CN') : '未知'}`)
@@ -446,10 +546,28 @@ async function runBatch(browser, list) {
   console.log(`\n完成：成功 ${ok}，失败 ${failed}`)
 }
 
+/** 首页先过一遍挑战，把 cf_clearance 写进 profile 的 cookie；过不了就照常继续，别让整批卡在这 */
+async function warmUp(browser) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const html = await browser.navigate('https://jable.tv/', { wantHls: false })
+    if (/\/videos\/[a-z0-9_]+-\d+\/?/.test(html)) return true
+    await sleep(5000 + attempt * 5000)
+  }
+  return false
+}
+
 async function main() {
   const every = Number(valueOf('--every', '0')) || 0
   const browser = await openBrowser()
   try {
+    // --warm：只把首页过一遍，把 cf_clearance 养进 profile，给按需续期留着用。
+    // 服务端启动时会先跑一次，之后每 20 分钟一次——冷启动要重吃一次挑战（40 秒级），
+    // 而用户点开一集只愿意等几秒。
+    if (flags.has('--warm')) {
+      const ok = await warmUp(browser)
+      console.log(ok ? '预热完成：挑战已过' : '预热没通过（照常继续，第一次点播会慢一点）')
+      return
+    }
     if (scoreOnly) {
       const offset = Number(valueOf('--offset', '0')) || 0
       const all_ = scoreTargets()
@@ -513,6 +631,11 @@ async function main() {
         // 长跑时只刷快过期的，省得每轮都把全库重解析一遍
         const useFiltered = Boolean(every || valueOf('--max-left', ''))
         if (useFiltered && !expiring.length) console.log('没有快过期的链接，本轮跳过')
+        // 预热一次首页，把 Cloudflare 的 clearance cookie 拿到手，后面每页就不用各自过挑战
+        if (expiring.length) {
+          const warmed = await warmUp(browser)
+          console.log(warmed ? '  Cloudflare 预热通过，开始逐部续期' : '  Cloudflare 预热没通过，仍然继续（可能整批都吃挑战）')
+        }
         targets.push(...(useFiltered ? expiring : all_).map((t) => t))
       }
       const unique = [...new Map(targets.map((t) => [typeof t === 'string' ? t : t.url, t])).values()]
@@ -521,7 +644,7 @@ async function main() {
         console.log('没有要导入的地址。给一个影片页 URL，或用 --page <列表页> 批量抓。')
         if (!every) return
       }
-      await runBatch(browser, unique)
+      await runBatch(browser, unique, refresh ? { retries: 1, stopAfterChallenges: 8, fast: true } : { retries: 0 })
       if (!every) return
       console.log(`\n${every} 分钟后开始下一轮（Ctrl+C 退出）`)
       await new Promise((r) => setTimeout(r, every * 60000))

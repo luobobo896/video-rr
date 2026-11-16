@@ -69,6 +69,23 @@ before(async () => {
       res.end('TSDATA-142')
       return
     }
+    if (req.url === '/movie.mp4') {
+      const range = req.headers.range
+      if (range) {
+        const [from] = /bytes=(\d+)-/.exec(String(range))?.slice(1) ?? ['0']
+        const body = 'FULLMP4'
+        res.writeHead(206, {
+          'content-type': 'video/mp4',
+          'content-range': `bytes ${from}-${Number(from) + 3}/8`,
+          'content-length': '4',
+        })
+        res.end(body.slice(0, 4))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': '7' })
+      res.end('FULLMP4')
+      return
+    }
     if (req.url === '/warm.m3u8') {
       res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' })
       res.end(
@@ -168,18 +185,43 @@ test('播放页自动抽出 m3u8', async () => {
   assert.match(text, /seg\/[0-9a-f]{20}\.ts/)
 })
 
-test('上游 403 时网关报 502，不把 HTML 当清单吐给播放器', async () => {
+test('上游 403（直链签名过期）时网关报 503 + Retry-After，不把 HTML 当清单吐给播放器', async () => {
   const direct = remoteSourceOf({ remote_url: `${origin}/play.m3u8`, remote_referer: 'https://blocked.example/' })
   assert.equal(direct.referer, 'https://blocked.example/')
   const res = await fetch(`${base()}/media/remote/5/index.m3u8`, {
     headers: { 'x-test-source': `${origin}/play.m3u8`, 'x-test-referer': 'https://blocked.example/' },
   })
-  assert.equal(res.status, 502)
+  // 票过期是临时状态：503 让播放器按 Retry-After 重试，而不是当成"片源坏了"
+  assert.equal(res.status, 503)
+  assert.equal(res.headers.get('retry-after'), '30')
+  assert.match(await res.text(), /片源签名已过期/)
 })
 
 test('playbackPath 只对外部源生效，本地 HLS 不受影响', () => {
   assert.equal(remotePlaybackPath({ id: 9, remote_url: 'https://x.example/a.m3u8' }), '/media/remote/9/index.m3u8')
   assert.equal(remotePlaybackPath({ id: 9, hls_path: '/media/hls/9/index.m3u8' }), null)
+})
+
+test('直链文件源给 file.<ext> 入口，仍走同一套签名路径', () => {
+  assert.equal(remotePlaybackPath({ id: 11, remote_url: 'https://x.example/movie.mp4' }), '/media/remote/11/file.mp4')
+  assert.equal(remotePlaybackPath({ id: 11, remote_url: 'https://x.example/movie.MP4?x=1' }), '/media/remote/11/file.mp4')
+  assert.equal(remotePlaybackPath({ id: 11, remote_url: 'https://x.example/clip.webm' }), '/media/remote/11/file.webm')
+})
+
+test('直链文件源整文件转发，Range 透传 206 与 content-range', async () => {
+  const source = `${origin}/movie.mp4`
+  const full = await fetch(`${base()}/media/remote/11/file.mp4`, { headers: { 'x-test-source': source } })
+  assert.equal(full.status, 200)
+  assert.equal(full.headers.get('content-type'), 'video/mp4')
+  assert.equal(full.headers.get('accept-ranges'), 'bytes')
+  assert.equal(await full.text(), 'FULLMP4')
+
+  const partial = await fetch(`${base()}/media/remote/11/file.mp4`, {
+    headers: { 'x-test-source': source, range: 'bytes=0-3' },
+  })
+  assert.equal(partial.status, 206)
+  assert.equal(partial.headers.get('content-range'), 'bytes 0-3/8')
+  assert.equal(await partial.text(), 'FULL')
 })
 
 test('rewritePlaylist 对相对 URI 按清单所在目录解析', () => {
