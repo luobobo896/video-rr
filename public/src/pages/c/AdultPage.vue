@@ -58,7 +58,10 @@ const tagLabel = computed(() => {
 const note = computed(() => {
   const channel = facets.value.channels.find((row) => row.value === filters.type)?.label ?? '全部';
   const sort = facets.value.sorts.find((row) => row.value === filters.sort)?.label ?? '最热';
-  const parts = [`共 ${total.value} 部`, channel, sort];
+  // 门禁未确认时接口故意返回空列表，此时说「共 0 部」会让人以为站里没片
+  const parts = gateState.value === 'open'
+    ? [`共 ${total.value} 部`, channel, sort]
+    : ['待验证年龄', channel, sort];
   if (tagLabel.value) parts.push(tagLabel.value);
   return parts.join(' · ');
 });

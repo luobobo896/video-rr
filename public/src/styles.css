@@ -46,7 +46,10 @@
   /* 焦点环与 shared 的 --ring（描边宽度）区分开，避免同名不同义 */
   --focus-ring: 0 0 0 2px var(--ink-0), 0 0 0 4px color-mix(in oklab, var(--accent) 60%, transparent);
 
-  --sidebar: 124px;
+  /* 侧栏是「图标 + 文字」的宽栏：最长标签「内容数据榜」13px 下约 70px，
+     加上两侧 padding（16×2）、项内 padding（12×2）、图标 16 与间距 10，
+     需要 ≥200px。收到 124px 会让标签折行并被 40px 行高裁掉。 */
+  --sidebar: 224px;
   --topbar: 64px;
   --page-max: 1600px;
 }
@@ -211,8 +214,11 @@ svg { display: block; }
   color: var(--text-2);
   font-size: var(--fs-13);
   text-align: left;
+  white-space: nowrap;
   transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
 }
+/* 标签单行到底，超长省略而不是折行：40px 定高下折行会被裁掉半截 */
+.nav-item .nav-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav-item:hover { background: var(--ink-2); color: var(--text); }
 .nav-item[aria-current="page"] { background: color-mix(in oklab, var(--accent) 14%, transparent); color: var(--text); font-weight: 600; }
 .nav-item[aria-current="page"] .icon { color: var(--accent); }
@@ -1075,7 +1081,7 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
 
 /* ── 响应式 ─────────────────────────────────────────── */
 @media (max-width: 1279px) {
-  :root { --sidebar: 124px; }
+  :root { --sidebar: 204px; }
   .page { padding-inline: var(--sp-5); }
   .film-grid { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); }
 }

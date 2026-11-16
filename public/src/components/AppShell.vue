@@ -137,7 +137,7 @@ function focusMain(event) {
             :aria-current="active === item.key ? 'page' : undefined"
           >
             <Icon :name="item.icon" />
-            {{ item.label }}
+            <span class="nav-text">{{ item.label }}</span>
             <span v-if="item.badge" class="nav-18">{{ item.badge }}</span>
           </a>
         </nav>

@@ -336,7 +336,10 @@ test('静态断言：控件高度只能取 32/40/48，不出现 34/36/38 中间�
     }
     assert.ok(matched > 0, `没有找到 ${selector} 的样式块`);
   }
-  assert.match(css, /--sidebar:\s*124px/);
+  // 侧栏宽度不能收成纯图标轨道：124px 装不下「内容数据榜」，标签会折行再被 40px 定高裁掉。
+  // 这里只卡下限（装得下最长标签），具体像素值由 test/ui-layout.test.mjs 逐项校验。
+  const sidebar = Number((/--sidebar:\s*(\d+)px/.exec(css) || [])[1]);
+  assert.ok(sidebar >= 200, `--sidebar ${sidebar}px 装不下带文字的导航项`);
   assert.match(css, /grid-template-columns:\s*repeat\(5,\s*1fr\)/);
   assert.match(css, /gap:\s*calc\(48px \+ env\(safe-area-inset-bottom\)\)|height:\s*calc\(48px \+ env\(safe-area-inset-bottom\)\)/);
 });
