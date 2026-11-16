@@ -886,13 +886,16 @@ async function pageDramas() {
   const rows = data.list ?? []
   const counts = Object.fromEntries((data.categoryCounts ?? []).map((row) => [row.category, Number(row.n ?? 0)]))
   const statusCounts = Object.fromEntries((data.statusCounts ?? []).map((row) => [row.status, Number(row.n ?? 0)]))
+  // 「全部」的括号里放全库总量，不跟着当前筛选变，否则筛完显示成当前结果数会让人误判
+  const allDramas = Object.values(statusCounts).reduce((sum, n) => sum + n, 0) || Number(data.total ?? 0)
+  const allCategories = Object.values(counts).reduce((sum, n) => sum + n, 0) || Number(data.total ?? 0)
   const published = Number(statusCounts.published ?? 0)
   const categoryOptions = [
-    `<option value="all" ${category === 'all' ? 'selected' : ''}>全部类型（${fmt(data.total ?? 0)}）</option>`,
+    `<option value="all" ${category === 'all' ? 'selected' : ''}>全部类型（${fmt(allCategories)}）</option>`,
     ...(options.categories ?? []).map((item) => `<option value="${esc(item.value)}" ${category === item.value ? 'selected' : ''}>${esc(item.label)}（${fmt(counts[item.value] ?? 0)}）</option>`),
   ].join('')
   const statusOptions = [
-    `<option value="all" ${status === 'all' ? 'selected' : ''}>全部状态（${fmt(data.total ?? 0)}）</option>`,
+    `<option value="all" ${status === 'all' ? 'selected' : ''}>全部状态（${fmt(allDramas)}）</option>`,
     ...(options.dramaStatus ?? []).map((item) => `<option value="${esc(item.value)}" ${status === item.value ? 'selected' : ''}>${esc(item.label)}（${fmt(statusCounts[item.value] ?? 0)}）</option>`),
   ].join('')
 
