@@ -1,7 +1,7 @@
 /** 后台接口：RBAC 保护 + 审计 + 内容/付费策略/套餐/优惠券/订单/退款/对账/权限。 */
 import { randomBytes } from 'node:crypto'
 import { unlinkSync } from 'node:fs'
-import { db, DEFAULT_ADMIN_MENUS, genCode, getSetting, setSetting } from './db.mjs'
+import { db, DEFAULT_ADMIN_MENUS, applyAdultPolicy, ensureAdultPolicyInvariant, genCode, getSetting, setSetting } from './db.mjs'
 import { adultMenuSettings, saveAdultMenuSettings } from './adult-menu.mjs'
 import { authOf, checkPasswordStrength, hashPassword, issueToken, loginAdmin, revokeSessions, revokeToken, setUserPassword, verifyPassword } from './auth.mjs'
 import { send } from './api-public.mjs'
@@ -108,9 +108,9 @@ export const ADMIN_OPTIONS = {
     { value: 'DOCUMENTARY', label: '纪录片' },
   ],
   accessModes: [
-    { value: 'free', label: '免费' },
+    { value: 'free', label: '免费公开' },
     { value: 'subscription', label: '会员免费' },
-    { value: 'paid', label: '单独收费' },
+    { value: 'paid', label: '一次性收费' },
   ],
   ruleModes: [
     { value: 'free', label: '免费观看' },
@@ -139,16 +139,36 @@ export const ADMIN_OPTIONS = {
 const POLICY_MODES = new Set(ADMIN_OPTIONS.accessModes.map((item) => item.value))
 const DRAMA_STATUSES = new Set(ADMIN_OPTIONS.dramaStatus.map((item) => item.value))
 
-function normalizePolicy(body = {}) {
+function isMovieMeta(contentType, category) {
+  return String(contentType ?? '').toLowerCase() === 'movie' || String(category ?? '').toUpperCase() === 'MOVIE'
+}
+
+function normalizePolicy(body = {}, meta = {}) {
   const accessMode = POLICY_MODES.has(body.accessMode) ? body.accessMode : 'subscription'
+  const paid = accessMode === 'paid'
+  const purchaseKind = paid && body.purchaseKind === 'rental' ? 'rental' : 'single'
+  const movie = isMovieMeta(meta.contentType ?? body.contentType, meta.category ?? body.category)
   return {
     accessMode,
-    freeEpisodes: Math.max(0, Math.round(Number(body.freeEpisodes ?? 0) || 0)),
-    trialSeconds: Math.max(0, Math.round(Number(body.trialSeconds ?? 0) || 0)),
-    singlePrice: Math.max(0, Number(body.singlePrice ?? 0) || 0),
-    purchaseKind: body.purchaseKind === 'rental' ? 'rental' : 'single',
-    rentalHours: Math.max(1, Math.round(Number(body.rentalHours ?? 72) || 72)),
+    // 会员免费/免费公开没有「首集免费」的意义；电影没有分集，也不存在首集免费；剧集才生效
+    freeEpisodes: accessMode === 'free' || movie
+      ? 0
+      : Math.max(0, Math.round(Number(body.freeEpisodes ?? 0) || 0)),
+    trialSeconds: accessMode === 'free' ? 0 : Math.max(0, Math.round(Number(body.trialSeconds ?? 0) || 0)),
+    // 只有一次性收费才存在买断/租赁；会员免费内容不允许再挂单片价，避免前端弹出购买入口
+    singlePrice: paid ? Math.max(0, Number(body.singlePrice ?? 0) || 0) : 0,
+    purchaseKind: paid ? purchaseKind : 'single',
+    rentalHours: paid && purchaseKind === 'rental'
+      ? Math.max(1, Math.round(Number(body.rentalHours ?? 72) || 72))
+      : 0,
   }
+}
+
+function policyValidationError(policy) {
+  if (policy.accessMode !== 'paid') return ''
+  if (policy.singlePrice <= 0) return '一次性收费必须填写大于 0 的价格'
+  if (policy.purchaseKind === 'rental' && policy.rentalHours < 1) return '租赁时长至少 1 小时'
+  return ''
 }
 
 function policyFromGroup(group) {
@@ -802,6 +822,8 @@ const deny = (perm) => {
     if (!name) return send(res, {}, '0400', '策略组名称必填', 400)
     if (one('SELECT id FROM policy_groups WHERE name = ?', name)) return send(res, {}, '0409', '策略组名称已存在', 409)
     const policy = normalizePolicy(body)
+    const invalid = policyValidationError(policy)
+    if (invalid) return send(res, {}, '0400', invalid, 400)
     const info = run(`INSERT INTO policy_groups
       (name, description, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
@@ -820,6 +842,8 @@ const deny = (perm) => {
     if (!name) return send(res, {}, '0400', '策略组名称必填', 400)
     if (one('SELECT id FROM policy_groups WHERE name = ? AND id <> ?', name, id)) return send(res, {}, '0409', '策略组名称已存在', 409)
     const policy = normalizePolicy(body)
+    const invalid = policyValidationError(policy)
+    if (invalid) return send(res, {}, '0400', invalid, 400)
     run(`UPDATE policy_groups SET name = ?, description = ?, access_mode = ?, free_episodes = ?,
       trial_seconds = ?, single_price_cny = ?, purchase_kind = ?, rental_hours = ?, updated_at = datetime('now')
       WHERE id = ?`, name, String(body?.description ?? '').trim(), policy.accessMode, policy.freeEpisodes,
@@ -867,6 +891,8 @@ const deny = (perm) => {
     const sample = all(`SELECT id, title FROM dramas ${clause} ORDER BY id DESC LIMIT 5`, ...args)
     if (body?.dryRun) return send(res, { dryRun: true, matched, sample, filters, dramaIds, group })
     if (!matched) return send(res, { dryRun: false, matched: 0, updated: 0, sample: [], filters, group })
+    const invalidGroup = policyValidationError(policyFromGroup(group))
+    if (invalidGroup) return send(res, {}, '0400', invalidGroup, 400)
     const updated = writePolicyGroup(group, clause, args)
     log('content.policyGroup.assign', 'policy_group', group.id, filters ?? { dramaIds }, { matched, updated })
     return send(res, { dryRun: false, matched, updated, sample, filters, dramaIds, group })
@@ -892,21 +918,29 @@ const deny = (perm) => {
     const policyGroupId = Number(body.policyGroupId ?? 0) || null
     const policyGroup = policyGroupId ? one('SELECT * FROM policy_groups WHERE id = ?', policyGroupId) : null
     if (policyGroupId && !policyGroup) return send(res, {}, '0404', '付费策略组不存在', 404)
-    const policy = policyGroup ? policyFromGroup(policyGroup) : normalizePolicy({ freeEpisodes: 1, ...body })
-    const wanted = body.status === 'published' ? 'published' : 'draft'
     const contentType = ['series', 'movie', 'comic_drama'].includes(body.contentType)
       ? body.contentType
       : (body.category === 'MOVIE' ? 'movie' : body.category === 'ANIME' ? 'comic_drama' : 'series')
+    const policy = policyGroup
+      ? policyFromGroup(policyGroup)
+      : normalizePolicy({ freeEpisodes: contentType === 'movie' ? 0 : 1, ...body }, { contentType, category: body.category })
+    // 电影没有分集，任何来源（策略组/表单）都不能带「首集免费」
+    const effectivePolicy = contentType === 'movie' ? { ...policy, freeEpisodes: 0 } : policy
+    const invalidPolicy = policyValidationError(effectivePolicy)
+    if (invalidPolicy) return send(res, {}, '0400', invalidPolicy, 400)
+    const adultFlag = adultFlagOf(body.category, Boolean(body.isAdult))
+    const wanted = body.status === 'published' ? 'published' : 'draft'
     const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category, is_adult, release_date, score, status, sort, content_type, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     title, body.subTitle ?? '', body.coverUrl ?? '', body.description ?? '',
-    Number(body.year ?? 0) || 0, body.area ?? '', body.category ?? '', adultFlagOf(body.category, Boolean(body.isAdult)), releaseDate || null, Number(body.score ?? 0) || 0,
+    Number(body.year ?? 0) || 0, body.area ?? '', body.category ?? '', adultFlag, releaseDate || null, Number(body.score ?? 0) || 0,
     'draft', Number(body.sort ?? 0), contentType)
     const dramaId = Number(info.lastInsertRowid)
     run(`INSERT INTO content_policies
       (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, dramaId, policyGroup?.id ?? null, policy.accessMode, policy.freeEpisodes,
-    policy.trialSeconds, policy.singlePrice, policy.purchaseKind, policy.rentalHours)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, dramaId, policyGroup?.id ?? null, effectivePolicy.accessMode, effectivePolicy.freeEpisodes,
+    effectivePolicy.trialSeconds, effectivePolicy.singlePrice, effectivePolicy.purchaseKind, effectivePolicy.rentalHours)
+    if (adultFlag) applyAdultPolicy(dramaId)
     if (Array.isArray(body.tagIds) && body.tagIds.length) setDramaTags(dramaId, body.tagIds)
     const created = one('SELECT * FROM dramas WHERE id = ?', dramaId)
     const check = dramaCompleteness(created)
@@ -953,14 +987,16 @@ const deny = (perm) => {
       : before.content_type ?? (body.category === 'MOVIE' ? 'movie' : body.category === 'ANIME' ? 'comic_drama' : 'series')
     const isAdult = body.isAdult === undefined ? before.is_adult : (body.isAdult ? 1 : 0)
     const nextCategory = body.category ?? before.category
+    const nextAdultFlag = adultFlagOf(nextCategory, Boolean(isAdult))
     run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?, category = ?, is_adult = ?, release_date = ?, score = ?, status = ?, sort = ?, content_type = ?,
       updated_at = datetime('now'),
       published_at = CASE WHEN ? = 'published' THEN COALESCE(published_at, datetime('now')) ELSE published_at END
       WHERE id = ?`,
     body.title ?? before.title, body.subTitle ?? before.sub_title, body.coverUrl ?? before.cover_url,
     body.description ?? before.description, Number(body.year ?? before.year), body.area ?? before.area,
-    body.category ?? before.category, adultFlagOf(nextCategory, Boolean(isAdult)), releaseDate || null, Number(body.score ?? before.score), nextStatus,
+    body.category ?? before.category, nextAdultFlag, releaseDate || null, Number(body.score ?? before.score), nextStatus,
     Number(body.sort ?? before.sort), contentType, nextStatus, dramaId)
+    if (nextAdultFlag) applyAdultPolicy(dramaId)
     log('content.drama.update', 'drama', dramaId, before, { ...body, status: nextStatus })
     return send(res, dramaDto(one('SELECT * FROM dramas WHERE id = ?', dramaId)))
   }
@@ -1201,17 +1237,26 @@ const deny = (perm) => {
   if (seg[0] === 'dramas' && seg[1] && seg[2] === 'policy' && method === 'PUT') {
     if (!guard(PERM.policy)) return deny(PERM.policy)
     const dramaId = Number(seg[1])
-    if (!one('SELECT id FROM dramas WHERE id = ?', dramaId)) return send(res, {}, '0404', '剧集不存在', 404)
+    const drama = one('SELECT * FROM dramas WHERE id = ?', dramaId)
+    if (!drama) return send(res, {}, '0404', '剧集不存在', 404)
     const before = policyOf(dramaId)
     const groupId = Number(body?.policyGroupId ?? 0) || null
     const group = groupId ? one('SELECT * FROM policy_groups WHERE id = ?', groupId) : null
     if (groupId && !group) return send(res, {}, '0404', '策略组不存在', 404)
+    const movieDrama = isMovieMeta(drama.content_type, drama.category)
     let policy
     if (group) {
-      writePolicyGroup(group, 'WHERE id = ?', [dramaId])
       policy = policyFromGroup(group)
+      if (movieDrama) policy.freeEpisodes = 0
+      const invalid = policyValidationError(policy)
+      if (invalid) return send(res, {}, '0400', invalid, 400)
+      writePolicyGroup(group, 'WHERE id = ?', [dramaId])
+      if (movieDrama) run('UPDATE content_policies SET free_episodes = 0 WHERE drama_id = ?', dramaId)
     } else {
-      policy = normalizePolicy(body)
+      policy = normalizePolicy(body, { contentType: drama.content_type, category: drama.category })
+      if (movieDrama) policy.freeEpisodes = 0
+      const invalid = policyValidationError(policy)
+      if (invalid) return send(res, {}, '0400', invalid, 400)
       run(`INSERT INTO content_policies
         (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -1222,6 +1267,7 @@ const deny = (perm) => {
       dramaId, policy.accessMode, policy.freeEpisodes, policy.trialSeconds,
       policy.singlePrice, policy.purchaseKind, policy.rentalHours)
     }
+    if (drama.is_adult) applyAdultPolicy(dramaId)
     log('content.policy.update', 'drama', dramaId, before, { policyGroupId: groupId, ...policy })
     return send(res, policyOf(dramaId))
   }
@@ -1229,6 +1275,8 @@ const deny = (perm) => {
   if (pathname === '/admin/api/policies/bulk' && method === 'POST') {
     if (!guard(PERM.policy)) return deny(PERM.policy)
     const policy = normalizePolicy(body?.policy ?? {})
+    const invalid = policyValidationError(policy)
+    if (invalid) return send(res, {}, '0400', invalid, 400)
     const filters = dramaFilters(body?.filters ?? {})
     if (!filters.keyword && (!filters.category || filters.category === 'all') && (!filters.status || filters.status === 'all')) {
       return send(res, {}, '0400', '批量设置至少选择一个分组条件（内容类型 / 上架状态 / 关键词）', 400)
@@ -1239,12 +1287,15 @@ const deny = (perm) => {
     if (!matched) return send(res, { dryRun: false, matched: 0, updated: 0, sample: [], filters, policy })
     const result = run(`INSERT INTO content_policies
       (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours, updated_at)
-      SELECT id, NULL, ?, ?, ?, ?, ?, ?, datetime('now') FROM dramas ${filters.clause}
+      SELECT id, NULL, ?, CASE WHEN content_type = 'movie' OR category = 'MOVIE' THEN 0 ELSE ? END,
+        ?, ?, ?, ?, datetime('now') FROM dramas ${filters.clause}
       ON CONFLICT(drama_id) DO UPDATE SET policy_group_id = NULL, access_mode = excluded.access_mode, free_episodes = excluded.free_episodes,
         trial_seconds = excluded.trial_seconds, single_price_cny = excluded.single_price_cny,
         purchase_kind = excluded.purchase_kind, rental_hours = excluded.rental_hours, updated_at = datetime('now')`,
     policy.accessMode, policy.freeEpisodes, policy.trialSeconds, policy.singlePrice,
     policy.purchaseKind, policy.rentalHours, ...filters.args)
+    // 批量策略可能命中成人内容：落库后按成人策略纠正（会员专享、无免费集）
+    ensureAdultPolicyInvariant()
     log('content.policy.bulk', 'drama', null, filters, { ...policy, matched })
     return send(res, { dryRun: false, matched, updated: Number(result.changes ?? matched), sample, filters, policy })
   }

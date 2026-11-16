@@ -83,7 +83,7 @@ test('策略组列表包含内置组与未分组计数', async () => {
 
 test('新建剧集直接绑定策略组，生效值来自组而不是逐剧字段', async () => {
   const groups = (await call('GET', '/admin/api/policy-groups')).data.groups
-  const paid = groups.find((group) => group.name === '单片付费')
+  const paid = groups.find((group) => group.access_mode === 'paid')
   const dramaId = await createDrama(`策略组新剧${Date.now()}`, 'MOVIE', paid.id)
   const detail = await call('GET', `/admin/api/dramas/${dramaId}`)
   assert.equal(detail.code, '0000')

@@ -7,7 +7,7 @@ const ZH = {
   },
   contentType: { movie: '电影', series: '剧集', comic_drama: '漫剧', documentary: '纪录片' },
   access: {
-    free: '免费', subscription: '会员', paid: '单片', owned: '已购',
+    free: '免费', subscription: '会员', paid: '一次性', owned: '已购',
     subscribed: '已开通', trial: '试看',
   },
   accessMode: { free: '免费', subscription: '会员免费', paid: '单独收费' },

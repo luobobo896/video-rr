@@ -921,8 +921,8 @@ CREATE INDEX IF NOT EXISTS idx_episode_rules_drama ON episode_price_rules(drama_
       (name, description, access_mode, free_episodes, trial_seconds, single_price_cny)
       VALUES (?, ?, ?, ?, ?, ?)`)
     insertGroup.run('免费公开', '全部剧集免费观看', 'free', 0, 0, 0)
-    insertGroup.run('会员免费', '会员可看，首集免费', 'subscription', 1, 0, 0)
-    insertGroup.run('单片付费', '首集免费，其余按单片价格解锁', 'paid', 1, 0, 3)
+    insertGroup.run('会员免费', '会员可看，剧集首集免费', 'subscription', 1, 0, 0)
+    insertGroup.run('一次性收费', '会员也要付费，可选买断或租赁', 'paid', 1, 0, 3)
   }
 
   db.exec(`
@@ -1127,16 +1127,18 @@ export function seedIfEmpty() {
   // 种子内容
   const seed = JSON.parse(readFileSync(join(ROOT, 'data', 'seed.json'), 'utf8'))
   const insertDrama = db.prepare(`INSERT INTO dramas
-    (title, sub_title, cover_url, description, year, area, category, score, status, sort, content_type, published_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, datetime('now'))`)
+    (title, sub_title, cover_url, description, year, area, category, score, status, sort, content_type, is_adult, published_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, datetime('now'))`)
   const ids = new Map()
   const addDrama = (item, sort) => {
     const key = String(item.dramaId ?? item.title)
     if (ids.has(key)) return ids.get(key)
     const category = item.dramaType ?? 'TV'
+    // 短剧只承载成人内容：种子数据同样按这条规则落 is_adult，外层才不会把「短剧」频道暴露出去
+    const isAdult = String(category).toUpperCase() === 'PLAYLET' || item.isAdult ? 1 : 0
     const info = insertDrama.run(item.title ?? '未命名', item.subTitle ?? '', item.coverUrl ?? '',
       item.description ?? '', 2026, item.area ?? '韩国', category, item.score ?? 8.5, sort,
-      contentTypeOfCategory(category))
+      contentTypeOfCategory(category), isAdult)
     const id = Number(info.lastInsertRowid)
     ids.set(key, id)
     return id
@@ -1168,7 +1170,7 @@ export function seedIfEmpty() {
 
     // 套餐
     const insertPlan = db.prepare('INSERT INTO plans (code, name, price_cny, duration_days, scope, description, sort) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    insertPlan.run('vip-month', '月卡会员', 25, 30, 'all', '全站剧集免费看（不含单片付费内容）', 1)
+    insertPlan.run('vip-month', '月卡会员', 25, 30, 'all', '会员内容免费看（不含一次性收费内容）', 1)
     insertPlan.run('vip-quarter', '季卡会员', 68, 90, 'all', '全站剧集免费看，折合 22.7 元/月', 2)
     insertPlan.run('vip-year', '年卡会员', 238, 365, 'all', '全站剧集免费看，折合 19.8 元/月', 3)
 
@@ -1227,6 +1229,9 @@ export function seedIfEmpty() {
     db.exec('ROLLBACK')
     throw error
   }
+  // 种子里的成人短剧默认带 1 集免费，落库后立即按成人策略纠正
+  ensureAdultPolicyInvariant()
+  ensurePolicyInvariant()
   return { seeded: true, dramas: count('dramas'), episodes: count('episodes') }
 }
 
@@ -2023,6 +2028,79 @@ CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_status ON withdrawal_requests
   }
 }
 
+/**
+ * 短剧频道只承载成人内容：外层（未确认 18+ 的导航、首页、筛选栏）不能出现短剧，
+ * 所以这里把历史遗留的 `PLAYLET + is_adult = 0` 一次性纠正。幂等，每次启动都跑。
+ */
+export function ensureAdultDramaInvariant() {
+  db.exec("UPDATE dramas SET is_adult = 1 WHERE COALESCE(category, '') = 'PLAYLET' AND COALESCE(is_adult, 0) = 0")
+}
+
+/**
+ * 成人内容统一付费策略：会员专享、无免费集、无试看、不可单买。
+ * 运营侧仍能改套餐和价格，但成人内容不允许再出现免费集/单片付费/策略组覆盖。
+ * 幂等，只在实际不一致时写库。
+ */
+export function applyAdultPolicy(dramaId) {
+  const row = db.prepare('SELECT id, is_adult FROM dramas WHERE id = ?').get(Number(dramaId))
+  if (!row || !row.is_adult) return false
+  db.prepare(`UPDATE content_policies
+    SET policy_group_id = NULL, access_mode = 'subscription', free_episodes = 0,
+        trial_seconds = 0, single_price_cny = 0, purchase_kind = 'single', rental_hours = 0,
+        updated_at = datetime('now')
+    WHERE drama_id = ?`).run(Number(dramaId))
+  db.prepare(`INSERT INTO content_policies
+    (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
+    SELECT id, NULL, 'subscription', 0, 0, 0, 'single', 0 FROM dramas WHERE id = ? AND is_adult = 1
+    ON CONFLICT(drama_id) DO NOTHING`).run(Number(dramaId))
+  db.prepare('DELETE FROM episode_price_rules WHERE drama_id = ?').run(Number(dramaId))
+  return true
+}
+
+export function ensureAdultPolicyInvariant() {
+  db.exec(`UPDATE content_policies
+    SET policy_group_id = NULL, access_mode = 'subscription', free_episodes = 0,
+        trial_seconds = 0, single_price_cny = 0, purchase_kind = 'single', rental_hours = 0,
+        updated_at = datetime('now')
+    WHERE drama_id IN (SELECT id FROM dramas WHERE is_adult = 1)
+      AND (policy_group_id IS NOT NULL OR access_mode <> 'subscription' OR free_episodes <> 0
+        OR trial_seconds <> 0 OR single_price_cny <> 0 OR purchase_kind <> 'single' OR rental_hours <> 0)`)
+  db.exec(`INSERT INTO content_policies
+    (drama_id, policy_group_id, access_mode, free_episodes, trial_seconds, single_price_cny, purchase_kind, rental_hours)
+    SELECT d.id, NULL, 'subscription', 0, 0, 0, 'single', 0 FROM dramas d
+    WHERE d.is_adult = 1 AND NOT EXISTS (SELECT 1 FROM content_policies p WHERE p.drama_id = d.id)
+    ON CONFLICT(drama_id) DO NOTHING`)
+  db.exec('DELETE FROM episode_price_rules WHERE drama_id IN (SELECT id FROM dramas WHERE is_adult = 1)')
+}
+
+/** 付费策略不变量：会员免费/免费公开不挂单片价，电影不吃首 N 集免费。 */
+export function ensurePolicyInvariant() {
+  // 旧版内置组名「单片付费」统一改成「一次性收费」，避免和会员权益混淆
+  db.exec(`UPDATE policy_groups SET name = '一次性收费', description = '会员也要付费，可选买断或租赁',
+    updated_at = datetime('now') WHERE name = '单片付费' AND access_mode = 'paid'`)
+  // 只有一次性收费才有买断/租赁；其余模式一律清空价格与售卖方式
+  db.exec(`UPDATE content_policies
+    SET single_price_cny = 0, purchase_kind = 'single', rental_hours = 0, updated_at = datetime('now')
+    WHERE access_mode <> 'paid'
+      AND (single_price_cny <> 0 OR purchase_kind <> 'single' OR rental_hours <> 0)`)
+  db.exec(`UPDATE policy_groups
+    SET single_price_cny = 0, purchase_kind = 'single', rental_hours = 0, updated_at = datetime('now')
+    WHERE access_mode <> 'paid'
+      AND (single_price_cny <> 0 OR purchase_kind <> 'single' OR rental_hours <> 0)`)
+  // 免费公开不需要试看与首 N 集免费
+  db.exec(`UPDATE content_policies SET free_episodes = 0, trial_seconds = 0, updated_at = datetime('now')
+    WHERE access_mode = 'free' AND (free_episodes <> 0 OR trial_seconds <> 0)`)
+  db.exec(`UPDATE policy_groups SET free_episodes = 0, trial_seconds = 0, updated_at = datetime('now')
+    WHERE access_mode = 'free' AND (free_episodes <> 0 OR trial_seconds <> 0)`)
+  // 电影（含单集内容）没有「首集免费」
+  db.exec(`UPDATE content_policies SET free_episodes = 0, updated_at = datetime('now')
+    WHERE free_episodes > 0 AND drama_id IN (
+      SELECT d.id FROM dramas d
+      WHERE d.content_type = 'movie' OR d.category = 'MOVIE'
+        OR (SELECT COUNT(*) FROM episodes e WHERE e.drama_id = d.id AND e.status != 'merged') <= 1
+    )`)
+}
+
 /** 补齐缺失的默认设置行（老库升级用）。 */
 export function ensureSettings() {
   const defaults = {
@@ -2041,6 +2119,9 @@ export function ensureSettings() {
 ensureOpsSchema()
 ensureGrowthSchema()
 ensureAdultTagSeed()
+ensureAdultDramaInvariant()
+ensureAdultPolicyInvariant()
+ensurePolicyInvariant()
 // 新增的权限节点（如 system.menu）也要在脚本/测试场景下补齐，否则角色授权页看不到
 syncMenuCatalog()
 

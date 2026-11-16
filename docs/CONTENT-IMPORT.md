@@ -66,3 +66,10 @@ bash deploy/verify-play.sh                   # 真实播放链路：master → �
 3. `node scripts/import-catalog.mjs --build --only <slug>`。
 
 后台单集上传接口仍然可用（`POST /admin/api/episodes/:id/upload`），适合零散补片；批量导入走 catalog 更快。
+
+## 7. 批量补量：archive.org 刮削
+
+短剧频道只有成人内容，不参与补量；片库里的电影/剧集/动漫用 archive.org 刮削器补：`node scripts/archive-import.mjs --collection feature_films --rows 40 --limit 20`。
+
+来源、参数、解析规则、直链播放与验收见 `docs/ARCHIVE-IMPORT.md`。刮削器会把 `PLAYLET` 强制降级成 `MOVIE`，所以不会往短剧频道里灌非成人内容。
+
