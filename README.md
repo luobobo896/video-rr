@@ -78,7 +78,7 @@ server/
   api-admin.mjs   后台接口
 public/ admin/    Vue 兼容入口、业务渲染器与静态素材；构建产物在 dist/
 deploy/            HK 部署脚本、nginx 片段、压测、容量评估
-docs/              COMMERCE.md（资金与权益设计）、API-ADMIN.md、REVIEW-paid-product.md（评审）
+docs/              ENV.md（环境变量全表）、COMMERCE.md（资金与权益设计）、API-ADMIN.md、REVIEW-paid-product.md（评审）
 test/              node:test 回归
 ```
 
@@ -93,6 +93,7 @@ cd /opt/video-rr && bash deploy/install-hk.sh    # 安装依赖 → 构建 → �
 nginx：`/video/` 静态、`/video/api/` 反代、`/video/media/hls/` 走 `secure_link`、`/video-admin/*` 后台。
 播放签名密钥在 `.env` 的 `MH_LINK_SECRET`，安装脚本注入 nginx。
 不要直接 `git pull` 发布：当前修复可能仍在工作区，远程 HEAD 不一定包含它们。
+上线前按 [docs/ENV.md](docs/ENV.md) 的「安全相关默认值速查」逐条确认 `.env`。
 
 ## 主站前端
 
@@ -112,5 +113,6 @@ C 端主站已切换为 `public/src/` 的 Vue 3 应用，直接复用 `/api`：
 ## 已知边界
 
 - 支付宝/USDT 为**真实协议实现但未配置商户参数**，线上仍需填 appId/私钥/公钥、收款地址；mock 渠道生产必须关闭。
-- 试看（trial）为前端按秒截断 + 180 秒短签名，属防君子不防小人；要硬防需切片级加密。
+- 试看（trial）由服务端按时间窗口生成截断清单：只放行窗口内的分片，并按访客/账号在 24 小时内的试看次数配额限流（超限 402），不再是前端截断。
+- 远端片源（`remote_url`）暂不支持试看，试看只对本地 HLS 剧集生效。
 - 素材为原站海报镜像，正式运营前替换为自有版权内容。

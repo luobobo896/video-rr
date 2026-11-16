@@ -383,21 +383,24 @@ cd /opt/video-rr && MH_EDGE=/usr/bin/chromium xvfb-run -a \
   node scripts/jable-import.mjs --refresh --max-left 1 --dry
 ```
 
-`/etc/cron.d/video-refresh`（每 3 小时，`flock` 防重入）：
+`/etc/cron.d/video-refresh`（每 5 分钟增量续期，`flock -n -E 99` 防重入）：
 
 ```
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
-# jable 直链 3 小时过期。每 3 小时全量刷新一轮（约 1.8 小时跑完），
-# 请求量约 1100 次/小时，是维持 3383 部可播的最低频率，别再往上加。
-0 */3 * * * root cd /opt/video-rr && flock -n /tmp/jable-refresh.lock env MH_EDGE=/usr/bin/chromium xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 200 >> /var/log/video-refresh.log 2>&1
+# jable 直链 3 小时过期，库内 3500 条左右 → 平均每分钟有 19 条过期。
+# 两轮并行续期（各用独立 flock / Chrome profile / 进程锁，按 drama id 奇偶分片），
+# 每轮只刷剩余有效期不足 45 分钟的（--max-left 45），单轮约 600 条上限。
+*/5 * * * * root cd /opt/video-rr && flock -n -E 99 /tmp/jable-refresh.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome MH_LOCK=/opt/video-rr/storage/.jable-import-0.lock MH_SHARD=0/2 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 45 --limit 600 >> /var/log/video-refresh.log 2>&1
+2-59/5 * * * * root cd /opt/video-rr && flock -n -E 99 /tmp/jable-refresh-2.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome-2 MH_LOCK=/opt/video-rr/storage/.jable-import-1.lock MH_SHARD=1/2 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 45 --limit 600 >> /var/log/video-refresh.log 2>&1
+3,13,23,33,43,53 * * * * root cd /opt/video-rr && MH_LOCK=/opt/video-rr/storage/.jable-import-0.lock /usr/bin/node scripts/jable-health.mjs --fix >> /var/log/video-refresh.log 2>&1
 ```
 
-频率是被有效期倒推出来的：链接 3 小时过期，一轮全量约 1.8 小时，
-所以 3 小时是能维持全部可播的最低频率。再密只会加速触发 Cloudflare 限流，
-不会让播放更稳；真要减少请求量，唯一有效的办法是缩小需要保持可播的片量。
+**为什么不再是"每 3 小时全量刷一轮"**：全量一轮约 1.8 小时，而链接 3 小时就过期——刷新还没跑完，最早那批已经失效，播放端会持续出现 403。现在改成"只刷快过期的"，把请求摊平到整个窗口：每 5 分钟挑 `--max-left 45` 以内的条目续期，两片并行，单轮抓取量有 `--limit` 上限，`flock` 抢不到锁直接退 99（`jable-health` 视为正常跳过）。请求总量比全量方案低，且不会出现"同一时刻全库一起到期"。
 
-实测服务器端 167 部连续刷新 **0 失败**，约 21 部/分钟；1844 部待刷约 90 分钟跑完。
+`-E 99` 是必须的：`flock -n` 默认抢锁失败退 1，与"抓页失败"无法区分，健康检查会每 10 分钟误告警一次。
+
+实测服务器端 167 部连续刷新 **0 失败**，约 21 部/分钟；按分片增量方式跑，3500 条库的日常续期稳定在每轮数十条量级。
 
 **关键配套**：`scripts/adult-migrate.mjs` 写 `remote_url` 前会比较两边的 `EXP`
 （`expiryOfUrl()`，从 `/hls/<token>/<EXP>/` 取），只有本地更晚才覆盖。
