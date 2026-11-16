@@ -348,3 +348,18 @@ node scripts/jable-import.mjs --refresh --dry    # 看剩余分钟
 ```
 
 正常应该显示剩余 100 分钟以上。整站都在 60 分钟以下，说明刷新计划任务没跑起来。运营靠 Windows 计划任务 `video-rr-adult-refresh` 每 30 分钟 `--refresh --max-left 40`，只刷快过期的几十部。
+
+## 评分补齐（--score-only）
+
+后台「剧集管理」的「缺 N 项」里 `score` 是最常见的缺失项。jable 没有用户打分，只有站内播放量，
+所以评分按播放量折算：`6.0 + min(3, max(0, (log10(播放量+1) - 3) × 1.15))`，上限 9.0。
+
+```bash
+node scripts/jable-import.mjs --score-only --limit 5 --dry   # 先看折算结果
+node scripts/jable-import.mjs --score-only                   # 全量补
+```
+
+* 只挑 `is_adult=1 AND category='MOVIE' AND score 为空` 且能反推番号的片子，已经有分的不覆盖。
+* 走的是同一套 Edge/CDP，单部约 1.4–2.8 秒；三千部要跑一到三小时，建议挂着让它自己跑。
+* 折算函数 `scoreOfViews()` 在 `server/jable.mjs`（纯函数，`test/score-fill.test.mjs` 覆盖）。
+* 列表页卡片上没有播放量，只能进详情页取，所以没法用翻页加速。

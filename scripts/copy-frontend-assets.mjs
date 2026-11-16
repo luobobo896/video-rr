@@ -7,7 +7,7 @@ const copy = async (from, to) => {
 }
 
 await mkdir('dist/client', { recursive: true })
-for (const dir of ['icons', 'brand', 'vendor']) await copy(join('public', dir), join('dist/client', dir))
+for (const dir of ['icons', 'brand', 'art', 'vendor']) await copy(join('public', dir), join('dist/client', dir))
 await copy(join('public', 'icons'), join('dist/client', 'assets', 'icons'))
 for (const file of [
   'base.js', 'apple-touch-icon.png', 'favicon.ico', 'favicon-16x16.png', 'favicon-32x32.png',

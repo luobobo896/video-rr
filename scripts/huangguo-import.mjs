@@ -9,6 +9,7 @@
  *   node scripts/huangguo-import.mjs --page /original/ --pages 7
  *   node scripts/huangguo-import.mjs --id 12166 --id 13692
  *   node scripts/huangguo-import.mjs --page /tag/dushi/ --pages 5 --limit 60 --no-images
+ *   node scripts/huangguo-import.mjs --score-only --concurrency 6
  */
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -63,6 +64,7 @@ const concurrency = Math.max(1, Math.min(8, Number(valueOf('--concurrency', '4')
 const allTags = flags.has('--tags')
 const discover = flags.has('--discover')
 const idsFile = valueOf('--ids-file')
+const scoreOnly = flags.has('--score-only')
 
 // /tag/<slug>/ 下的全部题材；--tags 时逐个翻页收集（--discover 会从站点导航抓全量）
 const TAG_SLUGS = [
@@ -268,26 +270,41 @@ function upsertDrama(meta, artwork) {
   const releaseDate = (meta.publishedAt || '').slice(0, 10) || null
   const subtitle = [meta.typeName || 'AI短剧', meta.author].filter(Boolean).join(' · ')
   const description = descriptionOf(meta)
+  const score = meta.score ?? null
 
   if (existing) {
     const keepBlurb = String(existing.description ?? '').startsWith('簡介：')
     run(
       `UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?,
-        category = 'PLAYLET', content_type = 'drama', is_adult = 1, release_date = ?,
+        category = 'PLAYLET', content_type = 'drama', is_adult = 1, release_date = ?, score = COALESCE(?, score),
         status = 'published', published_at = COALESCE(published_at, ?), updated_at = datetime('now')
        WHERE id = ?`,
       meta.title, subtitle, coverUrl, keepBlurb ? existing.description : description, year, '中国',
-      releaseDate, releaseDate, existing.id,
+      releaseDate, score, releaseDate, existing.id,
     )
     return { id: existing.id, created: false }
   }
   const info = run(
     `INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category,
-      content_type, is_adult, release_date, status, published_at, sort, source_key)
-     VALUES (?, ?, ?, ?, ?, '中国', 'PLAYLET', 'drama', 1, ?, 'published', ?, 0, ?)`,
-    meta.title, subtitle, coverUrl, description, year, releaseDate, releaseDate, key,
+      content_type, is_adult, release_date, score, status, published_at, sort, source_key)
+     VALUES (?, ?, ?, ?, ?, '中国', 'PLAYLET', 'drama', 1, ?, ?, 'published', ?, 0, ?)`,
+    meta.title, subtitle, coverUrl, description, year, releaseDate, score, releaseDate, key,
   )
   return { id: Number(info.lastInsertRowid), created: true }
+}
+
+/** --score-only：只按库里的 source_key 回源补评分，不碰贴图、剧集、标签 */
+function scoreFromLibrary() {
+  const rows = all(`SELECT source_key FROM dramas
+    WHERE category = 'PLAYLET' AND source_key LIKE 'huangguo:%' ORDER BY id`)
+  return rows.map((row) => String(row.source_key).slice('huangguo:'.length)).filter(Boolean)
+}
+
+function updateScore(key, score) {
+  const existing = one('SELECT id FROM dramas WHERE source_key = ? ORDER BY id LIMIT 1', key)
+  if (!existing) return { skipped: true }
+  run("UPDATE dramas SET score = ?, updated_at = datetime('now') WHERE id = ?", score, existing.id)
+  return { id: existing.id, created: false, episodes: 0, tags: 0 }
 }
 
 function upsertEpisodes(dramaId, meta) {
@@ -327,6 +344,15 @@ function findTwin(meta) {
 
 async function importOne(videoId) {
   const preKey = `huangguo:${videoId}`
+  if (scoreOnly) {
+    const pageUrl = `${HG_BASE}/video/${videoId}/`
+    const html = await fetchHuangguoPage(pageUrl)
+    const meta = parseHuangguoPage(html, pageUrl)
+    if (!meta) throw new Error('页面没有 videoInitialData')
+    meta.sourceKey = `huangguo:${meta.videoId}`
+    if (dry) return { dry: true, meta }
+    return { ...updateScore(meta.sourceKey, meta.score), meta }
+  }
   if (skipExisting && one('SELECT id FROM dramas WHERE source_key = ?', preKey)) {
     return { skipped: true }
   }
@@ -371,13 +397,15 @@ async function runPool(items, worker) {
 }
 
 async function main() {
-  const ids = await collectIds()
+  const ids = scoreOnly ? scoreFromLibrary() : await collectIds()
   if (!ids.length) {
-    process.stdout.write('没有找到要导入的剧集，用 --page /original/ 或 --id 12166 指定\n')
+    process.stdout.write(scoreOnly
+      ? '库里没有待补评分的短剧（source_key like huangguo:%）\n'
+      : '没有找到要导入的剧集，用 --page /original/ 或 --id 12166 指定\n')
     return
   }
   const targets = limit > 0 ? ids.slice(0, limit) : ids
-  process.stdout.write(`待导入 ${targets.length} 部（并发 ${concurrency}${dry ? '，dry-run' : ''}）\n`)
+  process.stdout.write(`${scoreOnly ? '待补评分' : '待导入'} ${targets.length} 部（并发 ${concurrency}${dry ? '，dry-run' : ''}）\n`)
 
   const started = Date.now()
   const results = await runPool(targets, importOne)
@@ -405,7 +433,7 @@ async function main() {
       continue
     }
     if (r.dry) {
-      process.stdout.write(`  · ${r.meta.videoId} ${r.meta.title} / ${r.meta.totalEpisodes} 集 / ${r.meta.tags.join(',')}\n`)
+      process.stdout.write(`  · ${r.meta.videoId} ${r.meta.title} / ${r.meta.totalEpisodes} 集 / 评分 ${r.meta.score ?? '无'} / ${r.meta.tags.join(',')}\n`)
       continue
     }
     if (r.created) created++

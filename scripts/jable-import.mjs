@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { db } from '../server/db.mjs'
-import { parseVideoPage, parseVideoLinks, durationOfPlaylist, expiryOf, artworkUrls } from '../server/jable.mjs'
+import { parseVideoPage, parseVideoLinks, durationOfPlaylist, expiryOf, artworkUrls, scoreOfViews } from '../server/jable.mjs'
 
 const exec = promisify(execFile)
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -74,6 +74,7 @@ const skipImages = flags.has('--no-images')
 // 雪碧图单张 1.5MB，跑几千部会吃掉几个 GB 和大部分时间；只跳它，封面与 banner 照旧
 const skipPreview = flags.has('--no-preview')
 const refresh = flags.has('--refresh')
+const scoreOnly = flags.has('--score-only')
 
 // ---------- 浏览器 ----------
 const CANDIDATES = [
@@ -338,6 +339,60 @@ function refreshTargets() {
   return targets
 }
 
+// ---------- 评分补全（--score-only） ----------
+/** 库内缺评分的 jable 片，按 sub_title 里的番号反推详情页地址。 */
+function scoreTargets() {
+  const rows = all(`SELECT d.id, d.sub_title, d.title FROM dramas d
+     WHERE d.is_adult = 1 AND d.category = 'MOVIE' AND (d.score IS NULL OR d.score = '')
+       AND EXISTS (SELECT 1 FROM episodes e WHERE e.drama_id = d.id AND (e.remote_referer = ? OR e.remote_url LIKE '%alonestreaming.com%' OR e.remote_url LIKE '%mushroomtrack.com%'))
+     ORDER BY d.id`, REFERER)
+  const list = []
+  for (const row of rows) {
+    const code = /^([A-Za-z0-9_]+-\d+)/.exec(String(row.sub_title ?? ''))?.[1]
+    if (!code) continue
+    list.push({ dramaId: row.id, title: row.title, url: `https://jable.tv/videos/${code.toLowerCase().replace(/_/g, '-')}/` })
+  }
+  return list
+}
+
+
+async function runScoreBatch(browser, list) {
+  const update = db.prepare("UPDATE dramas SET score = ?, updated_at = datetime('now') WHERE id = ?")
+  let ok = 0
+  let failed = 0
+  let skipped = 0
+  for (const [index, item] of list.entries()) {
+    const label = `[${index + 1}/${list.length}] ${item.url}`
+    try {
+      const html = await browser.navigate(item.url)
+      if (!/hlsUrl\s*=\s*'/.test(html)) {
+        failed++
+        console.log(`${label}\n  ✗ 页面没拿到 hlsUrl（挑战没过或页面改版）`)
+        continue
+      }
+      const meta = parseVideoPage(html, item.url)
+      const score = scoreOfViews(meta.views)
+      if (!score) {
+        skipped++
+        console.log(`${label}\n  · ${item.title.slice(0, 50)} 没有播放量，跳过`)
+        continue
+      }
+      if (dry) {
+        console.log(`${label}\n  · ${item.title.slice(0, 50)} 播放 ${meta.views} → ${score} 分（dry）`)
+        ok++
+        continue
+      }
+      update.run(score, item.dramaId)
+      ok++
+      console.log(`${label}\n  ✓ ${item.title.slice(0, 50)} 播放 ${meta.views} → ${score} 分`)
+    } catch (error) {
+      failed++
+      console.log(`${label}\n  ✗ ${error.message}`)
+    }
+  }
+  console.log(`\n完成：成功 ${ok}，跳过 ${skipped}，失败 ${failed}`)
+}
+
 async function runBatch(browser, list) {
   let ok = 0
   let failed = 0
@@ -370,6 +425,13 @@ async function main() {
   const every = Number(valueOf('--every', '0')) || 0
   const browser = await openBrowser()
   try {
+    if (scoreOnly) {
+      const list = scoreTargets()
+      const limited = limit > 0 ? list.slice(0, limit) : list
+      console.log(`待补评分 ${limited.length} 部（库存 ${list.length}${dry ? '，dry-run' : ''}）`)
+      if (limited.length) await runScoreBatch(browser, limited)
+      return
+    }
     let round = 0
     do {
       round++

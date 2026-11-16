@@ -93,7 +93,7 @@ function toggleLang() {
   <div class="app">
     <aside class="sidebar">
       <a class="brand" :href="href('/')" aria-label="影巢首页">
-        <span class="brand-mark">影</span>
+        <span class="brand-mark brand-mark--logo"><img :src="'./art/logo-mark.png'" alt="" width="32" height="32" /></span>
         <span class="brand-name">影巢<span class="brand-sub">CINEMA NEST</span></span>
       </a>
 

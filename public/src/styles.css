@@ -1551,3 +1551,44 @@ input:-webkit-autofill:focus {
     text-align: center;
   }
 }
+
+/* ---- 品牌与插画素材（art/ 由 scripts/copy-frontend-assets.mjs 复制） ---- */
+.brand-mark--logo {
+  background: none;
+  padding: 0;
+  overflow: hidden;
+}
+.brand-mark--logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.login-page {
+  position: relative;
+  isolation: isolate;
+}
+.login-bg {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.24;
+  z-index: -1;
+  pointer-events: none;
+}
+.empty--art {
+  gap: 4px;
+}
+.empty-art {
+  width: min(420px, 78vw);
+  height: auto;
+  border-radius: var(--r-3, 14px);
+  margin-bottom: 10px;
+  opacity: 0.92;
+}
+.film-fallback {
+  opacity: 0.5;
+  filter: saturate(0.85);
+}

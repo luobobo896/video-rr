@@ -5,6 +5,7 @@
  *   node scripts/jable-blurb.mjs --limit 5  # 先试 5 条
  *   node scripts/jable-blurb.mjs --dry      # 只打印，不写库
  *   node scripts/jable-blurb.mjs --force    # 全部重写
+ *   node scripts/jable-blurb.mjs --jable    # 只处理 jable 条目（sub_title 带番号）
  *
  * 走 OpenAI 兼容端点（默认 127.0.0.1:5000），不需要 ai.bat 在 PATH 里。
  * 端点与模型可用 AI_BASE / AI_MODEL / AI_KEY 覆盖。
@@ -26,10 +27,15 @@ const argValue = (name) => {
 const limit = Number(argValue('--limit') || 0) || 0
 const dry = argv.includes('--dry')
 const force = argv.includes('--force')
+// jable 条目的 sub_title 形如 `MIKR-134 · 女優`；黄果短剧没有番号，别混进来
+const jableOnly = argv.includes('--jable')
+const hasCode = (row) => /^[A-Za-z0-9_]+-\d+ · /.test(String(row.sub_title ?? ''))
 
 const db = new DatabaseSync('storage/app.db')
 const rows = db.prepare(`SELECT id, sub_title, title, description FROM dramas WHERE is_adult = 1 ORDER BY id`).all()
-const todo = (force ? rows : rows.filter((r) => !String(r.description ?? '').includes(MARK))).slice(0, limit || undefined)
+const todo = (force ? rows : rows.filter((r) => !String(r.description ?? '').includes(MARK)))
+  .filter((r) => !jableOnly || hasCode(r))
+  .slice(0, limit || undefined)
 console.log(`待写简介 ${todo.length} 条（总 ${rows.length} 条，模型 ${MODEL}）`)
 if (!todo.length) process.exit(0)
 

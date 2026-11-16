@@ -112,6 +112,17 @@ export function expiryOf(hlsUrl) {
 }
 
 /** 解析 Plyr 预览雪碧图的 VTT：返回每帧的雪碧图坐标。 */
+/**
+ * 站内播放量映射到 6.0–9.0 的评分。
+ * jable 没有用户打分，只能用热度当质量信号；纯函数，便于测试。
+ */
+export function scoreOfViews(views) {
+  const count = Number(String(views ?? '').replace(/[^\d]/g, '')) || 0
+  if (count <= 0) return null
+  const raw = 6 + Math.min(3, Math.max(0, (Math.log10(count + 1) - 3) * 1.15))
+  return Number(raw.toFixed(1))
+}
+
 export function parseThumbVtt(text) {
   const body = String(text ?? '')
   const frames = []

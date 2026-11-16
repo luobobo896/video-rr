@@ -69,9 +69,10 @@ async function submit() {
 </script>
 
 <template>
-  <main class="page" style="min-height: 100vh; place-content: center; max-width: 520px">
+  <main class="page login-page" style="min-height: 100vh; place-content: center; max-width: 520px">
+    <img class="login-bg" :src="'./art/login-bg.jpg'" alt="" aria-hidden="true" />
     <a class="brand" :href="href('/')" style="margin-bottom: 12px">
-      <span class="brand-mark">影</span>
+      <span class="brand-mark brand-mark--logo"><img :src="'./art/logo-mark.png'" alt="" width="32" height="32" /></span>
       <span class="brand-name">影巢<span class="brand-sub">CINEMA NEST</span></span>
     </a>
     <div class="panel" style="padding: 32px">

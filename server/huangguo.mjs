@@ -290,9 +290,10 @@ export function parseHuangguoPage(html, pageUrl = '') {
     author: textOf(data.author),
     authorId: textOf(data.authorId),
     views: textOf(data.views),
-    viewsNum: Number(data.viewsNum) || 0,
+    viewsNum: parseCount(data.views),
     likes: textOf(data.likes),
     collects: textOf(data.collects),
+    score: scoreOf({ views: data.views, likes: data.likes, collects: data.collects }),
     publishedAt: textOf(data.time),
     totalEpisodes: total,
     episodeNos: finalNos,
@@ -303,6 +304,36 @@ export function parseHuangguoPage(html, pageUrl = '') {
     typeName: textOf(tracking.drama_type_name),
     typeId: textOf(tracking.drama_type_id),
   }
+}
+
+/**
+ * 中文计数转数字：`10.1w` → 101000、`3.8k` → 3800、`246.7万` → 2467000。
+ * 解析不了返回 0，调用方按「无数据」处理。
+ */
+export function parseCount(text) {
+  const raw = String(text ?? '').trim().toLowerCase().replace(/,/g, '')
+  if (!raw) return 0
+  const num = Number.parseFloat(raw)
+  if (!Number.isFinite(num) || num < 0) return 0
+  if (/w$|万$/.test(raw)) return Math.round(num * 10000)
+  if (/k$|千$/.test(raw)) return Math.round(num * 1000)
+  if (/m$/.test(raw)) return Math.round(num * 1000000)
+  if (/亿$/.test(raw)) return Math.round(num * 100000000)
+  return Math.round(num)
+}
+
+/**
+ * 评分由源站真实热度推导，不做人工编造：
+ * 播放量（对数，封顶 3 分）+ 收藏率（封顶 2 分）+ 点赞率（封顶 2 分），落在 6.0–9.6。
+ * 没有播放数据时返回 null，保留「未评分」而不是编一个数。
+ */
+export function scoreOf({ views, likes, collects } = {}) {
+  const play = parseCount(views)
+  if (play <= 0) return null
+  const reach = Math.max(0, Math.min(3, (Math.log10(play + 1) - 3) * 0.75))
+  const save = Math.max(0, Math.min(2, (parseCount(collects) / play) * 20))
+  const like = Math.max(0, Math.min(2, (parseCount(likes) / play) * 300))
+  return Math.round(Math.max(6, Math.min(9.6, 5.2 + reach + save + like)) * 10) / 10
 }
 
 /** 列表页 → videoId 列表（去重保序） */

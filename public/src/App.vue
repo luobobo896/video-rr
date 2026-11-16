@@ -116,8 +116,8 @@ onMounted(() => {
   <LoginPage v-else-if="isCStandalone" />
   <AppShell v-else :active="activeKey">
     <component :is="pageComponent" v-if="pageComponent" :key="componentKey" />
-    <div v-else class="empty">
-      <Icon name="film" />
+    <div v-else class="empty empty--art">
+      <img class="empty-art" :src="'./art/empty-404.jpg'" alt="" />
       <h3>页面不存在</h3>
       <p>这个地址没有对应的页面。</p>
       <a class="btn btn--ghost btn--sm" :href="href('/')">返回精选</a>

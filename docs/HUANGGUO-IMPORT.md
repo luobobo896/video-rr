@@ -158,3 +158,24 @@ DOMAIN=www.wyfclyes.top ADMIN_PASSWORD=<后台密码> USER_EMAIL=<C 端邮箱> \
 | 封面 404 | 封面 URL 带时效参数或站群换域名 | 重跑该部（`--id`）会重下图 |
 | 播放 502 `upstream rejected` | 票过期或 CDN 换 key | 代理层已自动换票重试一次；仍失败就重跑导入刷新 |
 | 标签数量爆炸 | 每部都带 3–5 个题材词 | 新词统一挂「短劇」根，可在后台合并 |
+
+## 评分补齐（--score-only）
+
+短剧在源站有播放、点赞、收藏三个真实数字，评分按三者加权折算（6.0–9.6）：
+
+```
+reach = min(3, max(0, (log10(播放量+1) - 3) × 0.75))
+save  = min(2, 收藏/播放 × 20)
+like  = min(2, 点赞/播放 × 300)
+score = 5.2 + reach + save + like
+```
+
+```bash
+node scripts/huangguo-import.mjs --score-only --limit 5 --dry
+node scripts/huangguo-import.mjs --score-only --concurrency 6
+```
+
+* 只写 `score`，不动其它字段；已经填过的不会覆盖。
+* 实测 1734 部并发 6 用时 114 秒，1734/1734 成功（2026-11-16）。
+* 播放量解析支持 `10.1w` / `246.7万` / `3.8k` / `1.2亿`（`parseCount()`），折算函数 `scoreOf()`。
+* 顺带说明：`viewsNum` 原来恒为 0（源站 JSON 里没有这个字段），现在改为从 `data.views` 解析。
