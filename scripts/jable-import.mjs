@@ -102,6 +102,8 @@ async function openBrowser() {
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     '--no-first-run', '--no-default-browser-check',
+    '--no-sandbox', '--disable-dev-shm-usage',
+    ...(process.env.MH_HEADLESS ? ['--headless=new'] : []),
     '--window-size=1280,900',
     'about:blank',
   ], { detached: true, stdio: 'ignore' })
@@ -131,6 +133,11 @@ async function openBrowser() {
   })
   await new Promise((resolve) => ws.addEventListener('open', resolve))
   await send('Page.enable')
+  // 只拉 HTML/JS/CSS：图片、字体、视频分片对解析毫无用处，却会把 Cloudflare 的请求计数顶上去
+  await send('Network.enable')
+  await send('Network.setBlockedURLs', {
+    urls: ['*.jpg', '*.jpeg', '*.png', '*.webp', '*.gif', '*.svg', '*.ico', '*.woff', '*.woff2', '*.ttf', '*.mp4', '*.ts', '*.m3u8'],
+  })
 
   const evaluate = async (expression) => {
     const res = await send('Runtime.evaluate', { expression, returnByValue: true })
@@ -142,8 +149,8 @@ async function openBrowser() {
       await send('Page.navigate', { url })
       let html = ''
       let best = 0
-      for (let i = 0; i < 40; i++) {
-        await sleep(1200)
+      for (let i = 0; i < 60; i++) {
+        await sleep(i < 8 ? 320 : 900)
         html = (await evaluate('document.documentElement.outerHTML')) ?? ''
         if (wantHls && /hlsUrl\s*=\s*'/.test(html)) return html
         // 列表页要等真的出现影片链接：Cloudflare 挑战页也有 4 万字符，只看长度会在挑战页上提前返回
@@ -254,21 +261,24 @@ function upsertDrama(meta, artwork) {
   ].filter(Boolean).join('\n')
   const year = Number(meta.releaseDate.slice(0, 4)) || null
   const coverUrl = artwork.cover || meta.coverUrl
+  // 刷新轮次顺手把评分补上：页面已经拿到了，不额外发请求
+  const score = scoreOfViews(meta.views)
 
   if (existing) {
     // 已由 jable-blurb 写过中文简介的条目，别用原始描述盖掉
     const keepBlurb = String(existing.description ?? '').startsWith('簡介：')
     run(`UPDATE dramas SET title = ?, sub_title = ?, cover_url = ?, description = ?, year = ?, area = ?,
       category = 'MOVIE', content_type = 'movie', is_adult = 1, release_date = ?, status = 'published',
+      score = COALESCE(?, score),
       published_at = COALESCE(published_at, ?), updated_at = datetime('now')
       WHERE id = ?`,
-    meta.titleBody, meta.subtitle, coverUrl, keepBlurb ? existing.description : description, year, '日本', meta.releaseDate || null, meta.releaseDate || null, existing.id)
+    meta.titleBody, meta.subtitle, coverUrl, keepBlurb ? existing.description : description, year, '日本', meta.releaseDate || null, score, meta.releaseDate || null, existing.id)
     return { id: existing.id, created: false }
   }
   const info = run(`INSERT INTO dramas (title, sub_title, cover_url, description, year, area, category,
-    content_type, is_adult, release_date, status, published_at, sort)
-    VALUES (?, ?, ?, ?, ?, '日本', 'MOVIE', 'movie', 1, ?, 'published', ?, 0)`,
-  meta.titleBody, meta.subtitle, coverUrl, description, year, meta.releaseDate || null, meta.releaseDate || null)
+    content_type, is_adult, release_date, status, published_at, sort, score)
+    VALUES (?, ?, ?, ?, ?, '日本', 'MOVIE', 'movie', 1, ?, 'published', ?, 0, ?)`,
+  meta.titleBody, meta.subtitle, coverUrl, description, year, meta.releaseDate || null, meta.releaseDate || null, score)
   return { id: Number(info.lastInsertRowid), created: true }
 }
 
@@ -426,7 +436,9 @@ async function main() {
   const browser = await openBrowser()
   try {
     if (scoreOnly) {
-      const list = scoreTargets()
+      const offset = Number(valueOf('--offset', '0')) || 0
+      const all_ = scoreTargets()
+      const list = offset > 0 ? all_.slice(offset) : all_
       const limited = limit > 0 ? list.slice(0, limit) : list
       console.log(`待补评分 ${limited.length} 部（库存 ${list.length}${dry ? '，dry-run' : ''}）`)
       if (limited.length) await runScoreBatch(browser, limited)

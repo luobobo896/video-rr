@@ -40,6 +40,8 @@ const run = (sql, ...params) => db.prepare(sql).run(...params)
 const one = (sql, ...params) => db.prepare(sql).get(...params)
 const all = (sql, ...params) => db.prepare(sql).all(...params)
 const cols = (t) => all(`PRAGMA table_info(${t})`).map((r) => r.name)
+// 直链形如 https://<cdn>/hls/<token>/<EXP>/<a>/<b>/<b>.m3u8，EXP 是秒级时间戳
+const expiryOfUrl = (url) => Number(/\/hls\/[^/]+\/(\d{9,})\//.exec(String(url ?? ''))?.[1] ?? 0)
 
 const ADULT_COLUMNS = [
   'title', 'sub_title', 'cover_url', 'description', 'year', 'area', 'category',
@@ -156,6 +158,11 @@ try {
         for (const key of EPISODE_COLUMNS) if (ep[key] !== undefined) ev[key] = ep[key]
         const keys = Object.keys(ev)
         if (dry) continue
+        // 直链是带保鲜期的签名：本地和生产谁刷得晚用谁的，别拿快过期的盖掉新鲜的
+        if (ev.remote_url) {
+          const current = one('SELECT remote_url FROM episodes WHERE drama_id = ? AND no = ?', dramaId, ev.no)
+          if (expiryOfUrl(current?.remote_url) > expiryOfUrl(ev.remote_url)) ev.remote_url = current.remote_url
+        }
         run(
           `INSERT INTO episodes (drama_id, ${keys.join(', ')}, created_at)
            VALUES (?, ${keys.map(() => '?').join(', ')}, ?)

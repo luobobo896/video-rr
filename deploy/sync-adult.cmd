@@ -1,21 +1,22 @@
 @echo off
 chcp 65001 >nul
-rem Refresh expiring jable links and push new images + data to production.
-rem Run by Windows Task Scheduler every 30 minutes.
-rem Refresh must happen on this machine: the server has no browser and gets 403 from Cloudflare.
-rem --max-left 40 keeps each run short: only links with <40 minutes left are re-parsed.
+rem Push new images and data from this machine to production.
+rem Run by Windows Task Scheduler every 2 hours, or manually after importing new titles.
+rem Link refresh is NOT done here: jable challenges this home IP after bulk imports,
+rem so the refresh loop moved to the HK server (/etc/cron.d/video-refresh, every 30 minutes).
+rem adult-migrate keeps whichever remote_url expires later, so a stale local link
+rem can never overwrite a fresh production one.
 setlocal
 cd /d E:\video-rr
 if not exist storage\logs mkdir storage\logs
 set LOG=storage\logs\adult-sync.log
 
 echo === %DATE% %TIME% start ===>> "%LOG%"
-node scripts\jable-import.mjs --refresh --max-left 40 >> "%LOG%" 2>&1
+node scripts\adult-export.mjs >> "%LOG%" 2>&1
 if errorlevel 1 (
-  echo FAILED: refresh >> "%LOG%"
+  echo FAILED: export >> "%LOG%"
   exit /b 1
 )
-node scripts\adult-export.mjs >> "%LOG%" 2>&1
 node scripts\push-images.mjs >> "%LOG%" 2>&1
 scp -q storage\adult-export.json hk:/tmp/adult-export.json >> "%LOG%" 2>&1
 if errorlevel 1 (

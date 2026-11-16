@@ -363,3 +363,37 @@ node scripts/jable-import.mjs --score-only                   # 全量补
 * 走的是同一套 Edge/CDP，单部约 1.4–2.8 秒；三千部要跑一到三小时，建议挂着让它自己跑。
 * 折算函数 `scoreOfViews()` 在 `server/jable.mjs`（纯函数，`test/score-fill.test.mjs` 覆盖）。
 * 列表页卡片上没有播放量，只能进详情页取，所以没法用翻页加速。
+## 刷新搬到服务器（2026-11-16 起）
+
+本机家宽 IP 在批量补评分时被 jable 升级成硬挑战：连续抓了约 1500 个详情页之后，
+所有请求都停在 `Just a moment`，连每 30 分钟的直链刷新也开始全失败（40 部全挂）。
+表现是 `✗ 页面没拿到 hlsUrl（挑战没过或页面改版）`，等 10 分钟重试仍失败，
+而同一时刻生产 HK 服务器换个思路就能过——判断是 IP 级限流，不是页面改版。
+
+于是刷新链路整体搬到 HK 服务器：
+
+```bash
+# 服务器装浏览器与虚拟显示（Debian 13，root 运行必须 --no-sandbox，脚本已内置）
+apt-get install -y chromium xvfb
+
+# 手动验证（headful 通过 xvfb 跑，headless 会被 Cloudflare 挡）
+cd /opt/video-rr && MH_EDGE=/usr/bin/chromium xvfb-run -a \
+  node scripts/jable-import.mjs --refresh --max-left 1 --dry
+```
+
+`/etc/cron.d/video-refresh`（每 30 分钟，`flock` 防重入）：
+
+```
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+*/30 * * * * root cd /opt/video-rr && flock -n /tmp/jable-refresh.lock env MH_EDGE=/usr/bin/chromium xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 40 >> /var/log/video-refresh.log 2>&1
+```
+
+实测服务器端 167 部连续刷新 **0 失败**，约 21 部/分钟；1844 部待刷约 90 分钟跑完。
+
+**关键配套**：`scripts/adult-migrate.mjs` 写 `remote_url` 前会比较两边的 `EXP`
+（`expiryOfUrl()`，从 `/hls/<token>/<EXP>/` 取），只有本地更晚才覆盖。
+否则本机导出的旧链接会把服务器刚刷好的新链接顶掉——这是这次差点踩的坑。
+
+本机 `deploy/sync-adult.cmd` 因此去掉了 `--refresh` 一步，只剩
+`adult-export → push-images → migrate`，计划任务间隔从 30 分钟放宽到 2 小时。
