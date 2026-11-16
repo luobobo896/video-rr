@@ -5,6 +5,7 @@ import PosterCard from '../../components/PosterCard.vue';
 import { mediaUrl, publicApi } from '../../api.js';
 import { CATEGORY_LABEL, normalizeCard } from '../../models.js';
 import { href } from '../../router.js';
+import { t } from '../../i18n.js';
 
 const films = ref([]);
 const loading = ref(true);
@@ -119,7 +120,7 @@ onMounted(async () => {
   </div>
   <div v-else-if="error" class="empty">
     <Icon name="alert" />
-    <h3>海报墙加载失败</h3>
+    <h3>{{ t('海报墙加载失败') }}</h3>
     <p>{{ error }}</p>
   </div>
   <div v-else-if="displayFilms.length" class="poster-grid" :class="`poster-grid--${ratio}`">
@@ -127,6 +128,6 @@ onMounted(async () => {
   </div>
   <div v-else class="empty">
     <Icon name="grid" />
-    <h3>{{ films.length ? '这类内容还没有上架' : '还没有已发布内容' }}</h3>
+    <h3>{{ films.length ? t('这类内容还没有上架') : t('还没有已发布内容') }}</h3>
   </div>
 </template>

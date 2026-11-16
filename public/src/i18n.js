@@ -1,3 +1,5 @@
+import { ref } from 'vue'
+
 const STORAGE_KEY = 'mh-lang'
 const SUPPORTED = new Set(['zh', 'en'])
 
@@ -17,20 +19,30 @@ function detectLang() {
 
 let current = detectLang()
 
+/** 响应式语言值：模板里读它（或调用 t()）即可在切语言时原地重渲染，不再整页 reload。 */
+export const langState = ref(current)
+
 export const getLang = () => current
 
 export function setLang(lang) {
+  const previous = current
   current = SUPPORTED.has(lang) ? lang : normalizeLang(lang)
   try { localStorage.setItem(STORAGE_KEY, current) } catch { /* ignore */ }
   document.documentElement.lang = current === 'en' ? 'en' : 'zh-CN'
+  langState.value = current
+  if (previous === current) return current
+  if (current === 'en') translateDom(document.body)
+  else restoreDom(document.body)
   return current
 }
 
 export function t(key, fallback = key) {
-  return current === 'en' ? (UI_EN[key] ?? fallback) : key
+  // 读一下响应式值，模板里的 t() 才会在切语言时重新求值。
+  const lang = langState.value
+  return lang === 'en' ? (UI_EN[key] ?? fallback) : key
 }
 
-const UI_EN = {
+export const UI_EN = {
   // Navigation and chrome
   音轨: 'Audio',
   字幕: 'Subtitles',
@@ -535,6 +547,22 @@ const UI_EN = {
     'A late-night screening room for adult films and short dramas, with mature themes, a restrained interface, and age-gated access.',
   '精选电影、剧集与短剧。浏览片库，登录后同步观看记录、收藏与会员权益。':
     'Featured films, series and short dramas. Browse the library and sign in to sync history, favorites and membership.',
+  // 空态 / 加载态 / 404（切 EN 后标题与正文必须同语言，别再漏词条）
+  页面不存在: 'Page not found',
+  '这个地址没有对应的页面。': 'There is nothing at this address.',
+  返回精选: 'Back to featured',
+  暂无待播内容: 'No upcoming titles',
+  正在加载片单: 'Loading collections',
+  正在加载榜单: 'Loading rankings',
+  榜单加载失败: 'Failed to load rankings',
+  海报墙加载失败: 'Failed to load the poster wall',
+  这类内容还没有上架: 'Nothing listed in this section yet',
+  还没有已发布内容: 'No published titles yet',
+  正在校验年龄凭证: 'Checking your age credential',
+  '本频道包含成人向内容。请确认你已年满 18 岁，并愿意继续浏览。':
+    'This channel contains adult content. Please confirm that you are 18 or older and want to continue.',
+  '成人内容需先确认年龄': 'Adult content needs an age confirmation first',
+  '确认中': 'Confirming',
 }
 
 const REPLACE_PAIRS = [
@@ -652,6 +680,14 @@ function translateCore(text, el) {
     if (core === '消息') return 'Inbox'
     if (core === '会员') return 'VIP'
   }
+  // 底部导航只有 5 格，用 RESPONSIVE-DESIGN-SYSTEM §3 的英文短标签
+  if (el?.closest?.('.bottom-nav')) {
+    if (core === '精选') return 'Home'
+    if (core === '片库' || core === '分类') return 'Browse'
+    if (core === '成人') return '18+'
+    if (core === '榜单') return 'Ranks'
+    if (core === '我的') return 'Me'
+  }
   if (UI_EN[core]) return UI_EN[core]
   for (const [from, to] of REPLACE_PAIRS) {
     if (core === from) return to
@@ -673,6 +709,28 @@ export function translateText(value, el = null) {
   return translated === match[2] ? text : `${match[1]}${translated}${match[3]}`
 }
 
+// 翻译记忆：切到 EN 时记下「原文 → 译文」，切回中文时按记忆还原，
+// 这样不整页 reload 也能双向切换（reload 会白屏闪烁、打断播放、丢滚动与筛选）。
+const textMemory = new WeakMap()
+const attrMemory = new WeakMap()
+let titleMemory = null
+
+function rememberText(node, from, to) {
+  if (!from || from === to) return
+  const known = textMemory.get(node)
+  if (known && known.en === from) return
+  textMemory.set(node, { zh: from, en: to })
+}
+
+function rememberAttr(el, name, from, to) {
+  if (!from || from === to) return
+  const known = attrMemory.get(el) ?? new Map()
+  const entry = known.get(name)
+  if (entry && entry.en === from) return
+  known.set(name, { zh: from, en: to })
+  attrMemory.set(el, known)
+}
+
 export function translateDom(root = document.body) {
   if (current !== 'en' || !root) return
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
@@ -682,7 +740,10 @@ export function translateDom(root = document.body) {
     const parent = node.parentElement
     if (!parent || parent.closest(SKIP_SELECTOR)) continue
     const next = translateText(node.nodeValue, parent)
-    if (next !== node.nodeValue) node.nodeValue = next
+    if (next !== node.nodeValue) {
+      rememberText(node, node.nodeValue, next)
+      node.nodeValue = next
+    }
   }
   const attrSelector = '[placeholder],[aria-label],[title]'
   const elements = root.matches?.(attrSelector) ? [root, ...root.querySelectorAll(attrSelector)] : [...root.querySelectorAll(attrSelector)]
@@ -692,10 +753,39 @@ export function translateDom(root = document.body) {
       const value = el.getAttribute(name)
       if (!value) continue
       const next = translateText(value, el)
-      if (next !== value) el.setAttribute(name, next)
+      if (next !== value) {
+        rememberAttr(el, name, value, next)
+        el.setAttribute(name, next)
+      }
     }
   }
-  document.title = translateText(document.title)
+  const originalTitle = document.title
+  const nextTitle = translateText(originalTitle)
+  if (nextTitle !== originalTitle) {
+    titleMemory = { zh: originalTitle, en: nextTitle }
+    document.title = nextTitle
+  }
+}
+
+export function restoreDom(root = document.body) {
+  if (!root) return
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const nodes = []
+  while (walker.nextNode()) nodes.push(walker.currentNode)
+  for (const node of nodes) {
+    const entry = textMemory.get(node)
+    if (entry && node.nodeValue === entry.en) node.nodeValue = entry.zh
+  }
+  const attrSelector = '[placeholder],[aria-label],[title]'
+  const elements = root.matches?.(attrSelector) ? [root, ...root.querySelectorAll(attrSelector)] : [...root.querySelectorAll(attrSelector)]
+  for (const el of elements) {
+    const known = attrMemory.get(el)
+    if (!known) continue
+    for (const [name, entry] of known) {
+      if (el.getAttribute(name) === entry.en) el.setAttribute(name, entry.zh)
+    }
+  }
+  if (titleMemory && document.title === titleMemory.en) document.title = titleMemory.zh
 }
 
 let observer
@@ -715,7 +805,10 @@ export function initI18n() {
           const parent = mutation.target.parentElement
           if (parent && !parent.closest(SKIP_SELECTOR)) {
             const next = translateText(mutation.target.nodeValue, parent)
-            if (next !== mutation.target.nodeValue) mutation.target.nodeValue = next
+            if (next !== mutation.target.nodeValue) {
+              rememberText(mutation.target, mutation.target.nodeValue, next)
+              mutation.target.nodeValue = next
+            }
           }
           continue
         }

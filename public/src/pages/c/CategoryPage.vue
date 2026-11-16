@@ -4,6 +4,8 @@ import Icon from '../../components/Icon.vue';
 import PosterCard from '../../components/PosterCard.vue';
 import { publicApi } from '../../api.js';
 import { normalizeCard } from '../../models.js';
+import { appendUnique, clampPage, totalPagesOf } from '../../list-utils.js';
+import { readListState, writeHashParams } from '../../table-state.js';
 
 const items = ref([]);
 const total = ref(0);
@@ -40,7 +42,32 @@ const sortLabel = computed(
 const hasFilter = computed(() =>
   Boolean(filters.region || filters.year || filters.genre || filters.tag || filters.type !== 'ALL')
 );
-const canLoadMore = computed(() => items.value.length < total.value);
+const canLoadMore = computed(
+  () => page.value < totalPagesOf(total.value, pageSize) && items.value.length < total.value
+);
+
+// 筛选与页码写进 URL hash query（条目 10）：刷新 / 后退能还原，沿用 table-state.js 的 API
+const STATE_KEYS = ['type', 'sort', 'region', 'year', 'genre', 'tag', 'page'];
+
+function syncUrl() {
+  writeHashParams({
+    type: filters.type,
+    sort: filters.sort,
+    region: filters.region,
+    year: filters.year,
+    genre: filters.genre,
+    tag: filters.tag,
+    page: page.value > 1 ? page.value : ''
+  });
+}
+
+function readUrlState() {
+  const saved = readListState(STATE_KEYS, globalThis.location?.hash ?? '');
+  for (const key of ['type', 'sort', 'region', 'year', 'genre', 'tag']) {
+    if (saved[key]) filters[key] = saved[key];
+  }
+  return Math.max(1, Math.floor(Number(saved.page) || 1));
+}
 
 function query(nextPage) {
   const params = new URLSearchParams({
@@ -55,24 +82,26 @@ function query(nextPage) {
   return params;
 }
 
-async function load({ reset = true } = {}) {
+async function load({ reset = true, targetPage = 0, quiet = false } = {}) {
   const seq = ++requestSeq;
+  const nextPage = reset ? 1 : Math.max(1, targetPage || page.value + 1);
   if (reset) {
-    page.value = 1;
-    loading.value = true;
-  } else {
+    if (!quiet) loading.value = true;
+  } else if (!quiet) {
     loadingMore.value = true;
   }
   error.value = '';
   try {
-    const data = await publicApi(`/category?${query(reset ? 1 : page.value + 1)}`);
+    const data = await publicApi(`/category?${query(nextPage)}`);
     if (seq !== requestSeq) return;
-    items.value = reset
-      ? (data.list ?? []).map(normalizeCard)
-      : items.value.concat((data.list ?? []).map(normalizeCard));
+    const incoming = (data.list ?? []).map(normalizeCard);
     total.value = Number(data.total ?? 0);
-    page.value = Number(data.page ?? page.value);
+    // 追加时按 id 去重：服务端分页在数据变动时会把同一部片放进相邻两页
+    items.value = reset ? appendUnique([], incoming) : appendUnique(items.value, incoming);
+    // page 用本次响应的 total 夹：切换筛选后旧 total 会把页码夹到不存在的页（“第 3 页点不动”）
+    page.value = clampPage(Number(data.page ?? nextPage), total.value, pageSize);
     facets.value = { ...facets.value, ...(data.facets ?? {}) };
+    syncUrl();
   } catch (requestError) {
     if (seq === requestSeq) error.value = requestError.message;
   } finally {
@@ -83,17 +112,32 @@ async function load({ reset = true } = {}) {
   }
 }
 
+/** 挂载时按 URL 还原：页码 > 1 时顺序补齐前面的页，滚动到底自然接上。 */
+async function restoreFromUrl() {
+  const target = readUrlState();
+  if (target <= 1) {
+    await load({ reset: true });
+    return;
+  }
+  for (let p = 1; p <= target; p += 1) {
+    await load({ reset: p === 1, targetPage: p, quiet: p !== target });
+  }
+}
+
 function apply(key, value) {
   filters[key] = filters[key] === value ? (key === 'type' ? 'ALL' : key === 'sort' ? 'hot' : '') : value;
-  void load();
+  // 筛选变更与页码复位同步发生，避免用上一组筛选的 total 夹页
+  page.value = 1;
+  void load({ reset: true });
 }
 
 function resetFilters() {
   Object.assign(filters, { type: 'ALL', sort: 'hot', region: '', year: '', genre: '', tag: '' });
-  void load();
+  page.value = 1;
+  void load({ reset: true });
 }
 
-onMounted(() => load());
+onMounted(() => restoreFromUrl());
 </script>
 
 <template>

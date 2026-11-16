@@ -1,4 +1,5 @@
 <script setup>
+import { nextTick, ref } from 'vue';
 defineProps({
   film: { type: Object, required: true },
   badge: { type: Boolean, default: true },
@@ -18,13 +19,19 @@ function fallbackArt(film) {
   return `./art/${FALLBACK_ART[hash % FALLBACK_ART.length]}.jpg`
 }
 
-function playPreview(event) {
-  const video = event.currentTarget.querySelector('video');
+// 每张卡一个 <video> 会让首屏同时挂几十个空标签（多出几十个媒体元素与连接）：
+// 默认只渲染静态封面（img + poster），首次 hover 才把 <video> 挂上并播放。
+const previewReady = ref(false);
+
+async function playPreview(event) {
+  previewReady.value = true;
+  await nextTick();
+  const video = event?.currentTarget?.querySelector('video');
   if (video) video.play().catch(() => {});
 }
 
 function stopPreview(event) {
-  const video = event.currentTarget.querySelector('video');
+  const video = event?.currentTarget?.querySelector('video');
   if (!video) return;
   video.pause();
   video.currentTime = 0;
@@ -45,14 +52,17 @@ function stopPreview(event) {
       <span class="film-cjk">{{ film.title[0] }}</span>
     </template>
     <video
-      v-if="film.previewUrl"
+      v-if="film.previewUrl && previewReady"
       class="film-hover-video"
       :src="film.previewUrl"
+      :poster="film.coverUrl || ''"
       muted
       loop
       playsinline
       preload="none"
       aria-hidden="true"
+      @mouseenter="playPreview"
+      @mouseleave="stopPreview"
     ></video>
     <span class="film-en">{{ film.subtitle || film.typeLabel }}</span>
     <span v-if="badge && film.isNew" class="film-badge">NEW</span>

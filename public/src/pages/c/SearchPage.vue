@@ -16,7 +16,11 @@ let requestSeq = 0;
 
 async function search(keyword) {
   const seq = ++requestSeq;
-  if (!keyword.trim()) {
+  const term = keyword.trim();
+  if (!term) {
+    // 空关键词是早退路径：必须在这里把 loading 复位，
+    // 否则 finally 根本不会执行，页面会永久停在「正在搜索」。
+    loading.value = false;
     results.value = [];
     error.value = '';
     return;
@@ -24,7 +28,7 @@ async function search(keyword) {
   loading.value = true;
   error.value = '';
   try {
-    const data = await publicApi(`/search?keyword=${encodeURIComponent(keyword.trim())}`);
+    const data = await publicApi(`/search?keyword=${encodeURIComponent(term)}`);
     if (seq !== requestSeq) return;
     results.value = (data.list ?? []).map(normalizeCard);
   } catch (requestError) {

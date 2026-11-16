@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import Icon from '../../components/Icon.vue';
 import { go, href } from '../../router.js';
+import { useCountdown } from '../../useCountdown.js';
 import {
   loginWithCode,
   loginWithPassword,
@@ -16,7 +17,8 @@ const mode = ref('code');
 const error = ref('');
 const sending = ref(false);
 const submitting = ref(false);
-const cooldown = ref(0);
+// 倒计时统一走 useCountdown：重复发送先清旧 timer，离开页面自动清理
+const { remaining: cooldown, start: startCooldown } = useCountdown(60);
 
 async function sendCode() {
   error.value = '';
@@ -28,11 +30,7 @@ async function sendCode() {
   try {
     const result = await sendLoginCode(email.value);
     toast('验证码已发送');
-    cooldown.value = Number(result.resendAfter ?? 60);
-    const timer = window.setInterval(() => {
-      cooldown.value -= 1;
-      if (cooldown.value <= 0) window.clearInterval(timer);
-    }, 1000);
+    startCooldown(Number(result.resendAfter ?? 60));
   } catch (requestError) {
     error.value = requestError.message;
   } finally {

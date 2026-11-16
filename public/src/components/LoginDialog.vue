@@ -1,6 +1,7 @@
 <script setup>
 import { nextTick, ref, watch } from 'vue';
 import Icon from './Icon.vue';
+import { useCountdown } from '../useCountdown.js';
 import {
   loginWithCode,
   loginWithPassword,
@@ -22,7 +23,8 @@ const password = ref('');
 const error = ref('');
 const sending = ref(false);
 const submitting = ref(false);
-const cooldown = ref(0);
+// 统一倒计时：重开对话框重复发送时先清旧 timer，卸载时自动清理
+const { remaining: cooldown, start: startCooldown } = useCountdown(60);
 
 function close() {
   emit('update:modelValue', false);
@@ -42,11 +44,7 @@ async function sendCode() {
   try {
     const result = await sendLoginCode(email.value);
     toast('验证码已发送，请查收邮箱');
-    cooldown.value = Number(result.resendAfter ?? 60);
-    const timer = window.setInterval(() => {
-      cooldown.value -= 1;
-      if (cooldown.value <= 0) window.clearInterval(timer);
-    }, 1000);
+    startCooldown(Number(result.resendAfter ?? 60));
   } catch (requestError) {
     error.value = requestError.message;
   } finally {

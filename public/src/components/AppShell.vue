@@ -1,8 +1,8 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 import Icon from './Icon.vue';
 import LoginDialog from './LoginDialog.vue';
-import { getLang, setLang } from '../i18n.js';
+import { langState, setLang } from '../i18n.js';
 import { go, href, route } from '../router.js';
 import { isVip, state, ui } from '../authState.js';
 
@@ -11,7 +11,7 @@ const props = defineProps({
 });
 
 const query = ref('');
-const lang = ref(getLang());
+const lang = computed(() => langState.value);
 const focusedRoute = computed(
   () => route.path.startsWith('/detail/') || route.path.startsWith('/play/')
 );
@@ -50,13 +50,14 @@ const groups = [
   }
 ];
 
+// 文档要求底部导航只放 5 个高频入口：精选 / 片库 / 成人 / 榜单 / 我的。
+// 消息仍在侧栏与顶栏可达，不占移动端底部格子。
 const bottomItems = [
   { key: 'home', label: '精选', path: '/', icon: 'home' },
   { key: 'category', label: '片库', path: '/category', icon: 'grid' },
   { key: 'adult', label: '成人', path: '/adult', icon: 'lock' },
   { key: 'rank', label: '榜单', path: '/rank', icon: 'chart' },
-  { key: 'me', label: '我的', path: '/me', icon: 'user' },
-  { key: 'messages', label: '消息', path: '/messages', icon: 'bell' }
+  { key: 'me', label: '我的', path: '/me', icon: 'user' }
 ];
 
 const userInitial = computed(() => (state.user?.nickname || state.user?.email || '影').slice(0, 1));
@@ -88,16 +89,32 @@ function submitSearch() {
 
 function toggleLang() {
   const next = lang.value === 'en' ? 'zh' : 'en';
+  const top = window.scrollY;
   const url = new URL(window.location.href);
   url.searchParams.set('lang', next);
   window.history.replaceState(null, '', url);
+  // 不整页 reload：i18n 自己做了双向 DOM 翻译（EN 记译文、切回中文按记忆还原），
+  // langState 是响应式的，模板里用 t() 的文案会原地重渲染。
+  // 路由 hash、筛选、滚动位置、正在播放的视频都保持不变。
   setLang(next);
-  window.location.reload();
+  void nextTick(() => {
+    window.scrollTo({ top, behavior: 'auto' });
+  });
+}
+
+/** skip link：不能走 hash 跳转（会触发路由解析成 404），直接把焦点交给主内容区 */
+function focusMain(event) {
+  event.preventDefault();
+  const main = document.getElementById('main-content');
+  if (!main) return;
+  main.focus({ preventScroll: true });
+  main.scrollIntoView({ block: 'start' });
 }
 </script>
 
 <template>
   <div class="app">
+    <a class="skip-link" href="#main-content" @click="focusMain">跳到主要内容</a>
     <aside class="sidebar">
       <a class="brand" :href="href('/')" aria-label="影巢首页">
         <span class="brand-mark brand-mark--logo"><img :src="'./art/logo-mark.png'" alt="" width="32" height="32" /></span>
@@ -197,7 +214,7 @@ function toggleLang() {
         </div>
       </header>
 
-      <main class="page">
+      <main id="main-content" class="page" tabindex="-1">
         <slot />
       </main>
     </div>

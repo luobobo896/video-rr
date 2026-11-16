@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue';
 import Icon from '../../components/Icon.vue';
 import { mediaUrl, publicApi } from '../../api.js';
 import { CATEGORY_LABEL, formatCount, formatDateTime } from '../../models.js';
+import { t } from '../../i18n.js';
 
 const data = ref(null);
 const loading = ref(true);
@@ -25,15 +26,30 @@ const fallbackTypes = [
 const typeOptions = computed(() => (data.value?.lists?.length ? data.value.lists : fallbackTypes));
 const rows = computed(() => data.value?.items ?? []);
 
+// 快速连点 tab 时，先发的请求可能后到：序号守卫 + AbortController 双保险
+let requestSeq = 0;
+let inFlight = null;
+
 async function load() {
+  const seq = ++requestSeq;
+  inFlight?.abort();
+  const controller = new AbortController();
+  inFlight = controller;
   loading.value = true;
   error.value = '';
   try {
-    data.value = await publicApi(`/content/rank?type=${encodeURIComponent(type.value)}&contentType=${encodeURIComponent(contentType.value)}`);
+    const payload = await publicApi(
+      `/content/rank?type=${encodeURIComponent(type.value)}&contentType=${encodeURIComponent(contentType.value)}`,
+      { signal: controller.signal }
+    );
+    if (seq !== requestSeq) return;
+    data.value = payload;
   } catch (requestError) {
-    error.value = requestError.message;
+    if (seq === requestSeq && requestError?.code !== 'aborted' && !controller.signal.aborted) {
+      error.value = requestError.message;
+    }
   } finally {
-    loading.value = false;
+    if (seq === requestSeq) loading.value = false;
   }
 }
 
@@ -92,7 +108,7 @@ onMounted(load);
   </div>
   <div v-else-if="error" class="empty">
     <Icon name="alert" />
-    <h3>榜单加载失败</h3>
+    <h3>{{ t('榜单加载失败') }}</h3>
     <p>{{ error }}</p>
     <button class="btn btn--ghost btn--sm" type="button" @click="load">重试</button>
   </div>

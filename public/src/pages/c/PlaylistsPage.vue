@@ -5,6 +5,7 @@ import PosterCard from '../../components/PosterCard.vue';
 import { publicApi } from '../../api.js';
 import { normalizedSection } from '../../models.js';
 import { href } from '../../router.js';
+import { t } from '../../i18n.js';
 
 const sections = ref([]);
 const loading = ref(true);
@@ -34,7 +35,7 @@ onMounted(async () => {
   </div>
   <div v-if="loading" class="empty">
     <Icon name="film" />
-    <h3>正在加载片单</h3>
+    <h3>{{ t('正在加载片单') }}</h3>
   </div>
   <div v-else-if="error" class="empty">
     <Icon name="alert" />

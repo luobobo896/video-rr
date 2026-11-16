@@ -6,7 +6,8 @@ import PosterCard from '../../components/PosterCard.vue';
 import RankRow from '../../components/RankRow.vue';
 import { mediaUrl, publicApi } from '../../api.js';
 import { t } from '../../i18n.js';
-import { formatCount, normalizeCard, normalizedSection } from '../../models.js';
+import { normalizeCard, normalizedSection } from '../../models.js';
+import { formatElapsed, watchedPercent } from '../../time.js';
 import { href } from '../../router.js';
 import { loadConstants, loadPlans, refreshMe, requireLogin, state } from '../../authState.js';
 
@@ -92,6 +93,11 @@ const continueItems = computed(() =>
     })
   }))
 );
+
+/** 续播进度条的宽度只能是「已看 / 全片」的百分比；没有全片时长就不画比例（别把秒当百分比）。 */
+function continuePercent(item) {
+  return watchedPercent(item.position, item.duration ?? item.episodeDuration);
+}
 
 function rotate(items, offset) {
   if (!items.length) return [];
@@ -308,13 +314,13 @@ onBeforeUnmount(() => {
             <img v-if="item.film.coverUrl" :src="item.film.coverUrl" alt="" />
             <span class="continue-glyph">{{ item.film.title[0] }}</span>
             <span class="continue-label">看到第 {{ item.episode }} 集</span>
-            <div class="progress">
-              <span :style="{ width: `${Math.min(96, Math.max(8, Number(item.position ?? 0)))}%` }"></span>
+            <div v-if="continuePercent(item) !== null" class="progress">
+              <span :style="{ width: `${Math.max(2, continuePercent(item))}%` }"></span>
             </div>
           </div>
           <div class="continue-copy">
             <h3>{{ item.film.title }}</h3>
-            <span>{{ formatCount(item.position ?? 0) }} 秒</span>
+            <span>已看 {{ formatElapsed(item.position) }}</span>
           </div>
         </a>
       </div>

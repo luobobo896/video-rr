@@ -1,4 +1,5 @@
 import { mediaUrl } from './api.js';
+import { formatDateTime as formatDateTimeCN, formatDay, daysLeft as daysLeftOf } from './time.js';
 
 export function normalizeCard(raw = {}) {
   const dramaId = Number(raw.dramaId ?? raw.id ?? 0);
@@ -44,17 +45,12 @@ export function formatCount(value) {
 
 export function formatDate(value) {
   if (!value) return '—';
-  return String(value).slice(0, 10);
+  return formatDay(value);
 }
 
 export function formatDateTime(value) {
   if (!value) return '—';
-  const date = new Date(String(value).replace(' ', 'T') + (String(value).includes('Z') ? '' : 'Z'));
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    hour12: false
-  });
+  return formatDateTimeCN(value, String(value));
 }
 
 export function formatMoney(value) {
@@ -63,9 +59,7 @@ export function formatMoney(value) {
 
 export function subscriptionDaysLeft(subscription) {
   if (!subscription?.validTo) return 0;
-  const end = new Date(String(subscription.validTo).replace(' ', 'T') + 'Z').getTime();
-  if (!Number.isFinite(end)) return 0;
-  return Math.max(0, Math.ceil((end - Date.now()) / 86400000));
+  return daysLeftOf(subscription.validTo);
 }
 
 export function statusClass(status) {

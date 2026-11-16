@@ -1,31 +1,35 @@
 <script setup>
-import { computed, onMounted, watchEffect } from 'vue';
+import { computed, defineAsyncComponent, onMounted, watchEffect } from 'vue';
 import AppShell from './components/AppShell.vue';
 import Icon from './components/Icon.vue';
 import ToastMessage from './components/ToastMessage.vue';
 import { initTracking } from './track.js';
-import AdultPage from './pages/c/AdultPage.vue';
-import CategoryPage from './pages/c/CategoryPage.vue';
-import ContentRankPage from './pages/c/ContentRankPage.vue';
-import DetailPage from './pages/c/DetailPage.vue';
-import FavoritesPage from './pages/c/FavoritesPage.vue';
-import HistoryPage from './pages/c/HistoryPage.vue';
+import { t } from './i18n.js';
+// 首屏关键路径（首页）保持同步，其余 21 个页面路由级分包：
+// 原来 22 个页面静态 import 会把详情/播放/个人中心等一次性打进首屏 chunk。
 import HomePage from './pages/c/HomePage.vue';
-import LandingPage from './pages/c/LandingPage.vue';
-import LoginPage from './pages/c/LoginPage.vue';
-import MePage from './pages/c/MePage.vue';
-import MessagesPage from './pages/c/MessagesPage.vue';
-import OrdersPage from './pages/c/OrdersPage.vue';
-import PlayPage from './pages/c/PlayPage.vue';
-import PlaylistsPage from './pages/c/PlaylistsPage.vue';
-import PostersPage from './pages/c/PostersPage.vue';
-import ProfileEditPage from './pages/c/ProfileEditPage.vue';
-import PromotionPage from './pages/c/PromotionPage.vue';
-import RankPage from './pages/c/RankPage.vue';
-import SearchPage from './pages/c/SearchPage.vue';
-import ShortPage from './pages/c/ShortPage.vue';
-import UpcomingPage from './pages/c/UpcomingPage.vue';
-import VipPage from './pages/c/VipPage.vue';
+
+const CategoryPage = defineAsyncComponent(() => import('./pages/c/CategoryPage.vue'));
+const AdultPage = defineAsyncComponent(() => import('./pages/c/AdultPage.vue'));
+const ShortPage = defineAsyncComponent(() => import('./pages/c/ShortPage.vue'));
+const RankPage = defineAsyncComponent(() => import('./pages/c/RankPage.vue'));
+const ContentRankPage = defineAsyncComponent(() => import('./pages/c/ContentRankPage.vue'));
+const PlaylistsPage = defineAsyncComponent(() => import('./pages/c/PlaylistsPage.vue'));
+const PostersPage = defineAsyncComponent(() => import('./pages/c/PostersPage.vue'));
+const UpcomingPage = defineAsyncComponent(() => import('./pages/c/UpcomingPage.vue'));
+const FavoritesPage = defineAsyncComponent(() => import('./pages/c/FavoritesPage.vue'));
+const HistoryPage = defineAsyncComponent(() => import('./pages/c/HistoryPage.vue'));
+const MessagesPage = defineAsyncComponent(() => import('./pages/c/MessagesPage.vue'));
+const OrdersPage = defineAsyncComponent(() => import('./pages/c/OrdersPage.vue'));
+const ProfileEditPage = defineAsyncComponent(() => import('./pages/c/ProfileEditPage.vue'));
+const PromotionPage = defineAsyncComponent(() => import('./pages/c/PromotionPage.vue'));
+const MePage = defineAsyncComponent(() => import('./pages/c/MePage.vue'));
+const VipPage = defineAsyncComponent(() => import('./pages/c/VipPage.vue'));
+const DetailPage = defineAsyncComponent(() => import('./pages/c/DetailPage.vue'));
+const PlayPage = defineAsyncComponent(() => import('./pages/c/PlayPage.vue'));
+const SearchPage = defineAsyncComponent(() => import('./pages/c/SearchPage.vue'));
+const LandingPage = defineAsyncComponent(() => import('./pages/c/LandingPage.vue'));
+const LoginPage = defineAsyncComponent(() => import('./pages/c/LoginPage.vue'));
 import { href, route } from './router.js';
 import { loadConstants, refreshMe } from './authState.js';
 
@@ -120,9 +124,9 @@ onMounted(() => {
     <component :is="pageComponent" v-if="pageComponent" :key="componentKey" />
     <div v-else class="empty empty--art">
       <img class="empty-art" :src="'./art/empty-404.jpg'" alt="" />
-      <h3>页面不存在</h3>
-      <p>这个地址没有对应的页面。</p>
-      <a class="btn btn--ghost btn--sm" :href="href('/')">返回精选</a>
+      <h3>{{ t('页面不存在') }}</h3>
+      <p>{{ t('这个地址没有对应的页面。') }}</p>
+      <a class="btn btn--ghost btn--sm" :href="href('/')">{{ t('返回精选') }}</a>
     </div>
   </AppShell>
   <ToastMessage />

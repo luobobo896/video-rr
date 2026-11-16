@@ -5,6 +5,7 @@ import PosterCard from '../../components/PosterCard.vue';
 import { publicApi } from '../../api.js';
 import { normalizeCard } from '../../models.js';
 import { href } from '../../router.js';
+import { t } from '../../i18n.js';
 
 const films = ref([]);
 const loading = ref(true);
@@ -44,7 +45,7 @@ onMounted(async () => {
   </div>
   <div v-else class="empty">
     <Icon name="clock" />
-    <h3>暂无待播内容</h3>
+    <h3>{{ t('暂无待播内容') }}</h3>
     <p>后台发布待播片单后会显示在这里。</p>
   </div>
 </template>

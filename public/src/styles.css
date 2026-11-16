@@ -1,68 +1,52 @@
-/* 影巢重设计 · 一套几何，两端只差强调色 */
+/* 影巢重设计 · 一套几何，两端只差强调色。
+   几何与品牌来源：shared/tokens.css（由 scripts/sync-tokens.mjs 生成 public/tokens.css，
+   在 main.js 里先于本文件加载）。这里不再重定义几何词表，只保留 C 端别名与页面尺寸。 */
 :root {
-  --ink-0: #0b0709;
-  --ink-1: #120c10;
-  --ink-2: #191017;
-  --ink-3: #23151d;
-  --line: rgba(255, 225, 235, 0.09);
-  --line-2: rgba(255, 225, 235, 0.16);
-  --text: #f7eef1;
-  --text-2: #c3adb4;
-  --text-3: #9a828b;
-  --c-brand: #f0335f;
-  --c-brand-2: #d9b26f;
-  --c-on: #1a070c;
+  /* 背景层级 / 文字 / 分割线：别名指向品牌块，改 shared 即全站生效 */
+  --ink-0: var(--bg);
+  --ink-1: var(--bg-soft);
+  --ink-2: var(--bg-elev);
+  --ink-3: var(--surface);
+  --line-2: var(--line-strong);
+  /* C 端强调色走品牌令牌；B 端预览用的蓝色只在本 bundle 内补齐（admin/tokens.css 不在 C 端） */
+  --c-brand: var(--brand);
+  --c-brand-2: var(--brand-2);
+  --c-on: var(--brand-contrast);
   --b-brand: #5b86ff;
   --b-brand-2: #22d3ee;
   --b-on: #06121a;
-  --ok: #45d19a;
-  --warn: #f5b545;
-  --bad: #ff5f7a;
   --accent: var(--c-brand);
   --accent-2: var(--c-brand-2);
   --accent-on: var(--c-on);
 
-  --r-1: 8px;
-  --r-2: 12px;
-  --r-3: 16px;
-  --r-pill: 999px;
-  --h-1: 32px;
-  --h-2: 40px;
-  --h-3: 48px;
-  --sp-1: 4px;
-  --sp-2: 8px;
-  --sp-3: 12px;
-  --sp-4: 16px;
-  --sp-5: 24px;
-  --sp-6: 32px;
+  /* 圆角 / 控件高度：DESIGN §8.5 只允许 8·10·14 与 32·40·48，直接取令牌 */
+  --r-1: var(--r-sm);
+  --r-2: var(--r-md);
+  --r-3: var(--r-lg);
+  --h-1: var(--h-sm);
+  --h-2: var(--h-md);
+  --h-3: var(--h-lg);
   --sp-7: 48px;
   --sp-8: 64px;
 
-  --fs-11: 11px;
-  --fs-12: 12px;
-  --fs-13: 13px;
-  --fs-14: 14px;
-  --fs-16: 16px;
-  --fs-18: 18px;
   --fs-22: 22px;
   --fs-28: 28px;
   --fs-36: 36px;
   --fs-44: 44px;
-  --lh-1: 1.15;
-  --lh-2: 1.45;
+  --lh-1: var(--lh-tight);
+  --lh-2: var(--lh-base);
   --lh-3: 1.7;
 
-  --font-ui: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-ui: var(--sans);
   --font-serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
 
-  --dur-1: 120ms;
-  --dur-2: 180ms;
-  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
-  --shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
-  --ring: 0 0 0 2px var(--ink-0), 0 0 0 4px color-mix(in oklab, var(--accent) 60%, transparent);
+  --dur-1: var(--dur-fast);
+  --dur-2: var(--dur-base);
+  /* 焦点环与 shared 的 --ring（描边宽度）区分开，避免同名不同义 */
+  --focus-ring: 0 0 0 2px var(--ink-0), 0 0 0 4px color-mix(in oklab, var(--accent) 60%, transparent);
 
-  --sidebar: 224px;
+  --sidebar: 124px;
   --topbar: 64px;
   --page-max: 1600px;
 }
@@ -114,7 +98,7 @@ svg { display: block; }
 
 :focus-visible {
   outline: none;
-  box-shadow: var(--ring);
+  box-shadow: var(--focus-ring);
   border-radius: var(--r-1);
 }
 
@@ -153,6 +137,26 @@ svg { display: block; }
 .truncate { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nowrap { white-space: nowrap; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+/* 跳到主要内容：默认藏起，键盘 Tab 聚焦时浮出（侧栏 15+ 个链接之前先给一条跳过路径） */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 200;
+  display: inline-flex;
+  align-items: center;
+  height: var(--h-md);
+  padding: 0 16px;
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  transform: translateY(-200%);
+  transition: transform var(--dur-fast) var(--ease);
+}
+.skip-link:focus-visible { transform: translateY(0); }
+@media (prefers-reduced-motion: reduce) { .skip-link { transition: none; } }
 
 /* ── 骨架 ───────────────────────────────────────────── */
 .app { display: flex; min-height: 100vh; position: relative; z-index: 1; }
@@ -199,7 +203,7 @@ svg { display: block; }
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 38px;
+  height: 40px;
   padding: 0 var(--sp-3);
   border: 0;
   border-radius: var(--r-1);
@@ -409,7 +413,7 @@ svg { display: block; }
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 30px;
+  height: 32px;
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
@@ -446,7 +450,7 @@ svg { display: block; }
 .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .segmented { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: var(--r-1); background: var(--ink-1); }
 .segmented button {
-  height: 30px;
+  height: 32px;
   padding: 0 12px;
   border: 0;
   border-radius: 6px;
@@ -535,8 +539,8 @@ svg { display: block; }
   left: 50%;
   top: 50%;
   z-index: 3;
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   display: grid;
   place-items: center;
   border-radius: 50%;
@@ -751,7 +755,7 @@ svg { display: block; }
 
 .episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: var(--sp-2); }
 .ep {
-  height: 46px;
+  height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -820,6 +824,8 @@ svg { display: block; }
 dialog.player-dialog { width: min(900px, calc(100vw - 32px)); }
 .player-dialog .dialog-body { padding: 0 20px 20px; }
 .plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+/* fieldset 只做语义分组（单选组需要 legend），视觉上不能有自己的边框与留白 */
+.plan-fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
 .plan-grid--two { grid-template-columns: repeat(2, 1fr); }
 .plan {
   position: relative;
@@ -837,7 +843,7 @@ dialog.player-dialog { width: min(900px, calc(100vw - 32px)); }
 .plan b { font-size: var(--fs-18); font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
 .plan > strong, .plan > b { white-space: nowrap; }
 .plan:has(input:checked) { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, var(--ink-2)); }
-.plan:has(input:focus-visible) { box-shadow: var(--ring); }
+.plan:has(input:focus-visible) { box-shadow: var(--focus-ring); }
 @media (max-width: 520px) { .plan-grid { grid-template-columns: 1fr; } }
 .pay-method {
   display: flex;
@@ -1069,7 +1075,7 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
 
 /* ── 响应式 ─────────────────────────────────────────── */
 @media (max-width: 1279px) {
-  :root { --sidebar: 204px; }
+  :root { --sidebar: 124px; }
   .page { padding-inline: var(--sp-5); }
   .film-grid { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); }
 }
@@ -1119,10 +1125,10 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
     right: 0;
     bottom: 0;
     z-index: 50;
-    height: calc(56px + env(safe-area-inset-bottom));
+    height: calc(48px + env(safe-area-inset-bottom));
     padding: 0 8px env(safe-area-inset-bottom);
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     background: color-mix(in oklab, var(--ink-1) 94%, transparent);
     backdrop-filter: blur(16px);
     border-top: 1px solid var(--line);
@@ -1149,7 +1155,7 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
   .bottom-nav button[aria-current="page"] { color: var(--accent); }
   .bottom-nav a[aria-current="page"] { color: var(--accent); }
   .bottom-nav .icon { width: 20px; height: 20px; }
-  .main { padding-bottom: 56px; }
+  .main { padding-bottom: calc(48px + env(safe-area-inset-bottom)); }
   .detail-head { grid-template-columns: 180px minmax(0, 1fr); }
   .admin-grid { grid-template-columns: 1fr; }
   .settings-grid { grid-template-columns: 1fr; }
@@ -1161,10 +1167,10 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
   .topbar .badge { display: none; }
   .topbar .top-actions .btn { padding: 0 10px; font-size: var(--fs-11); }
   .icon-btn { width: 44px; height: 44px; }
-  .chip { height: 36px; }
+  .chip { height: 40px; }
   /* 移动端筛选面板：一组一行横向滑动，默认折起，只露三行 */
   .adult-filters {
-    --filter-row: 36px;
+    --filter-row: 40px;
     padding: 8px 0 4px;
     gap: 2px;
     border-radius: var(--r-2);
@@ -1207,7 +1213,7 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
   .filter-toggle {
     display: inline-flex;
     width: calc(100% - 24px);
-    height: 38px;
+    height: 40px;
     margin: 0 12px 2px;
     justify-self: stretch;
     justify-content: center;
@@ -1309,8 +1315,8 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
 }
 .hero-dot {
   position: relative;
-  width: 28px;
-  height: 44px;
+  width: 40px;
+  height: 48px;
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -1330,8 +1336,8 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
 .hero-dot:hover::before { background: rgba(255, 255, 255, 0.46); }
 .hero-dot[aria-current="true"]::before { background: var(--accent-2); }
 .hero-arrow {
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   display: grid;
   place-items: center;
   border: 1px solid rgba(255, 255, 255, 0.2);
@@ -1434,10 +1440,10 @@ dialog.drawer[open] { display: flex; flex-direction: column; }
   .hero-dot { width: 24px; }
   .hero-arrow { flex: 0 0 44px; }
   .poster-toolbar .chip {
-    height: 44px;
+    height: 48px;
   }
   .poster-toolbar .segmented button {
-    height: 44px;
+    height: 48px;
   }
   .search input,
   .input,
@@ -1486,8 +1492,8 @@ input:-webkit-autofill:focus {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  height: 34px;
-  min-width: 34px;
+  height: 40px;
+  min-width: 40px;
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);

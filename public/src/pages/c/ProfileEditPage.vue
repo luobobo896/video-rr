@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import Icon from '../../components/Icon.vue';
 import { mediaUrl } from '../../api.js';
 import { href } from '../../router.js';
+import { useCountdown } from '../../useCountdown.js';
 import {
   changeEmail,
   changePassword,
@@ -30,12 +31,13 @@ const newPassword = ref('');
 const confirmPassword = ref('');
 const passwordSending = ref(false);
 const passwordChanging = ref(false);
-const passwordCooldown = ref(0);
 const newEmail = ref('');
 const emailCode = ref('');
 const emailSending = ref(false);
 const emailChanging = ref(false);
-const emailCooldown = ref(0);
+// 两个验证码倒计时各自独立：重复发送先清旧 timer，页面卸载自动清理
+const { remaining: passwordCooldown, start: startPasswordCooldown } = useCountdown(60);
+const { remaining: emailCooldown, start: startEmailCooldown } = useCountdown(60);
 
 const completion = computed(() => state.me?.completion ?? { percent: 0, filled: 0, total: 6, missing: [] });
 const avatarUrl = computed(() => (state.user?.avatar ? mediaUrl(state.user.avatar) : ''));
@@ -48,12 +50,8 @@ function syncForm() {
   form.bio = state.user?.bio || '';
 }
 
-function startCooldown(target) {
-  target.value = 60;
-  const timer = window.setInterval(() => {
-    target.value -= 1;
-    if (target.value <= 0) window.clearInterval(timer);
-  }, 1000);
+function startCooldown(target, seconds = 60) {
+  target(seconds);
 }
 
 async function load() {
@@ -125,8 +123,7 @@ async function sendPasswordCode() {
   try {
     const data = await sendPasswordChangeCode();
     toast('验证码已发送到注册邮箱');
-    passwordCooldown.value = Number(data.resendAfter ?? 60);
-    startCooldown(passwordCooldown);
+    startCooldown(startPasswordCooldown, Number(data.resendAfter ?? 60));
   } catch (requestError) {
     error.value = requestError.message;
   } finally {
@@ -176,8 +173,7 @@ async function sendEmailCode() {
   try {
     const data = await sendEmailChangeCode(newEmail.value.trim());
     toast('验证码已发送到新邮箱');
-    emailCooldown.value = Number(data.resendAfter ?? 60);
-    startCooldown(emailCooldown);
+    startCooldown(startEmailCooldown, Number(data.resendAfter ?? 60));
   } catch (requestError) {
     error.value = requestError.message;
   } finally {

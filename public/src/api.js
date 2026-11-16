@@ -1,4 +1,7 @@
 import { getLang } from './i18n.js';
+import { apiOutcome } from './api-outcome.js';
+
+export { apiOutcome };
 
 const runtimePath = window.location.pathname.replace(/\/index\.html$/, '').replace(/\/$/, '');
 const runtimeBase = /^\/(video|video-admin)$/.test(runtimePath) ? runtimePath : '';
@@ -25,15 +28,18 @@ function readVisitorId() {
 const visitorId = readVisitorId();
 export const siteBase = siteBaseValue;
 
-export class ApiError extends Error {
-  constructor(message, { code = 'error', status = 0, data = null } = {}) {
-    super(message);
-    this.name = 'ApiError';
-    this.code = code;
-    this.status = status;
-    this.data = data;
-  }
+export function ApiError(message, { code = 'error', status = 0, data = null } = {}) {
+  if (!(this instanceof ApiError)) return new ApiError(message, { code, status, data });
+  this.name = 'ApiError';
+  this.message = message;
+  this.code = code;
+  this.status = status;
+  this.data = data;
+  if (Error.captureStackTrace) Error.captureStackTrace(this, ApiError);
 }
+
+ApiError.prototype = Object.create(Error.prototype);
+ApiError.prototype.name = 'ApiError';
 
 function langHeader() {
   return getLang();
@@ -43,6 +49,10 @@ function buildQuery(path) {
   const lang = langHeader();
   return `${path}${path.includes('?') ? '&' : '?'}lang=${lang}`;
 }
+
+/**
+ * 响应判定见 api-outcome.js（纯函数，单独可测）；这里保留同名导出，调用方兼容。
+ */
 
 async function request(base, path, options = {}) {
   const {
@@ -99,25 +109,25 @@ async function request(base, path, options = {}) {
       });
     }
 
-    if (json.code === '0401') {
+    const outcome = apiOutcome({ ok: response.ok, status: response.status, json });
+    if (outcome.kind === 'unauthorized') {
       window.dispatchEvent(new CustomEvent('mh:unauthorized', {
         detail: { area: base === ADMIN_BASE ? 'admin' : 'public' }
       }));
-      throw new ApiError(json.msg || '登录已过期，请重新登录', {
-        code: '0401',
+      throw new ApiError(outcome.message, {
+        code: outcome.code,
         status: response.status,
-        data: json.data
+        data: outcome.data
       });
     }
-
-    if (json.code !== '0000') {
-      throw new ApiError(json.msg || '接口失败', {
-        code: json.code,
+    if (outcome.kind !== 'ok') {
+      throw new ApiError(outcome.message, {
+        code: outcome.code,
         status: response.status,
-        data: json.data
+        data: outcome.data
       });
     }
-    return json.data;
+    return outcome.data;
   } finally {
     window.clearTimeout(timer);
     externalSignal?.removeEventListener('abort', forwardAbort);

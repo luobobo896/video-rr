@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, nextTick, onMounted, ref } from 'vue';
 import Icon from '../../components/Icon.vue';
 import { getLang, setLang } from '../../i18n.js';
 import { href } from '../../router.js';
@@ -19,11 +19,16 @@ const minPrice = computed(() => {
 
 function toggleLang() {
   const next = lang.value === 'en' ? 'zh' : 'en';
+  const top = window.scrollY;
   const url = new URL(window.location.href);
   url.searchParams.set('lang', next);
   window.history.replaceState(null, '', url);
+  // 原地切换语言：i18n 记忆译文可双向还原，不需要整页 reload
   setLang(next);
-  window.location.reload();
+  lang.value = next;
+  void nextTick(() => {
+    window.scrollTo({ top, behavior: 'auto' });
+  });
 }
 
 onMounted(async () => {

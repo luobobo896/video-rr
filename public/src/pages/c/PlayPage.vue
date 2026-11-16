@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import CheckoutDialog from '../../components/CheckoutDialog.vue';
 import Icon from '../../components/Icon.vue';
 import PosterCard from '../../components/PosterCard.vue';
@@ -28,6 +28,8 @@ const retryToken = ref(0);
 
 let heartbeatTimer = 0;
 let heartbeatTick = 0;
+let heartbeatSession = '';
+let heartbeatEpisode = '';
 let historyTimer = 0;
 let lastHistorySecond = 0;
 let countdownTimer = 0;
@@ -87,6 +89,9 @@ function onEnded(event) {
 }
 
 async function load() {
+  // 换集、重试、成人门槛拦截：任何一次 load 都先停掉上一轮心跳，
+  // 否则切到 402/503 之后旧的 15s timer 还在给上一集发心跳，污染完播率与结算。
+  stopHeartbeat();
   loading.value = true;
   error.value = '';
   errorCode.value = '';
@@ -101,22 +106,44 @@ async function load() {
     const suffix = trialMode.value ? '?trial=1' : '';
     playback.value = await publicApi(`/play/${dramaId}/${episodeNo}${suffix}`);
     lastHistorySecond = Number(playback.value.resumePosition ?? 0);
-    window.clearInterval(heartbeatTimer);
-    if (playback.value.viewSessionId) {
-      heartbeatTick = 0;
-      heartbeatTimer = window.setInterval(() => {
-        heartbeatTick += 15;
-        void sendHeartbeat();
-      }, 15000);
-    }
+    startHeartbeat(playback.value.viewSessionId);
   } catch (requestError) {
     error.value = requestError.message;
     errorCode.value = requestError.code || String(requestError.status || '');
     errorReason.value = requestError.data?.reason || '';
     if (errorReason.value === 'source_link_expired') startCountdown(requestError.data?.retryAfterSeconds);
   } finally {
+    // 失败/拦截路径不留下任何心跳：没人看的会话不该继续报表
+    if (!playback.value?.viewSessionId || error.value) stopHeartbeat();
     loading.value = false;
   }
+}
+
+/** 心跳只对「当前这一集 + 当前这个观看会话」生效，其它情况立刻停表 */
+function startHeartbeat(sessionId) {
+  stopHeartbeat();
+  if (!sessionId) return;
+  heartbeatSession = String(sessionId);
+  heartbeatEpisode = `${dramaId}:${episodeNo}`;
+  heartbeatTick = 0;
+  heartbeatTimer = window.setInterval(() => {
+    const currentSession = String(playback.value?.viewSessionId ?? '');
+    const currentEpisode = `${dramaId}:${episodeNo}`;
+    if (!currentSession || currentSession !== heartbeatSession || currentEpisode !== heartbeatEpisode) {
+      stopHeartbeat();
+      return;
+    }
+    heartbeatTick += 15;
+    void sendHeartbeat();
+  }, 15000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) window.clearInterval(heartbeatTimer);
+  heartbeatTimer = 0;
+  heartbeatTick = 0;
+  heartbeatSession = '';
+  heartbeatEpisode = '';
 }
 
 /** 片源续期期间：显示倒计时，到点自动重拉一次播放信息 */
@@ -171,8 +198,14 @@ function openPaywall() {
 
 onMounted(load);
 
+// 换集（路由变化）时先停心跳再重载：绝不让上一集的 timer 继续跑
+watch(() => route.path, () => {
+  stopHeartbeat();
+  void load();
+});
+
 onBeforeUnmount(() => {
-  window.clearInterval(heartbeatTimer);
+  stopHeartbeat();
   window.clearInterval(countdownTimer);
   void saveHistory(true);
 });

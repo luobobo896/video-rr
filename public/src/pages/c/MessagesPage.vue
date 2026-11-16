@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue';
 import Icon from '../../components/Icon.vue';
 import { publicApi } from '../../api.js';
 import { formatDateTime } from '../../models.js';
+import { sortByTimeDesc } from '../../time.js';
 import { requireLogin, state } from '../../authState.js';
 
 const messages = ref([]);
@@ -17,10 +18,10 @@ const types = [
 const labels = { subscription: '会员通知', order: '订单通知' };
 const icons = { subscription: '会', order: '单' };
 
+// 排序与展示用同一套时间解析（都按服务端 UTC 解释），
+// 否则列表顺序按本地时区算、显示按 +08 算，两者会互相矛盾。
 const filtered = computed(() => {
-  const rows = [...messages.value].sort(
-    (a, b) => new Date(String(b.createdAt || '').replace(' ', 'T')) - new Date(String(a.createdAt || '').replace(' ', 'T'))
-  );
+  const rows = sortByTimeDesc(messages.value, 'createdAt');
   return type.value === 'all' ? rows : rows.filter((row) => row.type === type.value);
 });
 

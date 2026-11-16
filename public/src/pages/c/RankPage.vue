@@ -5,6 +5,7 @@ import RankRow from '../../components/RankRow.vue';
 import { publicApi } from '../../api.js';
 import { normalizeCard } from '../../models.js';
 import { go, route } from '../../router.js';
+import { t } from '../../i18n.js';
 
 const activeType = computed(() => route.query.type || 'HOT');
 const lists = ref([]);
@@ -52,11 +53,11 @@ onMounted(load);
   <h2 class="sr-only">榜单内容</h2>
   <div v-if="loading" class="empty">
     <Icon name="chart" />
-    <h3>正在加载榜单</h3>
+    <h3>{{ t('正在加载榜单') }}</h3>
   </div>
   <div v-else-if="error" class="empty">
     <Icon name="alert" />
-    <h3>榜单加载失败</h3>
+    <h3>{{ t('榜单加载失败') }}</h3>
     <p>{{ error }}</p>
     <button class="btn btn--ghost btn--sm" type="button" @click="load">重试</button>
   </div>

@@ -142,20 +142,24 @@ watch(
       <div class="dialog-body">
         <div v-if="loading" class="empty" style="padding: 24px">正在加载价格…</div>
         <template v-else>
-          <div class="plan-grid">
-            <label v-if="hasSingle" class="plan">
-              <input v-model="selection" type="radio" name="purchase" value="single" />
-              <strong>{{ singleLabel }}</strong>
-              <span>{{ singleHint }}</span>
-              <b>{{ formatMoney(singlePrice) }}</b>
-            </label>
-            <label v-for="plan in plans" :key="plan.id" class="plan">
-              <input v-model="selection" type="radio" name="purchase" :value="`plan:${plan.id}`" />
-              <strong>{{ plan.name }}</strong>
-              <span>{{ plan.description }}</span>
-              <b>{{ formatMoney(plan.price) }}</b>
-            </label>
-          </div>
+          <!-- 单选组必须有 fieldset/legend：读屏用户才知道这组单选的题目是「购买方式」 -->
+          <fieldset class="plan-fieldset">
+            <legend class="sr-only">选择购买方式</legend>
+            <div class="plan-grid">
+              <label v-if="hasSingle" class="plan">
+                <input v-model="selection" type="radio" name="purchase" value="single" />
+                <strong>{{ singleLabel }}</strong>
+                <span>{{ singleHint }}</span>
+                <b>{{ formatMoney(singlePrice) }}</b>
+              </label>
+              <label v-for="plan in plans" :key="plan.id" class="plan">
+                <input v-model="selection" type="radio" name="purchase" :value="`plan:${plan.id}`" />
+                <strong>{{ plan.name }}</strong>
+                <span>{{ plan.description }}</span>
+                <b>{{ formatMoney(plan.price) }}</b>
+              </label>
+            </div>
+          </fieldset>
           <p v-if="!hasSingle && !hasPlans" class="dialog-note">
             <Icon name="clock" />
             <span>暂无可购买选项，请稍后再试。</span>

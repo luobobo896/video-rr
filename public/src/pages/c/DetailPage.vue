@@ -197,7 +197,6 @@ onMounted(load);
           <span v-if="hasEpisodes">{{ detail.episodes.length }} 集</span>
           <span>{{ formatCount(detail.playCount) }} 次播放</span>
         </div>
-        <p class="detail-desc">{{ detail.description }}</p>
         <div class="detail-actions">
           <button class="btn btn--primary btn--lg" type="button" :disabled="!hasEpisodes" @click="playTarget(firstPlayable)">
             <Icon name="play" />{{ primaryLabel }}

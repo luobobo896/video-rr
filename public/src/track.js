@@ -8,7 +8,11 @@
  * 埋点失败绝不打扰用户：所有发送都吞异常。
  */
 import { publicApi, publicToken } from './api.js';
+import { getLang } from './i18n.js';
+import { createLooseGuard, looseHeaders } from './track-loose.js';
 import { route } from './router.js';
+
+export { createLooseGuard, looseHeaders };
 
 const PAGE_NAMES = {
   '/': '首页',
@@ -23,6 +27,7 @@ const PAGE_NAMES = {
 };
 
 const CLICK_THROTTLE_MS = 600;
+const VISITOR_KEY = 'mh-visitor-id';
 
 let started = false;
 let pageStartAt = Date.now();
@@ -31,6 +36,21 @@ let pageName = pageNameOf(route.path);
 let pageUrl = typeof location === 'undefined' ? '' : location.href;
 let lastClickKey = '';
 let lastClickAt = 0;
+// 一次页面停留只允许发一条 loose：pagehide 与 visibilitychange 是同一件事的两条路径，
+// 两个都发会把 stay_ms 切成两半、退出次数翻倍。
+// 进入本页时的上下文快照（visitor / lang / url），loose 上报复用它，别在离开时重读。
+let pageContext = { visitor: '', lang: 'zh', url: pageUrl };
+
+function readVisitor() {
+  try {
+    return localStorage.getItem(VISITOR_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+const looseGuard = createLooseGuard();
+
 
 function pageNameOf(path) {
   if (PAGE_NAMES[path]) return PAGE_NAMES[path];
@@ -61,10 +81,12 @@ async function send(body) {
 
 /** 卸载/切页时用 keepalive 兜底：带得上 token 就还能认出是谁 */
 function sendLoose(body) {
-  const payload = JSON.stringify(basePayload(body));
-  const token = publicToken();
-  const headers = { 'content-type': 'application/json', 'x-mh-lang': 'zh' };
-  if (token) headers.authorization = `Bearer ${token}`;
+  const payload = JSON.stringify({ ...basePayload(body), pageUrl: body.pageUrl || pageContext.url });
+  const headers = looseHeaders({
+    visitor: pageContext.visitor,
+    lang: pageContext.lang,
+    token: publicToken()
+  });
   try {
     const sent = fetch(trackUrl(), { method: 'POST', headers, body: payload, keepalive: true });
     sent?.catch?.(() => {});
@@ -82,6 +104,9 @@ function enterPage() {
   pagePath = nextPath;
   pageName = nextName;
   pageUrl = location.href;
+  // 复用进入时的上下文：loose 上报与进入事件必须是同一个 visitor / 同一个语言
+  pageContext = { visitor: readVisitor(), lang: getLang(), url: pageUrl };
+  looseGuard.reset();
   void send({
     type: 'page_view',
     eventType: 1,
@@ -95,6 +120,7 @@ function enterPage() {
 
 /** 页面离开：记一条 page_view（type=1 op=2）并带上停留毫秒 */
 function leavePage({ loose = false } = {}) {
+  if (loose && !looseGuard.trySend()) return;
   const stayMs = Math.max(0, Date.now() - pageStartAt);
   const seconds = (stayMs / 1000).toFixed(1);
   const body = {
@@ -212,10 +238,20 @@ export function initTracking() {
 
   document.addEventListener('click', handleClick, { capture: true, passive: true });
 
-  // 关标签页/切后台：用 keepalive 把停留时间送出去
+  // 关标签页/切后台：用 keepalive 把停留时间送出去。
+  // 两条事件路径共用一个一次性 guard：同一次隐藏/关闭只发一条退出，重新可见后才复位。
   window.addEventListener('pagehide', () => leavePage({ loose: true }));
+  // bfcache 恢复（浏览器后退）不走 visibilitychange 时也要重置，否则这一页以后再也不会上报退出
+  window.addEventListener('pageshow', () => {
+    pageStartAt = Date.now();
+    looseGuard.reset();
+  });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') leavePage({ loose: true });
-    else pageStartAt = Date.now();
+    if (document.visibilityState === 'hidden') {
+      leavePage({ loose: true });
+    } else {
+      pageStartAt = Date.now();
+      looseGuard.reset();
+    }
   });
 }
