@@ -5,6 +5,7 @@
  * 趋势分桶用 SQLite 的 `+8 hours` 回到北京时间，避免凌晨数据落到前一天。
  */
 import { db } from './db.mjs'
+import { cachedRegions, isPrivateIp, regionMergeKey, warmRegions } from './geoip.mjs'
 
 const HOUR_MS = 3600_000
 const DAY_MS = 24 * HOUR_MS
@@ -165,6 +166,51 @@ function rankingsOf(win) {
   return { topPages, topEvents, topActions, topDramas, devices, systems }
 }
 
+/**
+ * 地区分布：按 IP 归属地聚合，同一地区跨 IP 合并。
+ * 只读 ip_geo 缓存，未命中的计入「未知地区」并在后台预热，请求里不等外网。
+ * 合并键用「国家 · 城市」：省名口径不同（法兰西岛 / 法兰西岛大区）、繁简混排都能并成一行。
+ */
+function regionDistributionOf(win) {
+  const { clause, args } = rangeOf(win)
+  const rows = db.prepare(`SELECT te.ip AS ip, COUNT(*) AS n
+    FROM track_events te WHERE ${clause} AND te.ip IS NOT NULL AND te.ip <> ''
+    GROUP BY te.ip ORDER BY n DESC`).all(...args)
+  const labels = cachedRegions(rows.map((row) => row.ip))
+  const groups = new Map()
+  const missing = []
+  const bump = (label, count) => {
+    const key = regionMergeKey(label) || label
+    const group = groups.get(key) ?? { n: 0, labels: new Map() }
+    group.n += Number(count)
+    group.labels.set(label, (group.labels.get(label) ?? 0) + Number(count))
+    groups.set(key, group)
+  }
+  for (const row of rows) {
+    const ip = String(row.ip ?? '').trim()
+    let label = labels.get(ip) ?? ''
+    if (!label) {
+      if (isPrivateIp(ip)) label = '内网'
+      else {
+        label = '未知地区'
+        missing.push(ip)
+      }
+    }
+    bump(label, row.n)
+  }
+  const blank = db.prepare(`SELECT COUNT(*) AS n FROM track_events te
+    WHERE ${clause} AND (te.ip IS NULL OR te.ip = '')`).get(...args)
+  if (Number(blank?.n)) bump('未记录 IP', blank.n)
+  warmRegions(missing)
+  return [...groups.values()]
+    .map((group) => {
+      // 一组里挑出现次数最多的写法，平票取更短的，省得过长的省名把图占满
+      const [label] = [...group.labels].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0]
+      return { label, n: group.n }
+    })
+    .sort((a, b) => b.n - a.n)
+}
+
 export function eventStats(range = '7d', now = Date.now()) {
   const win = eventStatsWindow(range, now)
   const { clause, args } = rangeOf(win)
@@ -184,6 +230,7 @@ export function eventStats(range = '7d', now = Date.now()) {
     trend: trendOf(win, now),
     byType,
     byEventType,
+    regions: regionDistributionOf(win),
     ...rankingsOf(win),
   }
 }

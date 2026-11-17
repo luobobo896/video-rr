@@ -107,7 +107,7 @@
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `MH_GEOIP` | 空 | `1` 才做 IP 归属地查询；默认**不外发**访客 IP |
-| `MH_GEOIP_URL` | `https://pro.ip-api.com/batch` | 归属地接口，可换成自建 |
+| `MH_GEOIP_URL` | `https://ipwho.is` | 归属地接口。缺省走 ipwho.is 单 IP 查询（免 key、中文）；填自建/批量端点时按 ip-api 版式 `POST` 数组 |
 | `MH_POSTER_MAX_MB` | `32` | 封面墙单图上限 |
 | `MH_POSTER_RESERVE_MB` | `1024` | 封面墙生成时预留的磁盘空间 |
 | `MH_WARM_PROFILE` | 空 | `0` 时启动不做浏览器 profile 预热 |

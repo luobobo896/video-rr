@@ -102,7 +102,7 @@
 |---|---|---|
 | GET | `/admin/api/analytics?days=7` | 播放、用户、收入、订阅、内容、访客、逐级转化漏斗及日趋势。`conversion[]` 的 `rate` 以相邻阶段为分母 |
 | GET | `/admin/api/events?days=7&type=&page=1&pageSize=20` | 埋点明细分页；返回 `{total,page,pageSize,visitors,byType,byDay,list}` |
-| GET | `/admin/api/events/stats?range=today\|yesterday\|7d\|30d` | 埋点概览：`totals`（含 `users`/`anonymous`/`loggedEvents`/`anonymousEvents`）、`prevTotals`、`trend`（今天按小时、其余按天，空桶补 0）、排行榜与 `byType` |
+| GET | `/admin/api/events/stats?range=today\|yesterday\|7d\|30d` | 埋点概览：`totals`（含 `users`/`anonymous`/`loggedEvents`/`anonymousEvents`）、`prevTotals`、`trend`（今天按小时、其余按天，空桶补 0）、`regions`（地区分布，`[{label, n}]`，读 `ip_geo` 缓存）、`devices`/`systems`/`topEvents` 等排行榜与 `byType` |
 
 埋点去重身份固定为 `user_id → visitor_id → ip`：登录用户按账号算一个人，换设备或换 IP 不会重复计数；未登录才退回 `visitor_id`，最后兜底 IP。明细接口同样接受 `range`（与 `days` 互斥，`range` 优先）。
 

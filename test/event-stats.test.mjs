@@ -10,6 +10,7 @@ process.env.MH_SECRET = 'test-secret'
 
 const { db } = await import('../server/db.mjs')
 const { eventStats, eventStatsWindow, normalizeRange } = await import('../server/event-stats.mjs')
+const geoipModule = await import('../server/geoip.mjs')
 
 /** 北京时间 2026-11-17 16:50（UTC 08:50），离所有日历边界都远。 */
 const NOW = Date.parse('2026-11-17T08:50:00Z')
@@ -133,4 +134,41 @@ test('排行榜与分布来自窗口内事件，不混入区间外数据', () =>
 
   const month = eventStats('30d', NOW)
   assert.equal(month.topPages.some((row) => row.path === '/old'), false)
+})
+
+test('地区分布读 ip_geo 缓存：同一地区跨 IP 合并，无 IP 事件单独计数', () => {
+  const { clearGeoCache } = geoipModule
+  const put = db.prepare(`INSERT INTO ip_geo (ip, label, checked_at) VALUES (?, ?, ?)
+    ON CONFLICT(ip) DO UPDATE SET label = excluded.label, checked_at = excluded.checked_at`)
+  const stamp = Date.now()
+  put.run('1.2.3.4', '美国 · 加利福尼亚州 · 圣荷西', stamp)
+  put.run('5.6.7.8', '美国 · 加利福尼亚州 · 圣荷西', stamp)
+  clearGeoCache()
+  const week = eventStats('7d', NOW)
+  const count = (label) => week.regions.find((row) => row.label === label)?.n ?? 0
+  assert.equal(count('美国 · 加利福尼亚州 · 圣荷西'), 2)
+  assert.equal(count('未记录 IP'), 5)
+  assert.equal(week.regions.reduce((sum, row) => sum + row.n, 0), 7)
+})
+
+test('缓存缺失的公网 IP 先记「未知地区」，请求不等待外部接口', () => {
+  const { clearGeoCache } = geoipModule
+  db.prepare('DELETE FROM ip_geo WHERE ip = ?').run('5.6.7.8')
+  clearGeoCache()
+  const regions = eventStats('7d', NOW).regions
+  assert.equal(regions.find((row) => row.label === '未知地区')?.n, 1)
+})
+
+test('地区分布把繁简不一的同一城市并成一行', () => {
+  const { clearGeoCache } = geoipModule
+  const put = db.prepare(`INSERT INTO ip_geo (ip, label, checked_at) VALUES (?, ?, ?)
+    ON CONFLICT(ip) DO UPDATE SET label = excluded.label, checked_at = excluded.checked_at`)
+  const stamp = Date.now()
+  put.run('1.2.3.4', '法国 · 法蘭西島大區 · 巴黎', stamp)
+  put.run('5.6.7.8', '法国 · 法兰西岛 · 巴黎', stamp)
+  clearGeoCache()
+  const regions = eventStats('7d', NOW).regions.filter((row) => row.label.startsWith('法国'))
+  assert.equal(regions.length, 1)
+  assert.equal(regions[0].n, 2)
+  assert.equal(regions[0].label, '法国 · 法兰西岛 · 巴黎')
 })

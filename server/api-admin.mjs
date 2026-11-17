@@ -28,7 +28,7 @@ import {
 } from './mail-channels.mjs'
 import { pollDeviceFlow, startDeviceFlow } from './mailer-oauth.mjs'
 import { analyticsReport } from './analytics.mjs'
-import { resolveRegions } from './geoip.mjs'
+import { cachedRegions, warmRegions } from './geoip.mjs'
 import { buildCodeEmail, buildPasswordResetEmail } from './email-template.mjs'
 import { logError, logInfo, logWarn } from './logger.mjs'
 import { createTag, deleteTag, listTags, setDramaTags, setTagStatus, tagTree, tagsOfDrama, updateTag } from './tags.mjs'
@@ -1329,7 +1329,9 @@ const deny = (perm) => {
       const { meta_json: metaJson, ...rest } = row
       return { ...rest, meta: metaJson ? safeJson(metaJson) : null, region: '' }
     })
-    const regions = await resolveRegions(rows.map((row) => row.ip))
+    // 只读缓存：详情列表一秒内要返回，不能在这里等外部接口；缺的后台补，刷新页面就能看到
+    const regions = cachedRegions(rows.map((row) => row.ip))
+    warmRegions(rows.map((row) => row.ip))
     for (const row of rows) row.region = regions.get(String(row.ip ?? '').trim()) ?? ''
     return send(res, {
       total, page, pageSize, visitors,
