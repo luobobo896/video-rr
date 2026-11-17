@@ -441,3 +441,15 @@ test('中文页名相同的入口合并成一行，不留重复（静态断言�
   assert.match(appJs, /const pageMerged = new Map\(\)/)
   assert.match(appJs, /const pageRows = \[\.\.\.pageMerged\.values\(\)\]\.sort\(\(a, b\) => b\.value - a\.value\)\.slice\(0, 10\)/)
 })
+
+test('非路由的 path 不假装是页面，详情页与登录页都有中文名（行为断言）', () => {
+  const from = appJs.indexOf('const EVENT_LABEL = {')
+  const to = appJs.indexOf('const CHART_COLORS')
+  const { pageLabelOf } = new Function(`${appJs.slice(from, to)}
+    return { pageLabelOf }`)()
+
+  assert.equal(pageLabelOf('/detail/3870'), '剧目详情页')
+  assert.equal(pageLabelOf('/login'), '登录页')
+  assert.equal(pageLabelOf('仙逆'), '非页面记录', '搜索词落在 path 里，不能当成页面')
+  assert.equal(pageLabelOf('MH1794317247790EDDB'), '非页面记录')
+})

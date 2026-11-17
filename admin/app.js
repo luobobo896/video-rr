@@ -4119,6 +4119,7 @@ const PAGE_LABEL = {
   '/orders': '我的订单',
   '/feedback': '投诉与反馈',
   '/profile-edit': '编辑资料',
+  '/login': '登录页',
   '/promotion': '佣金推广',
   '/me': '个人中心',
   '/vip': '会员',
@@ -4150,11 +4151,14 @@ function pagePathOf(value) {
 function pageLabelOf(path, pageUrl) {
   const normalized = pagePathOf(path || pageUrl)
   if (!normalized) return '无页面信息'
+  // path 字段也被搜索词、订单号借用过，不是路由的就不假装是页面。
+  if (!normalized.startsWith('/')) return '非页面记录'
   const direct = PAGE_LABEL[normalized]
   if (direct) return direct
   const category = normalized.match(/^\/category\/([A-Za-z]+)$/)
   if (category) return `片库 · ${PAGE_CATEGORY_LABEL[category[1].toUpperCase()] ?? '全部'}`
   if (/^\/drama\//.test(normalized)) return '剧目详情页'
+  if (/^\/detail\//.test(normalized)) return '剧目详情页'
   if (/^\/play\//.test(normalized)) return '播放页'
   if (/^\/playlist\//.test(normalized)) return '片单详情页'
   if (/^\/tag\//.test(normalized)) return '题材页'
