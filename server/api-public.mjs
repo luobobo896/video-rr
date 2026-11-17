@@ -21,6 +21,9 @@ import { escapeLike } from './sql-like.mjs'
 import { remotePlaybackPath } from './stream-proxy.mjs'
 import { ensureFreshForPlay, staleOf } from './jable-refresh.mjs'
 import { isClientTrackType, recordEvent, recordPlay } from './analytics.mjs'
+import {
+  FEEDBACK_CATEGORIES, FEEDBACK_STATUSES, createFeedback, listMyFeedbacks,
+} from './feedback.mjs'
 import { bindUserAcquisition, recordTouch } from './attribution.mjs'
 import {
   applyDistributor, bindReferral, createWithdrawalRequest, detectCurrency, distributionSummary,
@@ -531,6 +534,8 @@ export async function handlePublic(pathname, url, req, res) {
     '/api/currency/options',
     // 模拟收银台在独立标签页，带不了 Bearer：靠一次性 HMAC 支付票据校验，见 mayPay()
     '/api/pay/mock', '/api/pay/alipay-sim',
+    // 投诉反馈：未登录也要能提交（留联系方式即可），登录后自动带上账号与订单归属
+    '/api/feedback', '/api/feedback/meta',
   ])
   const OPEN_PREFIXES = ['/api/drama/', '/api/category/', '/api/tags/']
   // 只有支付宝服务端回调是公开的（自带 RSA2 验签）；其余回调一律留在内网/进程内
@@ -1417,9 +1422,49 @@ export async function handlePublic(pathname, url, req, res) {
       })
     }
 
+    /* ---------- 投诉反馈 ---------- */
+    if (pathname === '/api/feedback/meta') {
+      return send(res, { categories: FEEDBACK_CATEGORIES, statuses: FEEDBACK_STATUSES })
+    }
+
+    if (pathname === '/api/feedback' && method === 'GET') {
+      if (!userId) return fail(res, '0401', '请先登录', 401)
+      return send(res, { list: listMyFeedbacks(userId, { limit: 50 }) })
+    }
+
+    if (pathname === '/api/feedback' && method === 'POST') {
+      const body = await readBody(req)
+      // 允许未登录提交（留联系方式即可）；登录用户自动带上 user_id 与订单归属校验
+      let orderId = null
+      if (body.orderNo) {
+        const order = one('SELECT id FROM orders WHERE out_trade_no = ?', String(body.orderNo).trim())
+        if (!order) return fail(res, '0404', '关联的订单不存在', 404)
+        orderId = order.id
+      } else if (body.orderId) {
+        orderId = intOf(body.orderId, 0, 1, Number.MAX_SAFE_INTEGER) || null
+      }
+      const feedback = createFeedback({
+        userId,
+        visitorId: visitor.id,
+        orderId,
+        dramaId: intOf(body.dramaId, 0, 1, Number.MAX_SAFE_INTEGER) || null,
+        category: body.category,
+        content: body.content,
+        contact: body.contact,
+        source: 'web',
+        ip: clientIp(req),
+        ua: req.headers['user-agent'],
+      })
+      return send(res, {
+        id: feedback.id,
+        ticketNo: feedback.ticket_no,
+        status: feedback.status,
+        createdAt: feedback.created_at,
+      })
+    }
+
     /* ---------- 套餐 / 优惠券 / 下单 ---------- */
-    if (pathname === '/api/plans') {
-      const plans = all("SELECT * FROM plans WHERE status = 'active' ORDER BY sort").map((plan) => ({
+    if (pathname === '/api/plans') {      const plans = all("SELECT * FROM plans WHERE status = 'active' ORDER BY sort").map((plan) => ({
         id: plan.id, code: plan.code, name: plan.name, price: plan.price_cny,
         days: plan.duration_days, scope: plan.scope, description: plan.description,
       }))

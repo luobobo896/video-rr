@@ -18,6 +18,10 @@ import {
 import { enqueueEpisode, generateSample, probe, queueState } from './media.mjs'
 import { downloadRemoteVideo } from './media-import.mjs'
 import { adultStatsFor } from './adult-stats.mjs'
+import { eventStats, eventStatsWindow } from './event-stats.mjs'
+import {
+  feedbackStats, feedbacksOfOrder, getFeedback, listFeedbacks, refundFeedback, replyFeedback, setFeedbackStatus,
+} from './feedback.mjs'
 import { policyOf, rulesOfDrama, setEpisodeRules } from './entitlements.mjs'
 import {
   PRESETS, channelList, emailSettings, mailUnavailable, markTest, removeChannel, saveEmailSettings, sendMail, upsertChannel as upsertMailChannel, verifyChannel,
@@ -343,6 +347,9 @@ const PERM = {
   analytics: 'analytics.read',
   refundCreate: 'finance.refund.create',
   refundApprove: 'finance.refund.approve',
+  feedback: 'cs.feedback.read',
+  feedbackWrite: 'cs.feedback.write',
+  feedbackRefund: 'cs.feedback.refund',
   reconcile: 'finance.reconcile.run',
   banners: 'ops.banner.write',
   sections: 'ops.section.write',
@@ -1276,26 +1283,48 @@ const deny = (perm) => {
     return send(res, ADMIN_OPTIONS)
   }
 
-  /* ---------- 埋点数据 ---------- */
+  /* ---------- 埋点数据：统计卡片（今天 / 昨天 / 近 7 天 / 近 30 天） ---------- */
+  if (seg[0] === 'events' && seg[1] === 'stats' && method === 'GET') {
+    if (!guard(PERM.events)) return deny(PERM.events)
+    return send(res, eventStats(url.searchParams.get('range') ?? '7d'))
+  }
+
   if (seg[0] === 'events' && method === 'GET') {
     if (!guard(PERM.events)) return deny(PERM.events)
+    const rangeParam = url.searchParams.get('range')
+    const win = rangeParam ? eventStatsWindow(rangeParam) : null
     const days = intOf(url.searchParams.get('days') ?? 7, 7, 1, 90)
     const type = url.searchParams.get('type')
     const page = intOf(url.searchParams.get('page') ?? 1, 1, 1)
     const pageSize = intOf(url.searchParams.get('pageSize') ?? 20, 20, 10, 100)
-    const since = `-${days} days`
-    const where = ["te.created_at >= datetime('now', ?)"]
-    const args = [since]
+
+    // 时间窗：带 range 走日历区间（含今天至此刻），不带则保留旧的「近 N 天」UTC 滑窗
+    const timeWhere = []
+    const timeArgs = []
+    if (win) {
+      timeWhere.push('te.created_at >= ?')
+      timeArgs.push(win.from)
+      if (win.to) {
+        timeWhere.push('te.created_at < ?')
+        timeArgs.push(win.to)
+      }
+    } else {
+      timeWhere.push("te.created_at >= datetime('now', ?)")
+      timeArgs.push(`-${days} days`)
+    }
+    const where = [...timeWhere]
+    const args = [...timeArgs]
     if (type) { where.push('te.type = ?'); args.push(type) }
     const clause = where.join(' AND ')
+    const timeClause = timeWhere.join(' AND ')
     const total = one(`SELECT COUNT(*) AS n FROM track_events te WHERE ${clause}`, ...args).n
     const list = all(`SELECT te.*, d.title AS dramaTitle, u.email AS userEmail
       FROM track_events te
       LEFT JOIN dramas d ON d.id = te.drama_id
       LEFT JOIN users u ON u.id = te.user_id
       WHERE ${clause} ORDER BY te.id DESC LIMIT ? OFFSET ?`, ...args, pageSize, (page - 1) * pageSize)
-    const visitors = Number(one(`SELECT COUNT(DISTINCT visitor_id) AS n FROM track_events
-      WHERE created_at >= datetime('now', ?) AND visitor_id IS NOT NULL`, since)?.n ?? 0)
+    const visitors = Number(one(`SELECT COUNT(DISTINCT COALESCE(NULLIF(te.visitor_id, ''), CASE WHEN te.user_id IS NOT NULL THEN 'u:' || te.user_id END, NULLIF(te.ip, ''))) AS n
+      FROM track_events te WHERE ${timeClause}`, ...timeArgs)?.n ?? 0)
     const rows = list.map((row) => {
       const { meta_json: metaJson, ...rest } = row
       return { ...rest, meta: metaJson ? safeJson(metaJson) : null, region: '' }
@@ -1304,9 +1333,11 @@ const deny = (perm) => {
     for (const row of rows) row.region = regions.get(String(row.ip ?? '').trim()) ?? ''
     return send(res, {
       total, page, pageSize, visitors,
+      range: win?.range ?? null,
+      label: win?.label ?? null,
       byType: all(`SELECT te.type, COUNT(*) AS n FROM track_events te WHERE ${clause} GROUP BY te.type ORDER BY n DESC`, ...args),
-      byDay: all(`SELECT date(te.created_at) AS day, COUNT(*) AS n FROM track_events te
-        WHERE te.created_at >= datetime('now', ?) GROUP BY day ORDER BY day`, since),
+      byDay: all(`SELECT date(te.created_at, '+8 hours') AS day, COUNT(*) AS n FROM track_events te
+        WHERE ${timeClause} GROUP BY day ORDER BY day`, ...timeArgs),
       list: rows,
     })
   }
@@ -1625,6 +1656,70 @@ const deny = (perm) => {
     const result = rejectRefund({ refundId: Number(seg[1]), approverId: principal.admin.id, reason: body.reason })
     log('finance.refund.reject', 'refund', seg[1], null, result, body.reason)
     return send(res, result)
+  }
+
+  /* ---------- 投诉反馈 ---------- */
+  if (pathname === '/admin/api/feedbacks/stats' && method === 'GET') {
+    if (!guard(PERM.feedback)) return deny(PERM.feedback)
+    return send(res, feedbackStats(url.searchParams.get('range') ?? '7d'))
+  }
+
+  if (pathname === '/admin/api/feedbacks' && method === 'GET') {
+    if (!guard(PERM.feedback)) return deny(PERM.feedback)
+    const params = url.searchParams
+    const result = listFeedbacks({
+      status: params.get('status') ?? '',
+      category: params.get('category') ?? '',
+      priority: params.get('priority') ?? '',
+      q: params.get('q') ?? '',
+      range: params.get('range') ?? '',
+      userId: Number(params.get('userId')) || undefined,
+      orderId: Number(params.get('orderId')) || undefined,
+      page: Number(params.get('page')) || 1,
+      pageSize: Number(params.get('pageSize')) || 20,
+    })
+    return send(res, result)
+  }
+
+  const feedbackDetail = pathname.match(/^\/admin\/api\/feedbacks\/(\d+)$/)
+  if (feedbackDetail && method === 'GET') {
+    if (!guard(PERM.feedback)) return deny(PERM.feedback)
+    const feedback = getFeedback(Number(feedbackDetail[1]))
+    const order = feedback.order_id ? getOrder(feedback.order_id) : null
+    const refunds = feedback.order_id ? all('SELECT * FROM refunds WHERE order_id = ? ORDER BY id DESC', feedback.order_id) : []
+    const related = feedback.order_id ? feedbacksOfOrder(feedback.order_id) : []
+    return send(res, { feedback, order, refunds, related })
+  }
+
+  const feedbackAction = pathname.match(/^\/admin\/api\/feedbacks\/(\d+)\/(reply|status|refund)$/)
+  if (feedbackAction && method === 'POST') {
+    const id = Number(feedbackAction[1])
+    const action = feedbackAction[2]
+    if (action === 'refund') {
+      if (!guard(PERM.feedbackRefund)) return deny(PERM.feedbackRefund)
+      if (!guard(PERM.refundCreate)) return deny(PERM.refundCreate)
+      let result
+      try {
+        result = refundFeedback({ id, amount: body.amount, reason: body.reason, operatorId: principal.admin.id })
+      } catch (error) {
+        // 与 /admin/api/refunds 一致：同单已有待处理退款时按 409 回
+        if (/SQLITE_CONSTRAINT|UNIQUE constraint/i.test(String(error?.message ?? ''))) {
+          return send(res, { error: 'refund_pending_exists' }, '0409', '该订单已有待处理退款', 409)
+        }
+        return fail(res, error, '从反馈发起退款失败')
+      }
+      log('cs.feedback.refund', 'feedback', id, null, result.refund, body.reason)
+      return send(res, result)
+    }
+    if (!guard(PERM.feedbackWrite)) return deny(PERM.feedbackWrite)
+    if (action === 'reply') {
+      const feedback = replyFeedback({ id, reply: body.reply, status: body.status, adminId: principal.admin.id })
+      log('cs.feedback.reply', 'feedback', id, null, { status: feedback.status }, body.reply)
+      return send(res, feedback)
+    }
+    const feedback = setFeedbackStatus({ id, status: body.status, note: body.note, adminId: principal.admin.id })
+    log('cs.feedback.status', 'feedback', id, null, { status: feedback.status }, body.note)
+    return send(res, feedback)
   }
 
   if (pathname === '/admin/api/reconcile' && method === 'POST') {

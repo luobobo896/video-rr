@@ -842,6 +842,7 @@ async function route() {
     else if (key === 'analytics') await pageAnalytics()
     else if (key === 'tags') await pageTags()
     else if (key === 'events') await pageEvents()
+    else if (key === 'feedbacks') await pageFeedbacks()
     else if (key === 'channels') await pageChannels()
     else if (key === 'content-stats') await pageContentStats()
     else if (key === 'distribution') await pageDistribution()
@@ -2464,7 +2465,7 @@ function panel(title, body, extra = '') {
 function table(headers, rows, className = '') {
   return `<table${className ? ` class="${className}"` : ''}><thead><tr>${headers.map((header) => `<th>${header}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
 }
-const listPages = { dramas: 1, audit: 1, refunds: 1, reviewDanmu: 1, reviewComments: 1 }
+const listPages = { dramas: 1, audit: 1, refunds: 1, reviewDanmu: 1, reviewComments: 1, events: 1, feedbacks: 1 }
 
 function pager(key, page, pageSize, total, unit = '条') {
   const count = Math.max(0, Number(total ?? 0))
@@ -4093,6 +4094,8 @@ const EVENT_LABEL = {
   episode_click: '选集点击', favorite: '收藏', search: '搜索', share: '分享',
   category_filter: '分类筛选', rank_view: '榜单浏览', login_open: '打开登录', login_success: '登录成功',
   play_error: '播放失败', order_created: '创建订单', payment_success: '支付成功',
+  track_change: '切换音轨', lp_view: '落地页浏览', lp_cta_click: '落地页点击',
+  trial_start: '试看开始', trial_end: '试看结束', click: '点击',
 }
 
 const CHART_COLORS = ['#5b86ff', '#22d3ee', '#f5b545', '#45d19a', '#a78bfa', '#ff5f7a']
@@ -5743,54 +5746,108 @@ async function pageTags() {
 }
 
 /* ---------------- 埋点数据 ---------------- */
+const EVENT_TYPE_LABEL = { 0: '未知', 1: '页面', 2: '点击' }
+const EVENT_OP_LABEL = { 0: '默认', 1: '进入/开启', 2: '关闭/退出' }
+const EVENT_RANGES = [['today', '今天'], ['yesterday', '昨天'], ['7d', '近 7 天'], ['30d', '近 30 天']]
+/** 旧链接用 days=1/7/30，映射到新区间，别让收藏的地址失效。 */
+const EVENT_RANGE_FALLBACK = { 1: 'today', 7: '7d', 30: '30d' }
+
+/** 接口里的时间是 UTC 文本，页面统一按北京时间展示。 */
+function beijingTime(value) {
+  const ts = Date.parse(`${String(value ?? '').replace(' ', 'T')}Z`)
+  if (!Number.isNaN(ts)) return new Date(ts + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')
+  return '—'
+}
+
+/** 环比：上一区间为 0 时只说「新增」，不给出无穷大百分比。 */
+function deltaText(current, previous) {
+  const cur = Number(current ?? 0)
+  const prev = Number(previous ?? 0)
+  if (!prev) return cur > 0 ? '区间内新增' : '暂无对比'
+  const pct = ((cur - prev) / prev) * 100
+  return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% 环比`
+}
+
+/** 翻页/换筛选前先把状态写进 hash，否则页面会从旧 hash 还原回旧筛选。 */
+const syncEventHash = () => {
+  const hashParams = {}
+  if (Number(listPages.events ?? 1) > 1) hashParams.page = Number(listPages.events)
+  if (state.params.eventRange && state.params.eventRange !== '7d') hashParams.range = state.params.eventRange
+  if (state.params.eventType) hashParams.type = state.params.eventType
+  writeHashQuery('events', hashParams)
+}
+
 async function pageEvents() {
+  const hashQuery = readHashQuery()
   const restored = hydrateListState(readHashQuery(), {
     page: Number(listPages.events ?? 1),
-    days: Number(state.params.eventDays ?? 7),
     type: String(state.params.eventType ?? ''),
   })
   listPages.events = Number(restored.page) > 0 ? Number(restored.page) : 1
-  state.params.eventDays = pickAllowedNumber(restored.days, [1, 7, 30], 7)
+  const legacyRange = EVENT_RANGE_FALLBACK[Number(hashQuery?.days)]
+  const rawRange = String(hashQuery?.range ?? state.params.eventRange ?? '')
+  state.params.eventRange = EVENT_RANGES.some(([key]) => key === rawRange) ? rawRange : (legacyRange ?? '7d')
   state.params.eventType = String(restored.type ?? '')
-  const days = Number(state.params.eventDays ?? 7)
-  const type = state.params.eventType ?? ''
+  const range = state.params.eventRange
+  const type = state.params.eventType
   const page = Number(listPages.events ?? 1)
-  const hashParams = {}
-  if (page > 1) hashParams.page = page
-  if (days !== 7) hashParams.days = days
-  if (type) hashParams.type = type
-  writeHashQuery('events', hashParams)
-  const query = new URLSearchParams({ days: String(days), page: String(page), pageSize: '20' })
+  syncEventHash()
+  const query = new URLSearchParams({ range, page: String(page), pageSize: '20' })
   if (type) query.set('type', type)
-  const data = await api(`/admin/api/events?${query.toString()}`)
-  const EVENT_LABEL = {
-    session_start: '访问开始', page_view: '页面浏览', impression: '内容曝光', detail_view: '详情页浏览',
-    paywall_view: '付费墙展示', paywall_click: '付费墙点击', play_start: '开始播放', play_end: '播放结束',
-    episode_click: '选集点击', favorite: '收藏', search: '搜索', share: '分享',
-    category_filter: '分类筛选', rank_view: '榜单浏览', login_open: '打开登录', login_success: '登录成功',
-    play_error: '播放失败', order_created: '创建订单', payment_success: '支付成功',
-    track_change: '切换音轨', lp_view: '落地页浏览', lp_cta_click: '落地页点击',
-    trial_start: '试看开始', trial_end: '试看结束', click: '点击',
-  }
-  const EVENT_TYPE_LABEL = { 0: '未知', 1: '页面', 2: '点击' }
-  const EVENT_OP_LABEL = { 0: '默认', 1: '进入/开启', 2: '关闭/退出' }
-  const eventTypes = (data.byType ?? []).length
-  const avgPerDay = data.byDay?.length ? Math.round((data.total ?? 0) / data.byDay.length) : 0
+  const [stats, data] = await Promise.all([
+    api(`/admin/api/events/stats?range=${encodeURIComponent(range)}`),
+    api(`/admin/api/events?${query.toString()}`),
+  ])
+  const totals = stats.totals ?? {}
+  const prev = stats.prevTotals ?? {}
+  const typeRows = (stats.byType ?? []).map((row) => ({ label: EVENT_LABEL[row.type] ?? row.type, value: row.n }))
+  const kindRows = (stats.byEventType ?? []).map((row) => ({ label: EVENT_TYPE_LABEL[row.eventType] ?? String(row.eventType ?? 0), value: row.n }))
+  const stayText = `${(Number(totals.avgStayMs ?? 0) / 1000).toFixed(1)}s`
 
   view.innerHTML = `
+    <div class="form-row" style="margin-bottom:12px">
+      <div class="subtabs">${EVENT_RANGES.map(([key, text]) => `<button class="pill ${range === key ? 'active' : ''}" data-range="${key}">${text}</button>`).join('')}</div>
+      <span class="spacer" style="flex:1"></span>
+      <span class="muted">${esc(stats.label ?? '')} · 北京时间 ${beijingTime(stats.from)} 起${stats.to ? ` 至 ${beijingTime(stats.to)}` : ' 至今'}</span>
+    </div>
     <div class="cards">
-      ${card('事件总数', fmt(data.total ?? 0), '条')}
-      ${card('独立访客', fmt(data.visitors ?? 0), '人')}
-      ${card('事件类型', fmt(eventTypes), '种')}
-      ${card('日均事件', fmt(avgPerDay), '条/日')}
+      ${card('事件总数', fmt(totals.events ?? 0), `条 · ${deltaText(totals.events, prev.events)}`)}
+      ${card('独立访客', fmt(totals.visitors ?? 0), `人 · ${deltaText(totals.visitors, prev.visitors)}`)}
+      ${card('登录用户', fmt(totals.users ?? 0), `人 · ${fmt(totals.loggedEvents ?? 0)} 条事件`)}
+      ${card('匿名访客', fmt(totals.anonymous ?? 0), `人 · ${fmt(totals.anonymousEvents ?? 0)} 条事件`)}
+      ${card('页面浏览', fmt(totals.pageViews ?? 0), `次 · 离开 ${fmt(totals.pageExits ?? 0)}`)}
+      ${card('点击交互', fmt(totals.clicks ?? 0), `次 · 人均 ${totals.eventsPerVisitor ?? 0} 事件`)}
+      ${card('播放开始', fmt(totals.plays ?? 0), `次 · 搜索 ${fmt(totals.searches ?? 0)}`)}
+      ${card('平均停留', stayText, `每次离开 · ${fmt(totals.sessions ?? 0)} 次会话`)}
     </div>
     <div class="panel">
-      <h3>事件趋势 <span class="muted">近 ${days} 天 · 共 ${fmt(data.total ?? 0)} 条 · 独立访客 ${fmt(data.visitors ?? 0)}</span></h3>
-      ${svgLineChart(data.byDay ?? [], [{ key: 'n', label: '事件数', color: CHART_COLORS[0] }], { height: 180 })}
+      <h3>事件趋势 <span class="muted">${esc(stats.label ?? '')} · ${stats.bucket === 'hour' ? '按小时' : '按天'} · 共 ${fmt(totals.events ?? 0)} 条 / ${fmt(totals.visitors ?? 0)} 人</span></h3>
+      ${svgLineChart(stats.trend ?? [], [
+        { key: 'events', label: '事件数', color: CHART_COLORS[0] },
+        { key: 'visitors', label: '独立访客', color: CHART_COLORS[1] },
+        { key: 'pageViews', label: '页面浏览', color: CHART_COLORS[3] },
+      ])}
     </div>
-    <div class="panel">
+    <div class="split" style="margin-top:16px">
+      <div class="panel"><h3>事件分布</h3>${rankedBars(typeRows, 'value', 'label')}</div>
+      <div class="panel"><h3>事件类型</h3>${rankedBars(kindRows, 'value', 'label')}</div>
+    </div>
+    <div class="split" style="margin-top:16px">
+      <div class="panel"><h3>热门页面 Top 10</h3>${rankedBars(stats.topPages ?? [], 'n', 'path')}</div>
+      <div class="panel"><h3>热门事件 Top 12</h3>${rankedBars(stats.topEvents ?? [], 'n', 'code')}</div>
+    </div>
+    <div class="split" style="margin-top:16px">
+      <div class="panel"><h3>热门动作 Top 10</h3>${rankedBars(stats.topActions ?? [], 'n', 'action')}</div>
+      <div class="panel"><h3>热门剧目 Top 10</h3>${rankedBars(stats.topDramas ?? [], 'n', 'title')}</div>
+    </div>
+    <div class="split" style="margin-top:16px">
+      <div class="panel"><h3>设备分布</h3>${rankedBars(stats.devices ?? [], 'n', 'label')}</div>
+      <div class="panel"><h3>系统分布</h3>${rankedBars(stats.systems ?? [], 'n', 'label')}</div>
+    </div>
+    <div class="panel" style="margin-top:16px">
       <div class="form-row">
-        <div class="subtabs">${[1, 7, 30].map((n) => `<button class="pill ${days === n ? 'active' : ''}" data-days="${n}">${n} 天</button>`).join('')}</div>
+        <span class="muted">明细 · ${esc(stats.label ?? '')} · 共 ${fmt(data.total ?? 0)} 条</span>
+        <span class="spacer" style="flex:1"></span>
         <select id="ev-type" aria-label="事件类型" style="width:160px">
           <option value="">全部事件</option>
           ${(data.byType ?? []).map((row) => `<option value="${esc(row.type)}" ${type === row.type ? 'selected' : ''}>${esc(EVENT_LABEL[row.type] ?? row.type)}（${row.n}）</option>`).join('')}
@@ -5810,39 +5867,243 @@ async function pageEvents() {
             <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(row.page_url ?? row.path ?? '')}">${esc(row.path ?? '—')}</td>
             <td class="mono" style="white-space:nowrap">${row.stay_ms === null || row.stay_ms === undefined ? '—' : `${(Number(row.stay_ms) / 1000).toFixed(1)}s`}</td>
             <td class="muted" style="max-width:260px">${esc(row.action ?? '—')}${row.description ? `<div style="font-size:11px;opacity:.75">${esc(row.description)}</div>` : ''}</td>
-          </tr>`).join('') || '<tr><td colspan="10" class="muted">还没有埋点数据：C 端产生浏览/播放后这里会实时出现</td></tr>'}
+          </tr>`).join('') || '<tr><td colspan="10" class="muted">该区间还没有埋点数据：C 端产生浏览/播放后这里会实时出现</td></tr>'}
         </tbody>
       </table>
       ${pager('events', page, data.pageSize, data.total, '条')}
-      <h3 style="margin-top:18px">事件分布</h3>
-      <table><thead><tr><th>事件</th><th>次数</th></tr></thead><tbody>
-        ${(data.byType ?? []).map((row) => `<tr><td>${esc(EVENT_LABEL[row.type] ?? row.type)}</td><td>${fmt(row.n)}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">—</td></tr>'}
-      </tbody></table>
     </div>`
 
-  // 与 tags 同理：先写 hash 再从页面参数渲染，否则会读到上一轮的 days/type
-  const syncEventHash = () => {
-    const params = {}
-    if (Number(listPages.events) > 1) params.page = Number(listPages.events)
-    if (Number(state.params.eventDays ?? 7) !== 7) params.days = Number(state.params.eventDays)
-    if (state.params.eventType) params.type = state.params.eventType
-    writeHashQuery('events', params)
-  }
-  view.querySelectorAll('[data-days]').forEach((button) => button.addEventListener('click', () => {
-    state.params.eventDays = Number(button.dataset.days)
+  view.querySelectorAll('[data-range]').forEach((button) => button.addEventListener('click', () => {
+    state.params.eventRange = button.dataset.range
     listPages.events = 1
-    syncEventHash()
     pageEvents()
   }))
   $('#ev-type')?.addEventListener('change', (event) => {
     state.params.eventType = event.target.value
     listPages.events = 1
-    syncEventHash()
     pageEvents()
   })
   bindPager('events', async () => {
     syncEventHash()
     await pageEvents()
+  })
+}
+
+/* ---------------- 投诉反馈 ---------------- */
+const FEEDBACK_STATUS_PILL = { pending: 'warn', processing: 'warn', replied: '', resolved: 'ok', closed: '' }
+const FEEDBACK_REFUND_LABEL = { pending: '待财务复核', approved: '已同意', rejected: '已驳回', refunding: '退款中', refunded: '已退款', done: '已退款' }
+
+/** 翻页/换筛选先写 hash，否则刷新会还原回旧筛选（与埋点页一致）。 */
+const syncFeedbackHash = () => {
+  const hashParams = {}
+  if (Number(listPages.feedbacks ?? 1) > 1) hashParams.page = Number(listPages.feedbacks)
+  if (state.params.feedbackRange && state.params.feedbackRange !== '7d') hashParams.range = state.params.feedbackRange
+  if (state.params.feedbackStatus) hashParams.status = state.params.feedbackStatus
+  if (state.params.feedbackCategory) hashParams.category = state.params.feedbackCategory
+  if (state.params.feedbackQuery) hashParams.q = state.params.feedbackQuery
+  writeHashQuery('feedbacks', hashParams)
+}
+
+async function pageFeedbacks() {
+  const hashQuery = readHashQuery()
+  const restored = hydrateListState(hashQuery, {
+    page: Number(listPages.feedbacks ?? 1),
+    range: String(state.params.feedbackRange ?? '7d'),
+    status: String(state.params.feedbackStatus ?? ''),
+    category: String(state.params.feedbackCategory ?? ''),
+    q: String(state.params.feedbackQuery ?? ''),
+  })
+  listPages.feedbacks = Number(restored.page) > 0 ? Number(restored.page) : 1
+  // 区间只认白名单，脏 hash（range=abc）一律回退近 7 天，绝不拼进查询串。
+  const range = EVENT_RANGES.some(([key]) => key === restored.range) ? restored.range : '7d'
+  state.params.feedbackRange = range
+  state.params.feedbackStatus = String(restored.status ?? '')
+  state.params.feedbackCategory = String(restored.category ?? '')
+  state.params.feedbackQuery = String(restored.q ?? '')
+  const page = Number(listPages.feedbacks ?? 1)
+  const status = state.params.feedbackStatus
+  const category = state.params.feedbackCategory
+  const keyword = state.params.feedbackQuery
+  syncFeedbackHash()
+
+  const query = new URLSearchParams({ range, page: String(page), pageSize: '20' })
+  if (status) query.set('status', status)
+  if (category) query.set('category', category)
+  if (keyword) query.set('q', keyword)
+  const [stats, data] = await Promise.all([
+    api(`/admin/api/feedbacks/stats?range=${encodeURIComponent(range)}`),
+    api(`/admin/api/feedbacks?${query.toString()}`),
+  ])
+  const perms = new Set(state.me?.permissions ?? [])
+  const canWrite = perms.has('cs.feedback.write')
+  const canRefund = perms.has('cs.feedback.refund') && perms.has('finance.refund.create')
+  const totals = stats.totals ?? {}
+  const prev = stats.prevTotals ?? {}
+  const counts = data.counts ?? {}
+  const statusCount = counts.byStatus ?? {}
+  const categoryLabel = Object.fromEntries((stats.categories ?? []).map((item) => [item.code, item.label]))
+  const statusLabel = Object.fromEntries((stats.statuses ?? []).map((item) => [item.code, item.label]))
+  const replyText = stats.reply?.avgMinutes ? `${stats.reply.avgMinutes} 分钟` : '—'
+  const rowOf = (row) => {
+    const order = row.out_trade_no
+      ? `${esc(row.out_trade_no)}<div class="muted" style="font-size:11px">¥${Number(row.order_amount ?? 0).toFixed(2)} · ${esc(row.order_status ?? '')}</div>`
+      : '<span class="muted">—</span>'
+    const refund = row.refund_id
+      ? `<div style="font-size:11px">退款 #${row.refund_id} · ${esc(FEEDBACK_REFUND_LABEL[row.refund_status] ?? row.refund_status ?? '')} ¥${Number(row.refund_amount ?? 0).toFixed(2)}</div>`
+      : ''
+    return `<tr data-row="${row.id}">
+      <td class="mono">${esc(row.ticket_no ?? `#${row.id}`)}<div class="muted" style="font-size:11px">${esc(fmtTs(row.created_at))}</div></td>
+      <td>${row.user_id ? esc(row.user_account ?? `#${row.user_id}`) : '<span class="muted">未登录</span>'}${row.priority >= 2 ? ' <span class="pill bad">紧急</span>' : row.priority === 1 ? ' <span class="pill warn">重要</span>' : ''}</td>
+      <td>${esc(categoryLabel[row.category] ?? row.category)}</td>
+      <td style="max-width:320px">${esc(row.content)}${row.reply ? `<div style="font-size:11px;opacity:.8">回复：${esc(row.reply)}</div>` : ''}</td>
+      <td>${order}${refund}</td>
+      <td><span class="pill ${FEEDBACK_STATUS_PILL[row.status] ?? ''}">${esc(statusLabel[row.status] ?? row.status)}</span></td>
+      <td class="row-actions">
+        <button class="btn sm" data-detail="${row.id}">详情</button>
+        ${canWrite ? `<button class="btn sm primary" data-reply="${row.id}" data-info="${esc(row.ticket_no ?? '')}">回复</button>` : ''}
+        ${canRefund && row.order_id && !row.refund_id ? `<button class="btn sm danger" data-refund="${row.id}" data-info="${esc(`${row.ticket_no ?? ''} · ${row.out_trade_no ?? ''} · 剩余可退 ¥${Math.max(0, Number(row.order_amount ?? 0) - Number(row.order_refunded ?? 0)).toFixed(2)}`)}">退款</button>` : ''}
+      </td>
+    </tr>
+    <tr data-detail-row="${row.id}" hidden><td colspan="7" class="muted" style="background:var(--panel-2)">
+      <div style="display:grid;gap:6px">
+        <div><b>工单</b> ${esc(row.ticket_no ?? '')} · ${esc(categoryLabel[row.category] ?? row.category)} · 提交于 ${esc(fmtTs(row.created_at))}</div>
+        <div><b>用户</b> ${row.user_id ? esc(row.user_account ?? `#${row.user_id}`) : `未登录访客 ${esc(row.visitor_id ?? '')}`} · 联系方式 ${esc(row.contact ?? '—')}</div>
+        ${row.order_id ? `<div><b>订单</b> ${esc(row.out_trade_no ?? '')} · 金额 ¥${Number(row.order_amount ?? 0).toFixed(2)} · 已退 ¥${Number(row.order_refunded ?? 0).toFixed(2)} · 支付于 ${esc(fmtTs(row.order_paid_at))}${row.refund_id ? ` · 退款单 #${row.refund_id}（${esc(statusLabel[row.status] ?? '')}）` : ''}</div>` : ''}
+        ${row.drama_title ? `<div><b>剧目</b> ${esc(row.drama_title)}</div>` : ''}
+        <div><b>内容</b> ${esc(row.content)}</div>
+        ${row.reply ? `<div><b>回复</b> ${esc(row.reply)} <span class="muted">（${esc(row.replied_by_name ?? '')} · ${esc(fmtTs(row.replied_at))}）</span></div>` : ''}
+        ${row.admin_note ? `<div><b>处理备注</b> ${esc(row.admin_note).replaceAll('\n', '<br>')}</div>` : ''}
+        <div class="muted">IP ${esc(row.ip ?? '—')} · UA ${esc(row.ua ?? '—')}</div>
+        ${canWrite ? `<div class="row-actions">
+          <button class="btn sm" data-status="${row.id}" data-next="processing">受理</button>
+          <button class="btn sm" data-status="${row.id}" data-next="resolved">标记解决</button>
+          <button class="btn sm" data-status="${row.id}" data-next="closed">关闭</button>
+        </div>` : ''}
+      </div>
+    </td></tr>`
+  }
+
+  view.innerHTML = `
+    <div class="form-row" style="margin-bottom:12px">
+      <div class="subtabs">${EVENT_RANGES.map(([key, text]) => `<button class="pill ${range === key ? 'active' : ''}" data-range="${key}">${text}</button>`).join('')}</div>
+      <span class="spacer" style="flex:1"></span>
+      <span class="muted">${esc(stats.label ?? '')} · 北京时间 ${beijingTime(stats.from)} 起${stats.to ? ` 至 ${beijingTime(stats.to)}` : ' 至今'}</span>
+    </div>
+    <div class="cards">
+      ${card('工单总数', fmt(totals.tickets ?? 0), `件 · ${deltaText(totals.tickets, prev.tickets)}`)}
+      ${card('待处理', fmt(totals.open ?? 0), `件 · 含处理中`)}
+      ${card('已回复', fmt(totals.replied ?? 0), `件 · 平均首响 ${replyText}`)}
+      ${card('关联退款', fmt(totals.refunds ?? 0), '件 · 走财务复核')}
+      ${card('登录用户', fmt(totals.logged ?? 0), `件 · 可按用户去重`) }
+      ${card('匿名提交', fmt(totals.anonymous ?? 0), '件 · 需留联系方式')}
+    </div>
+    ${stats.oldestPending ? `<div class="panel" style="margin-top:16px"><h3>最久未处理<span class="spacer"></span></h3>
+      <p class="muted">${esc(stats.oldestPending.ticketNo ?? `#${stats.oldestPending.id}`)} · ${esc(stats.oldestPending.category)} · 提交于 ${esc(fmtTs(stats.oldestPending.createdAt))}</p></div>` : ''}
+    <div class="panel" style="margin-top:16px">
+      <h3>工单趋势 <span class="muted">${esc(stats.label ?? '')} · ${stats.bucket === 'hour' ? '按小时' : '按天'}</span></h3>
+      ${svgLineChart((stats.trend ?? []).map((row) => ({ ...row, day: row.bucket })), [{ key: 'tickets', label: '工单数', color: CHART_COLORS[0] }])}
+    </div>
+    <div class="split" style="margin-top:16px">
+      <div class="panel"><h3>分类分布</h3>${rankedBars(stats.byCategory ?? [], 'count', 'label', '件')}</div>
+      <div class="panel"><h3>状态分布</h3>${rankedBars(stats.byStatus ?? [], 'count', 'label', '件')}</div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <div class="form-row">
+        <span class="muted">工单 · ${esc(stats.label ?? '')} · 共 ${fmt(data.total ?? 0)} 件</span>
+        <span class="spacer" style="flex:1"></span>
+        <select id="fb-status" aria-label="状态筛选" style="width:150px">
+          <option value="">全部状态</option>
+          <option value="open" ${status === 'open' ? 'selected' : ''}>待处理（${Number(statusCount.pending ?? 0) + Number(statusCount.processing ?? 0)}）</option>
+          ${(stats.statuses ?? []).map((item) => `<option value="${esc(item.code)}" ${status === item.code ? 'selected' : ''}>${esc(item.label)}（${Number(statusCount[item.code] ?? 0)}）</option>`).join('')}
+        </select>
+        <select id="fb-category" aria-label="分类筛选" style="width:150px">
+          <option value="">全部分类</option>
+          ${(stats.categories ?? []).map((item) => `<option value="${esc(item.code)}" ${category === item.code ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}
+        </select>
+        <input id="fb-q" placeholder="工单号 / 内容 / 联系方式 / 订单号" value="${esc(keyword)}" style="width:260px" />
+        <button class="btn sm" id="fb-search">搜索</button>
+      </div>
+      ${table(['工单 / 时间', '用户', '分类', '内容 / 回复', '订单 / 退款', '状态', '操作'], (data.list ?? []).map(rowOf).length ? (data.list ?? []).map(rowOf) : ['<tr><td colspan="7" class="muted">该区间还没有投诉反馈：C 端「投诉与反馈」提交后会出现在这里。</td></tr>'])}
+      ${pager('feedbacks', page, data.pageSize, data.total, '件')}
+    </div>`
+
+  view.querySelectorAll('[data-range]').forEach((button) => button.addEventListener('click', () => {
+    state.params.feedbackRange = button.dataset.range
+    listPages.feedbacks = 1
+    syncFeedbackHash()
+    pageFeedbacks()
+  }))
+  const reload = () => {
+    syncFeedbackHash()
+    return pageFeedbacks()
+  }
+  $('#fb-status')?.addEventListener('change', (event) => {
+    state.params.feedbackStatus = event.target.value
+    listPages.feedbacks = 1
+    reload()
+  })
+  $('#fb-category')?.addEventListener('change', (event) => {
+    state.params.feedbackCategory = event.target.value
+    listPages.feedbacks = 1
+    reload()
+  })
+  const runSearch = () => {
+    state.params.feedbackQuery = String($('#fb-q')?.value ?? '').trim()
+    listPages.feedbacks = 1
+    reload()
+  }
+  $('#fb-search')?.addEventListener('click', runSearch)
+  $('#fb-q')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      runSearch()
+    }
+  })
+  view.querySelectorAll('[data-detail]').forEach((button) => button.addEventListener('click', () => {
+    const row = view.querySelector(`[data-detail-row="${button.dataset.detail}"]`)
+    if (row) row.hidden = !row.hidden
+  }))
+  view.querySelectorAll('[data-reply]').forEach((button) => button.addEventListener('click', async () => {
+    const reply = await askText({
+      title: `回复工单 ${button.dataset.info ?? ''}`,
+      label: '回复内容',
+      hint: '用户在「投诉与反馈」里能看到这条回复；保存后状态自动变成已回复。',
+      minLength: 2,
+      confirmText: '发送回复',
+    })
+    if (reply === null) return
+    try {
+      await api(`/admin/api/feedbacks/${button.dataset.reply}/reply`, { method: 'POST', body: { reply } })
+      toast('已回复')
+    } catch (error) { toast(error.message) }
+    await reload()
+  }))
+  view.querySelectorAll('[data-status]').forEach((button) => button.addEventListener('click', async () => {
+    try {
+      await api(`/admin/api/feedbacks/${button.dataset.status}/status`, { method: 'POST', body: { status: button.dataset.next } })
+      toast('状态已更新')
+    } catch (error) { toast(error.message) }
+    await reload()
+  }))
+  view.querySelectorAll('[data-refund]').forEach((button) => button.addEventListener('click', async () => {
+    const reason = await askText({
+      title: '从反馈发起退款',
+      label: '退款原因',
+      value: '',
+      hint: `${button.dataset.info ?? ''}\n默认退剩余全额，提交后需财务双人复核通过才真正退款。`,
+      minLength: 4,
+      confirmText: '提交退款申请',
+    })
+    if (reason === null) return
+    try {
+      const result = await api(`/admin/api/feedbacks/${button.dataset.refund}/refund`, { method: 'POST', body: { reason } })
+      toast(`已创建退款单 #${result.refund?.id ?? ''}，等待财务复核`)
+    } catch (error) { toast(error.message) }
+    await reload()
+  }))
+  bindPager('feedbacks', async () => {
+    syncFeedbackHash()
+    await pageFeedbacks()
   })
 }
 

@@ -102,8 +102,25 @@
 |---|---|---|
 | GET | `/admin/api/analytics?days=7` | 播放、用户、收入、订阅、内容、访客、逐级转化漏斗及日趋势。`conversion[]` 的 `rate` 以相邻阶段为分母 |
 | GET | `/admin/api/events?days=7&type=&page=1&pageSize=20` | 埋点明细分页；返回 `{total,page,pageSize,visitors,byType,byDay,list}` |
+| GET | `/admin/api/events/stats?range=today\|yesterday\|7d\|30d` | 埋点概览：`totals`（含 `users`/`anonymous`/`loggedEvents`/`anonymousEvents`）、`prevTotals`、`trend`（今天按小时、其余按天，空桶补 0）、排行榜与 `byType` |
+
+埋点去重身份固定为 `user_id → visitor_id → ip`：登录用户按账号算一个人，换设备或换 IP 不会重复计数；未登录才退回 `visitor_id`，最后兜底 IP。明细接口同样接受 `range`（与 `days` 互斥，`range` 优先）。
 
 `POST /api/track` 只接受白名单事件：`session_start`、`page_view`、`impression`、`detail_view`、`episode_click`、`play_start`、`play_end`、`play_error`、`paywall_view`、`paywall_click`、`login_open`、`login_success`、`favorite`、`search`、`share`、`category_filter`、`rank_view`、`track_change`、`lp_view`、`lp_cta_click`、`trial_start`、`trial_end`、`order_created`、`payment_success`。C 端通过 `x-mh-visitor` 请求头和请求体 `visitorId` 上报匿名访客，订单落库时保存同一 `visitor_id`。
+
+## 投诉反馈
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/admin/api/feedbacks/stats?range=today\|yesterday\|7d\|30d` | 工单概览：`totals`（工单总数/待处理/已回复/关联退款/登录用户/匿名）、`prevTotals`、`trend`、`byCategory`、`byStatus`、`reply{count,avgMinutes}`、`oldestPending` |
+| GET | `/admin/api/feedbacks?range=&status=open\|pending\|processing\|replied\|resolved\|closed&category=&q=&page=1&pageSize=20` | 工单分页；返回 `{list,total,page,pageSize,counts}`，`counts` 忽略状态筛选只保留区间，用于角标 |
+| GET | `/admin/api/feedbacks/:id` | 工单详情 + 订单 + 该单退款单 + 同订单其它工单 |
+| POST | `/admin/api/feedbacks/:id/reply` | `{reply}`，回复后状态推进为 `replied`；需要 `cs.feedback.write` |
+| POST | `/admin/api/feedbacks/:id/status` | `{status,note}` 受理/解决/关闭，备注追加进 `admin_note` |
+| POST | `/admin/api/feedbacks/:id/refund` | `{amount?,reason}` 从工单发起退款，金额默认剩余可退全额；同单重复发起回 409 `refund_pending_exists`。需要 `cs.feedback.refund` + `finance.refund.create`，退款单仍需财务双人复核 |
+
+权限：`cs.feedback`（读工单与统计）、`cs.feedback.read`、`cs.feedback.write`、`cs.feedback.refund`。`cs` 角色默认拿到前三个，退款权限只给财务角色。
+
+C 端：`GET /api/feedback/meta`（分类/状态字典）、`GET /api/feedback`（需登录，本人最近 50 条）、`POST /api/feedback`（`{category,content,contact,orderNo|orderId,dramaId}`，未登录也可提交但必须留联系方式）。
 
 ## 直播
 | GET | `/admin/api/live` | `{installed,running,pid,rtmpBase,hlsBase,streams,lastError}` |

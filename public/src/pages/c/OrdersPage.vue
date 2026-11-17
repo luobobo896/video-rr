@@ -138,6 +138,7 @@ onMounted(load);
           <button class="btn btn--ghost btn--sm" type="button" @click="expanded = expanded === row.outTradeNo ? '' : row.outTradeNo">
             {{ expanded === row.outTradeNo ? '收起' : '订单详情' }}
           </button>
+          <a class="btn btn--quiet btn--sm" :href="`#/feedback?order=${encodeURIComponent(row.outTradeNo)}`">有问题反馈</a>
         </div>
       </div>
       <div v-if="expanded === row.outTradeNo" class="detail-facts" style="grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 12px">

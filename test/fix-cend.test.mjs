@@ -384,10 +384,10 @@ test('静态断言：购买单选组有 fieldset/legend，FilmArt 首屏不挂 v
   assert.match(film, /v-if="film\.previewUrl && previewReady"/);
 });
 
-test('静态断言：22 个页面路由级分包，首页保持同步', () => {
+test('静态断言：23 个页面路由级分包，首页保持同步', () => {
   const source = src('public/src/App.vue');
   assert.match(source, /defineAsyncComponent/);
-  assert.equal((source.match(/defineAsyncComponent\(\(\) => import\(/g) ?? []).length, 21);
+  assert.equal((source.match(/defineAsyncComponent\(\(\) => import\(/g) ?? []).length, 22);
   assert.match(source, /import HomePage from '\.\/pages\/c\/HomePage\.vue'/);
   assert.doesNotMatch(source, /import DetailPage from '\.\/pages\/c\/DetailPage\.vue'/);
 });

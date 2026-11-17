@@ -94,6 +94,10 @@ onMounted(load);
         <div class="panel-head"><h3>我的订单</h3><Icon name="chevron" /></div>
         <p class="small muted">支付记录与待支付订单</p>
       </a>
+      <a class="panel" :href="href('/feedback')">
+        <div class="panel-head"><h3>投诉与反馈</h3><Icon name="chevron" /></div>
+        <p class="small muted">播放、付费问题与客服回复</p>
+      </a>
     </div>
     <section>
       <div class="section-head">

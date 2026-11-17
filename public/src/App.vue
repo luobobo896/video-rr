@@ -21,6 +21,7 @@ const FavoritesPage = defineAsyncComponent(() => import('./pages/c/FavoritesPage
 const HistoryPage = defineAsyncComponent(() => import('./pages/c/HistoryPage.vue'));
 const MessagesPage = defineAsyncComponent(() => import('./pages/c/MessagesPage.vue'));
 const OrdersPage = defineAsyncComponent(() => import('./pages/c/OrdersPage.vue'));
+const FeedbackPage = defineAsyncComponent(() => import('./pages/c/FeedbackPage.vue'));
 const ProfileEditPage = defineAsyncComponent(() => import('./pages/c/ProfileEditPage.vue'));
 const PromotionPage = defineAsyncComponent(() => import('./pages/c/PromotionPage.vue'));
 const MePage = defineAsyncComponent(() => import('./pages/c/MePage.vue'));
@@ -47,6 +48,7 @@ const C_PAGES = {
   '/history': HistoryPage,
   '/messages': MessagesPage,
   '/orders': OrdersPage,
+  '/feedback': FeedbackPage,
   '/profile-edit': ProfileEditPage,
   '/promotion': PromotionPage,
   '/me': MePage,
@@ -94,6 +96,7 @@ const pageTitle = computed(() => {
     '/history': '观看历史 · 影巢',
     '/messages': '消息 · 影巢',
     '/orders': '我的订单 · 影巢',
+    '/feedback': '投诉与反馈 · 影巢',
     '/profile-edit': '编辑资料 · 影巢',
     '/promotion': '佣金推广 · 影巢',
     '/me': '个人中心 · 影巢',

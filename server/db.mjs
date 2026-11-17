@@ -631,6 +631,10 @@ export const MENU_TREE = [
   { code: 'user.manage', name: '禁用/解禁用户', type: 'button', parent: 'user.list', sort: 20 },
   { code: 'user.password', name: '修改/重置用户密码', type: 'button', parent: 'user.list', sort: 25 },
   { code: 'user.login.assist', name: '代发登录验证码', type: 'button', parent: 'user.list', sort: 30 },
+  { code: 'cs.feedback', name: '投诉反馈', type: 'menu', parent: 'dir:user', sort: 15, path: '/feedbacks', icon: '📮' },
+  { code: 'cs.feedback.read', name: '查看投诉反馈', type: 'button', parent: 'cs.feedback', sort: 10 },
+  { code: 'cs.feedback.write', name: '回复与处理投诉', type: 'button', parent: 'cs.feedback', sort: 20 },
+  { code: 'cs.feedback.refund', name: '从投诉发起退款', type: 'button', parent: 'cs.feedback', sort: 30 },
   { code: 'cs.toolkit', name: '客服工具', type: 'menu', parent: 'dir:user', sort: 20, path: '/cs', icon: '🎧' },
   { code: 'cs.toolkit.grant', name: '补发权益', type: 'button', parent: 'cs.toolkit', sort: 10 },
 
@@ -673,8 +677,10 @@ export const ROLES = [
     'ops.distribution', 'growth.distribution.read', 'growth.distribution.write',
     'growth.distribution.settle', 'ops.distribution-config',
   ]],
-  ['cs', '客服', '查单、补发权益、用户查看', [
-    'dashboard', 'commerce.order', 'finance.order.read', 'user.list', 'user.read', 'user.login.assist', 'cs.toolkit', 'cs.toolkit.grant',
+  ['cs', '客服', '查单、补发权益、用户查看、投诉处理', [
+    'dashboard', 'commerce.order', 'finance.order.read', 'user.list', 'user.read', 'user.login.assist',
+    'cs.feedback', 'cs.feedback.read', 'cs.feedback.write',
+    'cs.toolkit', 'cs.toolkit.grant',
   ]],
   ['auditor', '审核员', '内容审核 + 审计只读', [
     'dashboard', 'content.review', 'content.review.write', 'system.audit', 'audit.read', 'content.drama', 'content.drama.read',
@@ -720,6 +726,7 @@ export const DEFAULT_ADMIN_MENUS = [
   ]],
   ['users', '用户', 40, [
     ['C 端用户', '/users', 'user.read', '👥'],
+    ['投诉反馈', '/feedbacks', 'cs.feedback.read', '📮'],
   ]],
   ['system', '系统设置', 50, [
     ['菜单管理', '/menus', 'system.menu', '🗂️'],
@@ -1367,6 +1374,56 @@ export function syncMenuCatalog() {
     }
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('growth.contentRoleSyncVersion', '1')").run()
   }
+  // 投诉反馈上线：给客服角色补一次菜单与处理权限（refund 不在此列，仍归财务权限）
+  const csRoleSync = db.prepare("SELECT value FROM settings WHERE key = 'cs.feedbackRoleSyncVersion'").get()
+  const csRoleVersion = Number(String(csRoleSync?.value ?? '0').replaceAll('"', '')) || 0
+  if (csRoleVersion < 1) {
+    const csRole = roles.find((row) => row.code === 'cs')
+    // 角色还没种子化的库不写版本号，下次启动再补，避免「补丁跑过一次就再也不会重试」
+    if (csRole) {
+      for (const code of expandWithAncestors(['cs.feedback', 'cs.feedback.read', 'cs.feedback.write'])) {
+        insertRolePerm.run(csRole.id, code)
+      }
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('cs.feedbackRoleSyncVersion', '1')").run()
+    }
+  }
+}
+
+/**
+ * 投诉反馈：C 端提交、B 端处理。自带建表（幂等），不依赖主 DDL 大脚本。
+ * 状态：pending 待处理 → processing 处理中 → replied 已回复 → resolved 已解决 / closed 已关闭；
+ * 从反馈发起退款时写 refund_id，退款本身仍走 refunds 表的双人复核。
+ */
+export function ensureFeedbackSchema() {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS feedbacks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_no TEXT UNIQUE,
+  user_id INTEGER,
+  visitor_id TEXT,
+  order_id INTEGER,
+  drama_id INTEGER,
+  category TEXT NOT NULL DEFAULT 'other',
+  content TEXT NOT NULL,
+  contact TEXT,
+  source TEXT NOT NULL DEFAULT 'web',
+  status TEXT NOT NULL DEFAULT 'pending',
+  priority INTEGER NOT NULL DEFAULT 0,
+  reply TEXT,
+  replied_by INTEGER,
+  replied_at TEXT,
+  refund_id INTEGER,
+  admin_note TEXT,
+  ip TEXT,
+  ua TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_feedbacks_status ON feedbacks(status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_feedbacks_user ON feedbacks(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_feedbacks_order ON feedbacks(order_id);
+CREATE INDEX IF NOT EXISTS idx_feedbacks_created ON feedbacks(created_at)
+`)
 }
 
 /**
@@ -2279,6 +2336,7 @@ export function ensureSettings() {
 // 放在这里而不是只在 index.mjs 调，是为了测试与脚本（导入、探针）导入 db 时也有一致的表结构。
 ensureOpsSchema()
 ensureGrowthSchema()
+ensureFeedbackSchema()
 ensureAdultTagSeed()
 ensureAdultDramaInvariant()
 ensureAdultPolicyInvariant()
