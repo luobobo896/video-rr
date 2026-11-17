@@ -162,6 +162,24 @@ export function mediaUrl(url) {
   return `${MEDIA_BASE}${url}`;
 }
 
+/** 站内图（/media/images/xxx.jpg 带时间戳 query）换成指定宽度的 WebP 变体，其它地址原样返回。 */
+const IMAGE_VARIANT_RE = /\/(media\/images\/)([^/?#]+?)\.(jpe?g|png)(\?[^#]*)?(#.*)?$/i;
+
+export function imageVariant(url, width) {
+  const size = Number(width);
+  if (!url || !Number.isFinite(size) || size <= 0) return url;
+  const match = IMAGE_VARIANT_RE.exec(url);
+  if (!match) return url;
+  return url.replace(match[0], `/${match[1]}variants/${match[2]}-w${size}.webp${match[4] ?? ''}${match[5] ?? ''}`);
+}
+
+/** 卡片封面按设备像素比给一组候选宽度，浏览器的 srcset 自己挑最小的够用那张。 */
+export function imageSrcset(url, widths = [320, 640, 1280]) {
+  const list = widths.filter((width) => imageVariant(url, width) !== url);
+  if (!list.length) return '';
+  return list.map((width) => `${imageVariant(url, width)} ${width}w`).join(', ');
+}
+
 export function hlsUrl(path) {
   return mediaUrl(path);
 }

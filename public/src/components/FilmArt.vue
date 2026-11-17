@@ -1,6 +1,7 @@
 <script setup>
-import { nextTick, ref } from 'vue';
-defineProps({
+import { computed, nextTick, ref } from 'vue';
+import { imageSrcset, imageVariant } from '../api.js';
+const props = defineProps({
   film: { type: Object, required: true },
   badge: { type: Boolean, default: true },
   ratio: { type: String, default: 'portrait' }
@@ -17,6 +18,20 @@ function fallbackArt(film) {
   let hash = 0
   for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) % 9973
   return `./art/${FALLBACK_ART[hash % FALLBACK_ART.length]}.jpg`
+}
+
+// 原图平均 384KB（最大 2.9MB），一页 24 张就是 9MB；优先取 WebP 变体，取不到再回退原图。
+const coverSrcset = computed(() => imageSrcset(props.film?.coverUrl))
+const coverSrc = computed(() => imageVariant(props.film?.coverUrl, props.ratio === 'portrait' ? 320 : 640) || props.film?.coverUrl)
+// 竖版卡片一格约 180px 宽，横版/大图按视口宽度走。
+const coverSizes = computed(() => (props.ratio === 'portrait' ? '(max-width: 520px) 45vw, 200px' : '(max-width: 900px) 100vw, 900px'))
+
+function onCoverError(event) {
+  const img = event?.target;
+  if (!img || img.dataset.fallback === '1') return;
+  img.dataset.fallback = '1';
+  img.removeAttribute('srcset');
+  img.src = props.film?.coverUrl ?? img.src;
 }
 
 // 每张卡一个 <video> 会让首屏同时挂几十个空标签（多出几十个媒体元素与连接）：
@@ -46,7 +61,16 @@ function stopPreview(event) {
     @mouseenter="playPreview"
     @mouseleave="stopPreview"
   >
-    <img v-if="film.coverUrl" :src="film.coverUrl" alt="" loading="lazy" />
+    <img
+      v-if="film.coverUrl"
+      :src="coverSrc"
+      :srcset="coverSrcset || undefined"
+      :sizes="coverSrcset ? coverSizes : undefined"
+      alt=""
+      loading="lazy"
+      decoding="async"
+      @error="onCoverError"
+    />
     <template v-else>
       <img class="film-fallback" :src="fallbackArt(film)" alt="" loading="lazy" />
       <span class="film-cjk">{{ film.title[0] }}</span>

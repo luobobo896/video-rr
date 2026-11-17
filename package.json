@@ -18,6 +18,7 @@
     "reset-db": "node scripts/reset-db.mjs",
     "previews": "node scripts/generate-previews.mjs",
     "posters": "node scripts/build-poster-wall.mjs",
+    "images:variants": "node scripts/build-image-variants.mjs",
     "check:tokens": "node scripts/sync-tokens.mjs --check",
     "check:frontend": "node --check public/base.js && node --check public/main.js && node --check public/app.js && node --check public/i18n.js && node --check public/track-match.js && node --check public/poster-wall-view.js && node --check public/qr-code.js && node --check admin/base.js && node --check admin/main.js && node --check admin/app.js && node scripts/check-frontend.mjs",
     "check": "npm run check:tokens && npm run check:frontend",
