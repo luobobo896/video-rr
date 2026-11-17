@@ -363,11 +363,17 @@ table input:focus, table select:focus {
 .donut-legend b { color: var(--text); font-variant-numeric: tabular-nums; }
 
 .ranked-bars { display: grid; gap: 9px; margin-top: 8px; }
-.ranked-row { display: grid; grid-template-columns: minmax(76px, 120px) minmax(0, 1fr) 76px; align-items: center; gap: 10px; font-size: 12px; }
+.ranked-row { display: grid; grid-template-columns: minmax(96px, 190px) minmax(0, 1fr) 104px; align-items: center; gap: 10px; font-size: 12px; }
 .ranked-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
 .ranked-track { height: 12px; border-radius: 6px; background: rgba(255,255,255,.05); overflow: hidden; }
 .ranked-track i { display: block; height: 100%; border-radius: 6px; min-width: 3px; }
-.ranked-row b { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ranked-row b { display: flex; align-items: baseline; justify-content: flex-end; gap: 6px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ranked-pct { color: var(--text-3); font-size: 11px; font-weight: 500; }
+
+/* 分布图网格：四张同尺寸面板，2×2；标题右侧是维度说明 */
+.chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; align-items: start; }
+.chart-grid > .panel { min-width: 0; }
+@media (max-width: 900px) { .chart-grid { grid-template-columns: 1fr; } }
 
 .truncate { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -790,7 +796,8 @@ table input:focus, table select:focus {
   .policy-bulk-actions .btn { flex: 1 1 0; }
   .donut-wrap { flex-direction: column; align-items: flex-start; gap: 14px; }
   .funnel-row { grid-template-columns: 82px minmax(0, 1fr) 40px; gap: 7px; }
-  .ranked-row { grid-template-columns: 74px minmax(0, 1fr) 64px; gap: 7px; }
+  .ranked-row { grid-template-columns: 96px minmax(0, 1fr) 88px; gap: 6px; }
+  .ranked-label { white-space: normal; line-height: 1.3; }
   .login-card input,
   .modal-body input,
   .modal-body select,

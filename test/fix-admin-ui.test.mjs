@@ -437,9 +437,16 @@ test('后端统计不再吐「(未知)」，热门页面只统计有路径的浏
   assert.match(source, /WHERE \$\{clause\} AND te\.path IS NOT NULL AND te\.path <> ''/)
 })
 
-test('中文页名相同的入口合并成一行，不留重复（静态断言）', () => {
-  assert.match(appJs, /const pageMerged = new Map\(\)/)
-  assert.match(appJs, /const pageRows = \[\.\.\.pageMerged\.values\(\)\]\.sort\(\(a, b\) => b\.value - a\.value\)\.slice\(0, 10\)/)
+test('埋点页只留设备/系统/地区/事件四张分布图，趋势与排行下线（静态断言）', () => {
+  assert.match(appJs, /<div class="chart-grid">/)
+  for (const title of ['设备分布', '系统分布', '地区分布', '事件分布']) {
+    assert.match(appJs, new RegExp(`distPanel\\('${title}'`), `缺少${title}`)
+  }
+  // 需求：图表只留这四张，事件趋势与各类 Top 排行不再渲染
+  for (const gone of ['事件趋势 <span', '热门页面 Top 10', '热门事件 Top 12', '热门动作 Top 10', '热门剧目 Top 10']) {
+    assert.equal(appJs.includes(gone), false, `${gone} 应已下线`)
+  }
+  assert.match(appJs, /rankedBars\(rows, key, labelKey, '', \{ total:/)
 })
 
 test('非路由的 path 不假装是页面，详情页与登录页都有中文名（行为断言）', () => {

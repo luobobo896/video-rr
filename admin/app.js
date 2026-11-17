@@ -4269,7 +4269,7 @@ function donutChart(segments, centerLabel = '总计') {
   </div>${table}`
 }
 
-function rankedBars(rows, key, labelKey, unit = '') {
+function rankedBars(rows, key, labelKey, unit = '', { total = 0 } = {}) {
   const list = (rows ?? []).filter(Boolean).slice(0, 8)
   if (!list.length) return '<div class="chart-empty">该区间暂无数据</div>'
   const max = Math.max(1, ...list.map((row) => Number(row[key] ?? 0)))
@@ -4279,10 +4279,12 @@ function rankedBars(rows, key, labelKey, unit = '') {
   )
   return `<div class="ranked-bars">${list.map((row, index) => {
     const value = Number(row[key] ?? 0)
+    // 传了 total 才显示占比：分布图看份额，排行图看绝对值
+    const pct = total > 0 ? `<span class="ranked-pct">${((value / total) * 100).toFixed(1)}%</span>` : ''
     return `<div class="ranked-row">
       <span class="ranked-label" title="${esc(row.title ?? row[labelKey] ?? '')}">${esc(row[labelKey] ?? '—')}</span>
       <span class="ranked-track"><i style="width:${Math.max(2, Math.round((value / max) * 100))}%;background:${CHART_COLORS[index % CHART_COLORS.length]}"></i></span>
-      <b>${fmt(value)}${unit}</b>
+      <b>${fmt(value)}${unit}${pct}</b>
     </div>`
   }).join('')}</div>${table}`
 }
@@ -5879,24 +5881,13 @@ async function pageEvents() {
   ])
   const totals = stats.totals ?? {}
   const prev = stats.prevTotals ?? {}
-  const typeRows = (stats.byType ?? []).map((row) => ({ label: EVENT_LABEL[row.type] ?? '其他事件', value: row.n }))
-  const kindRows = (stats.byEventType ?? []).map((row) => ({ label: EVENT_TYPE_LABEL[row.eventType] ?? '其他行为', value: row.n }))
-  // 同一个页面在不同入口写法不同（#/home 与 /），翻成中文后同名的要合并，别让「首页」占两行。
-  const pageMerged = new Map()
-  for (const row of stats.topPages ?? []) {
-    const label = pageLabelOf(row.path)
-    const prevRow = pageMerged.get(label)
-    if (prevRow) {
-      prevRow.value += Number(row.n ?? 0)
-      prevRow.title = `${prevRow.title} ${row.path ?? ''}`.trim()
-    } else {
-      pageMerged.set(label, { label, value: Number(row.n ?? 0), title: String(row.path ?? '') })
-    }
-  }
-  const pageRows = [...pageMerged.values()].sort((a, b) => b.value - a.value).slice(0, 10)
-  const eventRows = (stats.topEvents ?? []).map((row) => ({ label: eventCodeLabelOf(row.code), value: row.n, title: row.code ?? '' }))
-  const actionRows = (stats.topActions ?? []).map((row) => ({ label: String(row.action ?? '').trim() || '未记录动作', value: row.n }))
+  const typeRows = (stats.byType ?? []).map((row) => ({ label: EVENT_LABEL[row.type] ?? '其他事件', n: row.n }))
   const stayText = `${(Number(totals.avgStayMs ?? 0) / 1000).toFixed(1)}s`
+  // 四张分布图共用一套口径：条数 + 占比，顶部只留四种维度，趋势/排行按需求下线。
+  const totalOf = (rows, key) => (rows ?? []).reduce((sum, row) => sum + Number(row[key] ?? 0), 0)
+  const distPanel = (title, hint, rows, key = 'n', labelKey = 'label') =>
+    `<div class="panel"><h3>${title} <span class="muted">${hint}</span></h3>${rankedBars(rows, key, labelKey, '', { total: totalOf(rows, key) })}</div>`
+  const regionRows = stats.regions ?? []
 
   view.innerHTML = `
     <div class="form-row" style="margin-bottom:12px">
@@ -5914,29 +5905,11 @@ async function pageEvents() {
       ${card('播放开始', fmt(totals.plays ?? 0), `次 · 搜索 ${fmt(totals.searches ?? 0)}`)}
       ${card('平均停留', stayText, `每次离开 · ${fmt(totals.sessions ?? 0)} 次会话`)}
     </div>
-    <div class="panel">
-      <h3>事件趋势 <span class="muted">${esc(stats.label ?? '')} · ${stats.bucket === 'hour' ? '按小时' : '按天'} · 共 ${fmt(totals.events ?? 0)} 条 / ${fmt(totals.visitors ?? 0)} 人</span></h3>
-      ${svgLineChart(stats.trend ?? [], [
-        { key: 'events', label: '事件数', color: CHART_COLORS[0] },
-        { key: 'visitors', label: '独立访客', color: CHART_COLORS[1] },
-        { key: 'pageViews', label: '页面浏览', color: CHART_COLORS[3] },
-      ])}
-    </div>
-    <div class="split" style="margin-top:16px">
-      <div class="panel"><h3>事件分布</h3>${rankedBars(typeRows, 'value', 'label')}</div>
-      <div class="panel"><h3>事件类型</h3>${rankedBars(kindRows, 'value', 'label')}</div>
-    </div>
-    <div class="split" style="margin-top:16px">
-      <div class="panel"><h3>热门页面 Top 10</h3>${rankedBars(pageRows, 'value', 'label')}</div>
-      <div class="panel"><h3>热门事件 Top 12</h3>${rankedBars(eventRows, 'value', 'label')}</div>
-    </div>
-    <div class="split" style="margin-top:16px">
-      <div class="panel"><h3>热门动作 Top 10</h3>${rankedBars(actionRows, 'value', 'label')}</div>
-      <div class="panel"><h3>热门剧目 Top 10</h3>${rankedBars(stats.topDramas ?? [], 'n', 'title')}</div>
-    </div>
-    <div class="split" style="margin-top:16px">
-      <div class="panel"><h3>设备分布</h3>${rankedBars(stats.devices ?? [], 'n', 'label')}</div>
-      <div class="panel"><h3>系统分布</h3>${rankedBars(stats.systems ?? [], 'n', 'label')}</div>
+    <div class="chart-grid">
+      ${distPanel('设备分布', '机型 · 浏览器', stats.devices)}
+      ${distPanel('系统分布', '操作系统版本', stats.systems)}
+      ${distPanel('地区分布', `${regionRows.length} 个地区 · 按 IP 归属地`, regionRows)}
+      ${distPanel('事件分布', '按事件名', typeRows)}
     </div>
     <div class="panel" style="margin-top:16px">
       <div class="form-row">
@@ -5955,7 +5928,7 @@ async function pageEvents() {
             <td>${esc(EVENT_LABEL[row.type] ?? '其他事件')}<div class="muted" style="font-size:11px">${esc(eventCodeLabelOf(row.event_code))}</div></td>
             <td style="white-space:nowrap">${esc(EVENT_TYPE_LABEL[row.event_type ?? 0] ?? '其他行为')}</td>
             <td style="white-space:nowrap">${esc(EVENT_OP_LABEL[row.event_op ?? 0] ?? '默认')}</td>
-            <td>${row.account ? esc(row.account) : (row.userEmail ? esc(row.userEmail) : (row.user_id ? `#${row.user_id}` : '游客'))}</td>
+            <td style="white-space:nowrap">${row.account ? esc(row.account) : (row.userEmail ? esc(row.userEmail) : (row.user_id ? `#${row.user_id}` : '游客'))}</td>
             <td style="white-space:nowrap"><span class="mono muted">${esc(row.ip ?? '—')}</span>${row.region ? `<div style="font-size:11px;opacity:.75">${esc(row.region)}</div>` : ''}</td>
             <td class="muted" style="max-width:200px">${esc([row.device, row.os].filter(Boolean).join(' / ') || '—')}</td>
             <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(row.page_url ?? row.path ?? '')}">${esc(pageLabelOf(row.path, row.page_url))}</td>
