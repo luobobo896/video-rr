@@ -5877,7 +5877,19 @@ async function pageEvents() {
   const prev = stats.prevTotals ?? {}
   const typeRows = (stats.byType ?? []).map((row) => ({ label: EVENT_LABEL[row.type] ?? '其他事件', value: row.n }))
   const kindRows = (stats.byEventType ?? []).map((row) => ({ label: EVENT_TYPE_LABEL[row.eventType] ?? '其他行为', value: row.n }))
-  const pageRows = (stats.topPages ?? []).map((row) => ({ label: pageLabelOf(row.path), value: row.n, title: row.path ?? '' }))
+  // 同一个页面在不同入口写法不同（#/home 与 /），翻成中文后同名的要合并，别让「首页」占两行。
+  const pageMerged = new Map()
+  for (const row of stats.topPages ?? []) {
+    const label = pageLabelOf(row.path)
+    const prevRow = pageMerged.get(label)
+    if (prevRow) {
+      prevRow.value += Number(row.n ?? 0)
+      prevRow.title = `${prevRow.title} ${row.path ?? ''}`.trim()
+    } else {
+      pageMerged.set(label, { label, value: Number(row.n ?? 0), title: String(row.path ?? '') })
+    }
+  }
+  const pageRows = [...pageMerged.values()].sort((a, b) => b.value - a.value).slice(0, 10)
   const eventRows = (stats.topEvents ?? []).map((row) => ({ label: eventCodeLabelOf(row.code), value: row.n, title: row.code ?? '' }))
   const actionRows = (stats.topActions ?? []).map((row) => ({ label: String(row.action ?? '').trim() || '未记录动作', value: row.n }))
   const stayText = `${(Number(totals.avgStayMs ?? 0) / 1000).toFixed(1)}s`

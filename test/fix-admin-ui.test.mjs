@@ -436,3 +436,8 @@ test('后端统计不再吐「(未知)」，热门页面只统计有路径的浏
   assert.equal(source.includes("'(未知)'"), false, '后端不该输出「(未知)」占位')
   assert.match(source, /WHERE \$\{clause\} AND te\.path IS NOT NULL AND te\.path <> ''/)
 })
+
+test('中文页名相同的入口合并成一行，不留重复（静态断言）', () => {
+  assert.match(appJs, /const pageMerged = new Map\(\)/)
+  assert.match(appJs, /const pageRows = \[\.\.\.pageMerged\.values\(\)\]\.sort\(\(a, b\) => b\.value - a\.value\)\.slice\(0, 10\)/)
+})
