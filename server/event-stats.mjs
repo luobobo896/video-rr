@@ -141,9 +141,12 @@ function trendOf(win, now = Date.now()) {
 
 function rankingsOf(win) {
   const { clause, args } = rangeOf(win)
-  const topPages = db.prepare(`SELECT COALESCE(NULLIF(te.path, ''), te.page_url, '(未知)') AS path,
+  // 热门页面只算有页面路径的浏览：曝光、播放这类行为事件没有页面，混进来会顶掉真实页面排行。
+  const topPages = db.prepare(`SELECT te.path AS path,
       COUNT(*) AS n, COUNT(DISTINCT ${IDENTITY}) AS visitors
-    FROM track_events te WHERE ${clause} GROUP BY path ORDER BY n DESC LIMIT 10`).all(...args)
+    FROM track_events te
+    WHERE ${clause} AND te.path IS NOT NULL AND te.path <> ''
+    GROUP BY path ORDER BY n DESC LIMIT 10`).all(...args)
   const topEvents = db.prepare(`SELECT COALESCE(NULLIF(te.event_code, ''), te.type) AS code, te.type, COUNT(*) AS n
     FROM track_events te WHERE ${clause} GROUP BY code ORDER BY n DESC LIMIT 12`).all(...args)
   const topActions = db.prepare(`SELECT te.action AS action, COUNT(*) AS n

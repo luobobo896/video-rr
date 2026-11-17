@@ -4149,7 +4149,7 @@ function pagePathOf(value) {
 /** 页面路径 → 中文名。id 这类对运营无意义的片段一律不展示。 */
 function pageLabelOf(path, pageUrl) {
   const normalized = pagePathOf(path || pageUrl)
-  if (!normalized) return '未记录页面'
+  if (!normalized) return '无页面信息'
   const direct = PAGE_LABEL[normalized]
   if (direct) return direct
   const category = normalized.match(/^\/category\/([A-Za-z]+)$/)

@@ -403,7 +403,7 @@ test('埋点页面与事件 code 一律翻成中文（行为断言）', () => {
     ['/play/3764/1', '播放页'],
   ]
   for (const [input, expected] of cases) assert.equal(helpers.pageLabelOf(input), expected, input)
-  assert.equal(helpers.pageLabelOf(''), '未记录页面')
+  assert.equal(helpers.pageLabelOf(''), '无页面信息')
   assert.equal(helpers.pageLabelOf('#/no-such-page'), '其他页面')
   assert.equal(helpers.pageLabelOf(undefined, 'https://x/video/#/vip'), '会员')
 
@@ -428,4 +428,11 @@ test('事件类型 0 不再叫「未知」，排行与明细都有中文兜底�
   assert.match(appJs, /pageLabelOf\(row\.path, row\.page_url\)/)
   assert.match(appJs, /eventCodeLabelOf\(row\.event_code\)/)
   assert.match(appJs, /row\.title \?\? row\[labelKey\]/)
+})
+
+// ------------------------------------------------- 埋点快照兜底不再输出占位符
+test('后端统计不再吐「(未知)」，热门页面只统计有路径的浏览（静态断言）', () => {
+  const source = readFileSync(new URL('../server/event-stats.mjs', import.meta.url), 'utf8')
+  assert.equal(source.includes("'(未知)'"), false, '后端不该输出「(未知)」占位')
+  assert.match(source, /WHERE \$\{clause\} AND te\.path IS NOT NULL AND te\.path <> ''/)
 })
