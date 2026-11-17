@@ -505,6 +505,8 @@ svg { display: block; }
   background: linear-gradient(180deg, transparent 55%, rgba(4, 5, 8, 0.6));
 }
 .film-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.film-art img.is-loading { opacity: 0; }
+.film-art img.is-failed { display: none; }
 .film-art--wide { aspect-ratio: 16 / 9; }
 .film-art--square { aspect-ratio: 1 / 1; }
 .film-cjk {
@@ -559,7 +561,7 @@ svg { display: block; }
 }
 .film:hover .film-play, .film:focus-visible .film-play { opacity: 1; transform: translate(-50%, -50%); }
 .film:hover .film-art img { transform: scale(1.04); }
-.film-art img { transition: transform 400ms var(--ease); }
+.film-art img { transition: transform 400ms var(--ease), opacity 260ms linear; }
 .film-title { font-size: var(--fs-14); font-weight: 600; line-height: 1.35; }
 .film-meta { display: flex; align-items: center; gap: 8px; font-size: var(--fs-12); color: var(--text-3); }
 .film-meta .score { color: var(--warn); font-weight: 600; }

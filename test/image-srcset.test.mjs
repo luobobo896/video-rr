@@ -57,3 +57,15 @@ test('卡片接上了 srcset/sizes，加载失败回退原图（静态断言）'
   assert.match(filmArt, /@error="onCoverError"/)
   assert.match(filmArt, /img\.removeAttribute\('srcset'\)/)
 })
+
+test('封面到位前不留白：渐变占位上淡入，失败就退成占位图', () => {
+  const filmArt = readFileSync(new URL('../public/src/components/FilmArt.vue', import.meta.url), 'utf8')
+  const styles = readFileSync(new URL('../public/src/styles.css', import.meta.url), 'utf8')
+  assert.match(filmArt, /:class="\{ 'is-loading': !coverLoaded, 'is-failed': coverFailed \}"/)
+  assert.match(filmArt, /@load="coverLoaded = true"/)
+  assert.match(filmArt, /coverFailed\.value = true/)
+  assert.match(styles, /\.film-art img\.is-loading \{ opacity: 0; \}/)
+  assert.match(styles, /\.film-art img\.is-failed \{ display: none; \}/)
+  // hover 预览视频的 poster 也别再挂整张原图。
+  assert.match(filmArt, /:poster="imageVariant\(film\.coverUrl, 640\) \|\| film\.coverUrl \|\| ''"/)
+})

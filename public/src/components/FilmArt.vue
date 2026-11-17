@@ -26,9 +26,16 @@ const coverSrc = computed(() => imageVariant(props.film?.coverUrl, props.ratio =
 // 竖版卡片一格约 180px 宽，横版/大图按视口宽度走。
 const coverSizes = computed(() => (props.ratio === 'portrait' ? '(max-width: 520px) 45vw, 200px' : '(max-width: 900px) 100vw, 900px'))
 
+// 封面还在路上时先把卡片留在渐变占位上，别让格子先闪白再填图。
+const coverLoaded = ref(false);
+const coverFailed = ref(false);
+
 function onCoverError(event) {
   const img = event?.target;
-  if (!img || img.dataset.fallback === '1') return;
+  if (!img || img.dataset.fallback === '1') {
+    coverFailed.value = true;
+    return;
+  }
   img.dataset.fallback = '1';
   img.removeAttribute('srcset');
   img.src = props.film?.coverUrl ?? img.src;
@@ -66,9 +73,11 @@ function stopPreview(event) {
       :src="coverSrc"
       :srcset="coverSrcset || undefined"
       :sizes="coverSrcset ? coverSizes : undefined"
+      :class="{ 'is-loading': !coverLoaded, 'is-failed': coverFailed }"
       alt=""
       loading="lazy"
       decoding="async"
+      @load="coverLoaded = true"
       @error="onCoverError"
     />
     <template v-else>
@@ -79,7 +88,7 @@ function stopPreview(event) {
       v-if="film.previewUrl && previewReady"
       class="film-hover-video"
       :src="film.previewUrl"
-      :poster="film.coverUrl || ''"
+      :poster="imageVariant(film.coverUrl, 640) || film.coverUrl || ''"
       muted
       loop
       playsinline
