@@ -377,3 +377,55 @@ test('四个图表都带可展开的数据表替代（静态断言）', () => {
   assert.ok(uses.length >= 5, `折线/漏斗/环形/排行都要有数据表（含定义共 5 处），实际 ${uses.length}`)
   assert.match(stylesCss, /\.chart-data summary \{/)
 })
+
+// ---------------------------------------------------------------- 埋点中文化
+test('埋点页面与事件 code 一律翻成中文（行为断言）', () => {
+  const from = appJs.indexOf('const EVENT_LABEL = {')
+  const to = appJs.indexOf('const CHART_COLORS')
+  assert.ok(from > 0 && to > from, '找不到埋点标签定义块')
+  const helpers = new Function(`${appJs.slice(from, to)}
+    return { pagePathOf, pageLabelOf, eventCodeLabelOf }`)()
+
+  assert.equal(helpers.pagePathOf('https://www.wyfclyes.top/video/#/adult'), '/adult')
+  assert.equal(helpers.pagePathOf('/video/'), '/')
+  assert.equal(helpers.pagePathOf(''), '')
+
+  const cases = [
+    ['/adult', '成人频道'],
+    ['#/adult', '成人频道'],
+    ['https://www.wyfclyes.top/video/#/adult', '成人频道'],
+    ['/video/', '首页'],
+    ['#/', '首页'],
+    ['/short', '短剧频道'],
+    ['#/category/MOVIE', '片库 · 电影'],
+    ['#/category/PLAYLET', '片库 · 短剧'],
+    ['#/drama/11', '剧目详情页'],
+    ['/play/3764/1', '播放页'],
+  ]
+  for (const [input, expected] of cases) assert.equal(helpers.pageLabelOf(input), expected, input)
+  assert.equal(helpers.pageLabelOf(''), '未记录页面')
+  assert.equal(helpers.pageLabelOf('#/no-such-page'), '其他页面')
+  assert.equal(helpers.pageLabelOf(undefined, 'https://x/video/#/vip'), '会员')
+
+  assert.equal(helpers.eventCodeLabelOf('page:/adult'), '页面浏览 · 成人频道')
+  assert.equal(helpers.eventCodeLabelOf('link:/adult'), '链接点击 · 成人频道')
+  assert.equal(helpers.eventCodeLabelOf('impression'), '内容曝光')
+  assert.equal(helpers.eventCodeLabelOf('click:button.btn'), '元素点击')
+  assert.equal(helpers.eventCodeLabelOf(''), '—')
+  assert.equal(helpers.eventCodeLabelOf('legacy_unknown_type'), '其他事件')
+
+  for (const input of ['page:/adult', 'link:/short', 'page:/play/3764/1']) {
+    assert.doesNotMatch(helpers.eventCodeLabelOf(input), /[a-z]/i, `事件 code 必须中文化：${input}`)
+  }
+  assert.doesNotMatch(helpers.pageLabelOf('#/category/MOVIE'), /[a-z]/i)
+})
+
+test('事件类型 0 不再叫「未知」，排行与明细都有中文兜底（静态断言）', () => {
+  const at = appJs.indexOf('const EVENT_TYPE_LABEL')
+  assert.ok(at > 0, '找不到 EVENT_TYPE_LABEL')
+  assert.match(appJs.slice(at, at + 160), /0: '行为事件'/)
+  assert.equal(appJs.includes("0: '未知'"), false, '「未知」对运营没有信息量，改叫行为事件')
+  assert.match(appJs, /pageLabelOf\(row\.path, row\.page_url\)/)
+  assert.match(appJs, /eventCodeLabelOf\(row\.event_code\)/)
+  assert.match(appJs, /row\.title \?\? row\[labelKey\]/)
+})

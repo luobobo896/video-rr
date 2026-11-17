@@ -4098,6 +4098,80 @@ const EVENT_LABEL = {
   trial_start: '试看开始', trial_end: '试看结束', click: '点击',
 }
 
+/**
+ * 埋点里的页面既有 SPA hash（#/adult）也有旧版真实路径（/adult），还有空值。
+ * 运营看的是业务名，所以这里统一收敛成中文；未知路径归到「其他页面」，不把英文路径直接怼到界面上。
+ */
+const PAGE_LABEL = {
+  '/': '首页',
+  '/home': '首页',
+  '/category': '片库',
+  '/adult': '成人频道',
+  '/short': '短剧频道',
+  '/rank': '榜单',
+  '/content-rank': '内容数据榜',
+  '/playlists': '片单广场',
+  '/posters': '海报墙',
+  '/upcoming': '即将上线',
+  '/favorites': '我的收藏',
+  '/history': '观看历史',
+  '/messages': '消息',
+  '/orders': '我的订单',
+  '/feedback': '投诉与反馈',
+  '/profile-edit': '编辑资料',
+  '/promotion': '佣金推广',
+  '/me': '个人中心',
+  '/vip': '会员',
+  '/search': '搜索',
+  '/lp': '落地页',
+}
+const PAGE_CATEGORY_LABEL = {
+  ALL: '全部', MOVIE: '电影', TV: '剧集', ANIME: '动漫', VARIETY: '综艺', DOCUMENTARY: '纪录片', PLAYLET: '短剧',
+}
+const ORDER_STATUS_LABEL = {
+  created: '待支付', pending: '处理中', paid: '已支付', fulfilled: '已完成', closed: '已关闭',
+  failed: '失败', refunded: '已退款', refunding: '退款中', refund_pending: '退款待审',
+}
+const REFUND_STATUS_LABEL = {
+  pending: '待财务复核', approved: '已同意', rejected: '已驳回', refunding: '退款中', refunded: '已退款', done: '已退款',
+}
+
+/** 从 path 或完整 page_url 里取出可路由的片段：#/adult → /adult，https://x/video/ → / 。 */
+function pagePathOf(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return ''
+  const hashAt = text.indexOf('#')
+  const raw = hashAt >= 0 ? text.slice(hashAt + 1) : text.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/video/, '')
+  // 归一化成空说明指向站点根（/video/、#/），别当成「没有页面信息」。
+  return raw.split('?')[0].replace(/\/+$/, '') || '/'
+}
+
+/** 页面路径 → 中文名。id 这类对运营无意义的片段一律不展示。 */
+function pageLabelOf(path, pageUrl) {
+  const normalized = pagePathOf(path || pageUrl)
+  if (!normalized) return '未记录页面'
+  const direct = PAGE_LABEL[normalized]
+  if (direct) return direct
+  const category = normalized.match(/^\/category\/([A-Za-z]+)$/)
+  if (category) return `片库 · ${PAGE_CATEGORY_LABEL[category[1].toUpperCase()] ?? '全部'}`
+  if (/^\/drama\//.test(normalized)) return '剧目详情页'
+  if (/^\/play\//.test(normalized)) return '播放页'
+  if (/^\/playlist\//.test(normalized)) return '片单详情页'
+  if (/^\/tag\//.test(normalized)) return '题材页'
+  return '其他页面'
+}
+
+/** 事件 code → 中文：page:/adult、link:/adult 这类前缀也翻译掉，原值放 title 里备查。 */
+function eventCodeLabelOf(code) {
+  const text = String(code ?? '').trim()
+  if (!text) return '—'
+  if (text.startsWith('page:')) return `页面浏览 · ${pageLabelOf(text.slice(5))}`
+  if (text.startsWith('link:')) return `链接点击 · ${pageLabelOf(text.slice(5))}`
+  if (text.startsWith('click:')) return '元素点击'
+  if (text.startsWith('session:')) return '会话 · 开始'
+  return EVENT_LABEL[text] ?? '其他事件'
+}
+
 const CHART_COLORS = ['#5b86ff', '#22d3ee', '#f5b545', '#45d19a', '#a78bfa', '#ff5f7a']
 
 /** 图表的可展开数据表：只有 role="img" + aria-label 时，读屏器和键盘用户看不到具体数值。 */
@@ -4202,7 +4276,7 @@ function rankedBars(rows, key, labelKey, unit = '') {
   return `<div class="ranked-bars">${list.map((row, index) => {
     const value = Number(row[key] ?? 0)
     return `<div class="ranked-row">
-      <span class="ranked-label" title="${esc(row[labelKey] ?? '')}">${esc(row[labelKey] ?? '—')}</span>
+      <span class="ranked-label" title="${esc(row.title ?? row[labelKey] ?? '')}">${esc(row[labelKey] ?? '—')}</span>
       <span class="ranked-track"><i style="width:${Math.max(2, Math.round((value / max) * 100))}%;background:${CHART_COLORS[index % CHART_COLORS.length]}"></i></span>
       <b>${fmt(value)}${unit}</b>
     </div>`
@@ -5746,7 +5820,8 @@ async function pageTags() {
 }
 
 /* ---------------- 埋点数据 ---------------- */
-const EVENT_TYPE_LABEL = { 0: '未知', 1: '页面', 2: '点击' }
+/** 0 不是「未知」，而是曝光/播放这类没有页面/点击属性的事件，叫「行为事件」运营才看得懂。 */
+const EVENT_TYPE_LABEL = { 0: '行为事件', 1: '页面', 2: '点击' }
 const EVENT_OP_LABEL = { 0: '默认', 1: '进入/开启', 2: '关闭/退出' }
 const EVENT_RANGES = [['today', '今天'], ['yesterday', '昨天'], ['7d', '近 7 天'], ['30d', '近 30 天']]
 /** 旧链接用 days=1/7/30，映射到新区间，别让收藏的地址失效。 */
@@ -5800,8 +5875,11 @@ async function pageEvents() {
   ])
   const totals = stats.totals ?? {}
   const prev = stats.prevTotals ?? {}
-  const typeRows = (stats.byType ?? []).map((row) => ({ label: EVENT_LABEL[row.type] ?? row.type, value: row.n }))
-  const kindRows = (stats.byEventType ?? []).map((row) => ({ label: EVENT_TYPE_LABEL[row.eventType] ?? String(row.eventType ?? 0), value: row.n }))
+  const typeRows = (stats.byType ?? []).map((row) => ({ label: EVENT_LABEL[row.type] ?? '其他事件', value: row.n }))
+  const kindRows = (stats.byEventType ?? []).map((row) => ({ label: EVENT_TYPE_LABEL[row.eventType] ?? '其他行为', value: row.n }))
+  const pageRows = (stats.topPages ?? []).map((row) => ({ label: pageLabelOf(row.path), value: row.n, title: row.path ?? '' }))
+  const eventRows = (stats.topEvents ?? []).map((row) => ({ label: eventCodeLabelOf(row.code), value: row.n, title: row.code ?? '' }))
+  const actionRows = (stats.topActions ?? []).map((row) => ({ label: String(row.action ?? '').trim() || '未记录动作', value: row.n }))
   const stayText = `${(Number(totals.avgStayMs ?? 0) / 1000).toFixed(1)}s`
 
   view.innerHTML = `
@@ -5833,11 +5911,11 @@ async function pageEvents() {
       <div class="panel"><h3>事件类型</h3>${rankedBars(kindRows, 'value', 'label')}</div>
     </div>
     <div class="split" style="margin-top:16px">
-      <div class="panel"><h3>热门页面 Top 10</h3>${rankedBars(stats.topPages ?? [], 'n', 'path')}</div>
-      <div class="panel"><h3>热门事件 Top 12</h3>${rankedBars(stats.topEvents ?? [], 'n', 'code')}</div>
+      <div class="panel"><h3>热门页面 Top 10</h3>${rankedBars(pageRows, 'value', 'label')}</div>
+      <div class="panel"><h3>热门事件 Top 12</h3>${rankedBars(eventRows, 'value', 'label')}</div>
     </div>
     <div class="split" style="margin-top:16px">
-      <div class="panel"><h3>热门动作 Top 10</h3>${rankedBars(stats.topActions ?? [], 'n', 'action')}</div>
+      <div class="panel"><h3>热门动作 Top 10</h3>${rankedBars(actionRows, 'value', 'label')}</div>
       <div class="panel"><h3>热门剧目 Top 10</h3>${rankedBars(stats.topDramas ?? [], 'n', 'title')}</div>
     </div>
     <div class="split" style="margin-top:16px">
@@ -5850,7 +5928,7 @@ async function pageEvents() {
         <span class="spacer" style="flex:1"></span>
         <select id="ev-type" aria-label="事件类型" style="width:160px">
           <option value="">全部事件</option>
-          ${(data.byType ?? []).map((row) => `<option value="${esc(row.type)}" ${type === row.type ? 'selected' : ''}>${esc(EVENT_LABEL[row.type] ?? row.type)}（${row.n}）</option>`).join('')}
+          ${(data.byType ?? []).map((row) => `<option value="${esc(row.type)}" ${type === row.type ? 'selected' : ''}>${esc(EVENT_LABEL[row.type] ?? '其他事件')}（${row.n}）</option>`).join('')}
         </select>
       </div>
       <table style="margin-top:12px">
@@ -5858,13 +5936,13 @@ async function pageEvents() {
         <tbody>
           ${(data.list ?? []).map((row) => `<tr>
             <td class="muted">${esc(fmtTs(row.created_at))}</td>
-            <td>${esc(EVENT_LABEL[row.type] ?? row.type)}<div class="mono muted" style="font-size:11px">${esc(row.event_code ?? '')}</div></td>
-            <td style="white-space:nowrap">${esc(EVENT_TYPE_LABEL[row.event_type ?? 0] ?? String(row.event_type ?? 0))}</td>
-            <td style="white-space:nowrap">${esc(EVENT_OP_LABEL[row.event_op ?? 0] ?? String(row.event_op ?? 0))}</td>
+            <td>${esc(EVENT_LABEL[row.type] ?? '其他事件')}<div class="muted" style="font-size:11px">${esc(eventCodeLabelOf(row.event_code))}</div></td>
+            <td style="white-space:nowrap">${esc(EVENT_TYPE_LABEL[row.event_type ?? 0] ?? '其他行为')}</td>
+            <td style="white-space:nowrap">${esc(EVENT_OP_LABEL[row.event_op ?? 0] ?? '默认')}</td>
             <td>${row.account ? esc(row.account) : (row.userEmail ? esc(row.userEmail) : (row.user_id ? `#${row.user_id}` : '游客'))}</td>
             <td style="white-space:nowrap"><span class="mono muted">${esc(row.ip ?? '—')}</span>${row.region ? `<div style="font-size:11px;opacity:.75">${esc(row.region)}</div>` : ''}</td>
             <td class="muted" style="max-width:200px">${esc([row.device, row.os].filter(Boolean).join(' / ') || '—')}</td>
-            <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(row.page_url ?? row.path ?? '')}">${esc(row.path ?? '—')}</td>
+            <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(row.page_url ?? row.path ?? '')}">${esc(pageLabelOf(row.path, row.page_url))}</td>
             <td class="mono" style="white-space:nowrap">${row.stay_ms === null || row.stay_ms === undefined ? '—' : `${(Number(row.stay_ms) / 1000).toFixed(1)}s`}</td>
             <td class="muted" style="max-width:260px">${esc(row.action ?? '—')}${row.description ? `<div style="font-size:11px;opacity:.75">${esc(row.description)}</div>` : ''}</td>
           </tr>`).join('') || '<tr><td colspan="10" class="muted">该区间还没有埋点数据：C 端产生浏览/播放后这里会实时出现</td></tr>'}
@@ -5891,7 +5969,7 @@ async function pageEvents() {
 
 /* ---------------- 投诉反馈 ---------------- */
 const FEEDBACK_STATUS_PILL = { pending: 'warn', processing: 'warn', replied: '', resolved: 'ok', closed: '' }
-const FEEDBACK_REFUND_LABEL = { pending: '待财务复核', approved: '已同意', rejected: '已驳回', refunding: '退款中', refunded: '已退款', done: '已退款' }
+const FEEDBACK_REFUND_LABEL = REFUND_STATUS_LABEL
 
 /** 翻页/换筛选先写 hash，否则刷新会还原回旧筛选（与埋点页一致）。 */
 const syncFeedbackHash = () => {
@@ -5946,7 +6024,7 @@ async function pageFeedbacks() {
   const replyText = stats.reply?.avgMinutes ? `${stats.reply.avgMinutes} 分钟` : '—'
   const rowOf = (row) => {
     const order = row.out_trade_no
-      ? `${esc(row.out_trade_no)}<div class="muted" style="font-size:11px">¥${Number(row.order_amount ?? 0).toFixed(2)} · ${esc(row.order_status ?? '')}</div>`
+      ? `${esc(row.out_trade_no)}<div class="muted" style="font-size:11px">¥${Number(row.order_amount ?? 0).toFixed(2)} · ${esc(ORDER_STATUS_LABEL[row.order_status] ?? '状态未知')}</div>`
       : '<span class="muted">—</span>'
     const refund = row.refund_id
       ? `<div style="font-size:11px">退款 #${row.refund_id} · ${esc(FEEDBACK_REFUND_LABEL[row.refund_status] ?? row.refund_status ?? '')} ¥${Number(row.refund_amount ?? 0).toFixed(2)}</div>`
@@ -5954,10 +6032,10 @@ async function pageFeedbacks() {
     return `<tr data-row="${row.id}">
       <td class="mono">${esc(row.ticket_no ?? `#${row.id}`)}<div class="muted" style="font-size:11px">${esc(fmtTs(row.created_at))}</div></td>
       <td>${row.user_id ? esc(row.user_account ?? `#${row.user_id}`) : '<span class="muted">未登录</span>'}${row.priority >= 2 ? ' <span class="pill bad">紧急</span>' : row.priority === 1 ? ' <span class="pill warn">重要</span>' : ''}</td>
-      <td>${esc(categoryLabel[row.category] ?? row.category)}</td>
+      <td>${esc(categoryLabel[row.category] ?? '其他问题')}</td>
       <td style="max-width:320px">${esc(row.content)}${row.reply ? `<div style="font-size:11px;opacity:.8">回复：${esc(row.reply)}</div>` : ''}</td>
       <td>${order}${refund}</td>
-      <td><span class="pill ${FEEDBACK_STATUS_PILL[row.status] ?? ''}">${esc(statusLabel[row.status] ?? row.status)}</span></td>
+      <td><span class="pill ${FEEDBACK_STATUS_PILL[row.status] ?? ''}">${esc(statusLabel[row.status] ?? '状态未知')}</span></td>
       <td class="row-actions">
         <button class="btn sm" data-detail="${row.id}">详情</button>
         ${canWrite ? `<button class="btn sm primary" data-reply="${row.id}" data-info="${esc(row.ticket_no ?? '')}">回复</button>` : ''}
@@ -5966,9 +6044,9 @@ async function pageFeedbacks() {
     </tr>
     <tr data-detail-row="${row.id}" hidden><td colspan="7" class="muted" style="background:var(--panel-2)">
       <div style="display:grid;gap:6px">
-        <div><b>工单</b> ${esc(row.ticket_no ?? '')} · ${esc(categoryLabel[row.category] ?? row.category)} · 提交于 ${esc(fmtTs(row.created_at))}</div>
+        <div><b>工单</b> ${esc(row.ticket_no ?? '')} · ${esc(categoryLabel[row.category] ?? '其他问题')} · 提交于 ${esc(fmtTs(row.created_at))}</div>
         <div><b>用户</b> ${row.user_id ? esc(row.user_account ?? `#${row.user_id}`) : `未登录访客 ${esc(row.visitor_id ?? '')}`} · 联系方式 ${esc(row.contact ?? '—')}</div>
-        ${row.order_id ? `<div><b>订单</b> ${esc(row.out_trade_no ?? '')} · 金额 ¥${Number(row.order_amount ?? 0).toFixed(2)} · 已退 ¥${Number(row.order_refunded ?? 0).toFixed(2)} · 支付于 ${esc(fmtTs(row.order_paid_at))}${row.refund_id ? ` · 退款单 #${row.refund_id}（${esc(statusLabel[row.status] ?? '')}）` : ''}</div>` : ''}
+        ${row.order_id ? `<div><b>订单</b> ${esc(row.out_trade_no ?? '')} · 金额 ¥${Number(row.order_amount ?? 0).toFixed(2)} · 已退 ¥${Number(row.order_refunded ?? 0).toFixed(2)} · 支付于 ${esc(fmtTs(row.order_paid_at))}${row.refund_id ? ` · 退款单 #${row.refund_id}（${esc(FEEDBACK_REFUND_LABEL[row.refund_status] ?? '状态未知')}）` : ''}</div>` : ''}
         ${row.drama_title ? `<div><b>剧目</b> ${esc(row.drama_title)}</div>` : ''}
         <div><b>内容</b> ${esc(row.content)}</div>
         ${row.reply ? `<div><b>回复</b> ${esc(row.reply)} <span class="muted">（${esc(row.replied_by_name ?? '')} · ${esc(fmtTs(row.replied_at))}）</span></div>` : ''}
@@ -5998,7 +6076,7 @@ async function pageFeedbacks() {
       ${card('匿名提交', fmt(totals.anonymous ?? 0), '件 · 需留联系方式')}
     </div>
     ${stats.oldestPending ? `<div class="panel" style="margin-top:16px"><h3>最久未处理<span class="spacer"></span></h3>
-      <p class="muted">${esc(stats.oldestPending.ticketNo ?? `#${stats.oldestPending.id}`)} · ${esc(stats.oldestPending.category)} · 提交于 ${esc(fmtTs(stats.oldestPending.createdAt))}</p></div>` : ''}
+      <p class="muted">${esc(stats.oldestPending.ticketNo ?? `#${stats.oldestPending.id}`)} · ${esc(categoryLabel[stats.oldestPending.category] ?? '其他问题')} · 提交于 ${esc(fmtTs(stats.oldestPending.createdAt))}</p></div>` : ''}
     <div class="panel" style="margin-top:16px">
       <h3>工单趋势 <span class="muted">${esc(stats.label ?? '')} · ${stats.bucket === 'hour' ? '按小时' : '按天'}</span></h3>
       ${svgLineChart((stats.trend ?? []).map((row) => ({ ...row, day: row.bucket })), [{ key: 'tickets', label: '工单数', color: CHART_COLORS[0] }])}
