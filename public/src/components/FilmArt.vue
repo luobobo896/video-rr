@@ -91,7 +91,7 @@ function stopPreview(event) {
       :src="displaySrc"
       :srcset="displaySrcset || undefined"
       :sizes="displaySrcset ? coverSizes : undefined"
-      :class="{ 'is-loading': !coverLoaded, 'is-failed': coverFailed }"
+      :class="['film-fallback', { 'is-loading': !coverLoaded, 'is-failed': coverFailed }]"
       alt=""
       loading="lazy"
       decoding="async"

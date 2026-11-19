@@ -53,14 +53,16 @@ test('大图生成多个宽度变体且明显更小，二次运行跳过（幂�
   }
 })
 
-test('源图比目标宽度还窄时不放大，也不生成空壳文件', { skip: hasFfmpeg ? false : '本机没有 ffmpeg/ffprobe' }, async () => {
+// 最宽档永远产出（前端 srcset 的 1280 档靠它兜底），中间档仍按「不放大」跳过。
+test('源图比目标宽度还窄时不放大，中间档跳过但最宽档兜底', { skip: hasFfmpeg ? false : '本机没有 ffmpeg/ffprobe' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mh-variants-small-'))
   try {
     makeJpeg(join(dir, 'thumb.jpg'), 300, 450)
     const stats = await buildVariants({ dir, widths: [320, 640], concurrency: 1 })
-    assert.equal(stats.generated, 0)
-    assert.equal(stats.skipped, 2)
+    assert.equal(stats.generated, 1, '最宽档 640 必须产出，否则 srcset 最后一档永远 404')
+    assert.equal(stats.skipped, 1, '320 档比源图宽，跳过不放大')
     assert.equal(existsSync(join(dir, 'variants', 'thumb-w320.webp')), false)
+    assert.equal(existsSync(join(dir, 'variants', 'thumb-w640.webp')), true)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

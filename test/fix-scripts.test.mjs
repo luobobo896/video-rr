@@ -794,3 +794,68 @@ test('import-catalog 的帮助与确认文案写明非默认库要双重确认',
   assert.match(HELP_TEXT, /双重确认/)
   assert.match(read('scripts/import-catalog.mjs'), /describeDbTarget/)
 })
+
+// ---------------------------------------------------------------- nginx SPA 回退与静态资源
+// 深链必须 302 到 hash 形式：构建产物全是 ./assets 相对路径，停在 /video/detail/11 会解析成
+// /video/detail/assets/...（白屏）。三条实测经验都写进断言：不能回 index.html（二次拼路径），
+// 不能写 index 指令（变成 #/index.html），不能用 if + rewrite（alias 冲突直接 500）。
+test('nginx 片段：深链 302 到 hash 形式，不回 index.html 也不写 index 指令', () => {
+  const source = read('deploy/nginx-video.snippet.conf')
+  assert.match(source, /location @video_spa \{\n\s+return 302 https:\/\/\$host\/video\/#\/\$vn_hash;/)
+  assert.match(source, /location @admin_spa \{\n\s+return 302 https:\/\/\$host\/video-admin\/#\/\$va_hash;/)
+  assert.doesNotMatch(source, /try_files \$uri \$uri\/ \/video\/index\.html/)
+  assert.doesNotMatch(source, /try_files \$uri \$uri\/ \/client\/index\.html/)
+  assert.doesNotMatch(source, /^\s+index index\.html;$/m)
+})
+
+// 静态文件（favicon / 图标 / base.js）和 SPA 白名单必须是两条正则，且静态那条在前：
+// 同层多条正则按书写顺序取第一个命中的，顺序反了 favicon 会被白名单抢走变成 404。
+test('nginx 片段：静态资源正则排在 SPA 路由正则之前，且不吞同级后端路径', () => {
+  const source = read('deploy/nginx-video.snippet.conf')
+  const staticIdx = source.indexOf('location ~ ^/video/(?<vn_static>')
+  const routeIdx = source.indexOf('location ~ ^/video/(?<vn_hash>')
+  const assetIdx = source.indexOf('location ~ ^/video/assets/(?<vn_asset>')
+  assert.equal(staticIdx > 0 && routeIdx > staticIdx, true, '静态资源正则必须在 SPA 路由正则之前')
+  assert.equal(assetIdx > 0 && routeIdx > assetIdx, true, 'assets 正则必须在 SPA 路由正则之前')
+
+  // SPA 白名单只吃前端路由形状的路径，绝不能是 ^/video/(.*) —— 那会把 /video/api/ 一起吞掉。
+  const routeBlock = source.slice(routeIdx, source.indexOf('}', routeIdx))
+  assert.doesNotMatch(routeBlock, /\(\?<vn_hash>\.\*\)/)
+  assert.match(routeBlock, /detail\|play\|library\|rank\|search/)
+  assert.doesNotMatch(routeBlock, /api|media|pay/)
+
+  // 静态那条不能用 try_files：正则块里 try_files 会退回默认 root（/usr/share/nginx/html）。
+  const staticBlock = source.slice(staticIdx, source.indexOf('}', staticIdx))
+  assert.match(staticBlock, /alias \/opt\/video-rr\/dist\/client\/\$vn_static;/)
+  assert.doesNotMatch(staticBlock, /try_files/)
+})
+
+// 入口页必须被精确 location 接走，否则空片段命中正则后自己 302 自己（ERR_TOO_MANY_REDIRECTS）。
+test('nginx 片段：/video/ 与 /video-admin/ 有精确入口 location，不参与 hash 跳转', () => {
+  const source = read('deploy/nginx-video.snippet.conf')
+  assert.match(source, /location = \/video\/ \{\n\s+alias \/opt\/video-rr\/dist\/client\/;\n\s+try_files \/index\.html =404;/)
+  assert.match(source, /location = \/video-admin\/ \{\n\s+alias \/opt\/video-rr\/dist\/admin\/;\n\s+try_files \/index\.html =404;/)
+})
+
+// mime.types 里没有 webmanifest；必须显式写在 types 表里、并用命名捕获 alias，
+// 否则会 301 到带斜杠的地址或退回 octet-stream。
+test('nginx 片段：assets 用命名捕获 alias，webmanifest 有显式 MIME', () => {
+  const source = read('deploy/nginx-video.snippet.conf')
+  assert.match(source, /location ~ \^\/video\/assets\/\(\?<vn_asset>\.\+\)\$/)
+  assert.match(source, /alias \/opt\/video-rr\/dist\/client\/assets\/\$vn_asset;/)
+  assert.match(source, /location ~ \^\/video-admin\/assets\/\(\?<va_asset>\.\+\)\$/)
+  assert.match(source, /application\/manifest\+json webmanifest;/)
+  assert.match(source, /add_header Cache-Control "public, max-age=31536000, immutable";/)
+})
+
+// mime.types 里没有 webmanifest；必须显式写在 types 表里、并用命名捕获 alias，
+// 否则会 301 到带斜杠的地址或退回 octet-stream。
+test('nginx 片段：assets 用命名捕获 alias，webmanifest 有显式 MIME', () => {
+  const source = read('deploy/nginx-video.snippet.conf')
+  assert.match(source, /location ~ \^\/video\/assets\/\(\?<vn_asset>\.\+\)\$/)
+  assert.match(source, /alias \/opt\/video-rr\/dist\/client\/assets\/\$vn_asset;/)
+  assert.match(source, /location ~ \^\/video-admin\/assets\/\(\?<va_asset>\.\+\)\$/)
+  assert.match(source, /application\/manifest\+json webmanifest;/)
+  assert.match(source, /add_header Cache-Control "public, max-age=31536000, immutable";/)
+})
+
