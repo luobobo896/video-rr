@@ -398,6 +398,18 @@ test('分类接口缺省 pageSize 为 24，且单请求 SQL 条数不超过 8', 
   }
 })
 
+test('分类标签计数与一次性聚合一致', async () => {
+  const response = await call('/api/category')
+  assert.equal(response.status, 200, response.text)
+  const expected = new Map(db.prepare(`SELECT dt.tag_id, COUNT(DISTINCT dt.drama_id) AS n
+    FROM drama_tags dt JOIN dramas d ON d.id = dt.drama_id
+    WHERE d.status = 'published' AND COALESCE(d.is_adult, 0) = 0
+    GROUP BY dt.tag_id`).all().map((row) => [Number(row.tag_id), Number(row.n)]))
+  for (const tag of response.json.data.facets.tags) {
+    assert.equal(tag.count, expected.get(Number(tag.value)) ?? 0, `标签 ${tag.value} 计数不一致`)
+  }
+})
+
 test('榜单历史快照里未上架的剧不再下发', async () => {
   const list = db.prepare("INSERT INTO rank_lists (name, type, sort) VALUES ('回归测试榜', 'REGTEST', 99)").run()
   const visible = seedDrama({ title: '榜单可见剧' })

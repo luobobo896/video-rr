@@ -950,10 +950,17 @@ export async function handlePublic(pathname, url, req, res) {
             return year >= row.from && year <= row.to ? sum + Number(item.n) : sum
           }, 0),
         })),
-        tags: all(`SELECT t.id, t.name, (SELECT COUNT(*) FROM drama_tags dt
-            JOIN dramas d ON d.id = dt.drama_id AND d.status = 'published' AND ${audienceSql}
-            WHERE dt.tag_id = t.id) AS n
-          FROM tags t WHERE t.status = 'active' ORDER BY n DESC, t.sort LIMIT 24`)
+        // 一次聚合所有标签；原来的相关子查询会对 271 个标签各扫一遍 87 万条 drama_tags，
+        // 在 11 万部剧的库上实测 26 秒，直接把 Node 事件循环占住。
+        tags: all(`SELECT t.id, t.name, COALESCE(x.n, 0) AS n
+          FROM tags t
+          LEFT JOIN (
+            SELECT dt.tag_id, COUNT(DISTINCT dt.drama_id) AS n
+            FROM drama_tags dt JOIN dramas d ON d.id = dt.drama_id
+            WHERE d.status = 'published' AND ${audienceSql}
+            GROUP BY dt.tag_id
+          ) x ON x.tag_id = t.id
+          WHERE t.status = 'active' ORDER BY n DESC, t.sort LIMIT 24`)
           .map((row) => ({ value: Number(row.id), label: enumLabel(lang, 'genre', row.name, row.name), count: Number(row.n) })),
       }
       const adultStats = audience === 'adult' ? adultStatsFor(rows.map((drama) => drama.id)) : null
