@@ -290,8 +290,8 @@ function analyticsSelect({ since, contentType, category, contentId, candidateJoi
 const TOTAL_KEYS = ['clickCount', 'clickUv', 'viewCount', 'viewerCount', 'completionCount', 'watchSeconds', 'favoriteAddCount', 'favoriteRemoveCount', 'favoriteCount']
 
 /** 全量合计：一次聚合查询算完，分页只影响 rows，不影响口径。 */
-function analyticsTotals({ since, contentType, category, contentId }) {
-  const { sql, args } = analyticsSelect({ since, contentType, category, contentId })
+function analyticsTotals({ since, contentType, category, contentId, candidateJoinSql, candidateJoinArgs }) {
+  const { sql, args } = analyticsSelect({ since, contentType, category, contentId, candidateJoinSql, candidateJoinArgs })
   const row = one(`SELECT COUNT(*) AS contents, ${TOTAL_KEYS.map((key) => `COALESCE(SUM(${key}), 0) AS ${key}`).join(', ')}
     FROM (${sql})`, ...args) ?? {}
   const totals = { contents: Number(row.contents ?? 0) }
@@ -342,11 +342,23 @@ function analyticsRows({ days = 7, contentType, category, contentId, candidateJo
 
 export function contentAnalytics(options = {}) {
   const days = parseDays(options.days, 7, 1, 365)
+  const since = new Date(Date.now() - days * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
   // 默认 50、上限 200：早期一次性把整站内容连 INTERSECT 全部算完，库一大后台就超时
   const limit = Math.min(200, Math.max(1, Math.trunc(Number(options.limit)) || 50))
   const offset = Math.max(0, Math.trunc(Number(options.offset)) || 0)
-  const rows = analyticsRows({ ...options, days, limit, offset })
-  const totals = analyticsTotals({ ...options, since: new Date(Date.now() - days * 86400_000).toISOString().slice(0, 19).replace('T', ' ') })
+  // 没有事件的内容所有指标都是 0，不必把 11 万行零值全部算一遍；
+  // 指定 contentId 时保留单条查询，方便运营核对任意内容。
+  const candidate = options.contentId ? {} : {
+    candidateJoinSql: `SELECT content_id AS id FROM content_view_sessions
+        WHERE is_valid = 1 AND source NOT IN ('trial','preview') AND started_at >= ?
+      UNION SELECT content_id AS id FROM content_click_events WHERE occurred_at >= ?
+      UNION SELECT content_id AS id FROM content_favorite_events
+        WHERE is_migration = 0 AND occurred_at >= ?
+      UNION SELECT drama_id AS id FROM favorites`,
+    candidateJoinArgs: [since, since, since],
+  }
+  const rows = analyticsRows({ ...options, ...candidate, days, limit, offset })
+  const totals = analyticsTotals({ ...options, ...candidate, since })
   const total = totals.contents
   return {
     rows, totals, total,

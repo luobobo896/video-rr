@@ -99,6 +99,17 @@ test('重算只处理窗口内有事件的内容，不扫全库', () => {
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM content_stats_total WHERE content_id = ?').get(inactive).n, 0)
 })
 
+test('内容分析默认只分析窗口内有事件的内容', () => {
+  const active = Number(db.prepare("INSERT INTO dramas (title, category, status, content_type, score) VALUES ('有事件分析内容', 'TV', 'published', 'series', 8)").run().lastInsertRowid)
+  const inactive = Number(db.prepare("INSERT INTO dramas (title, category, status, content_type, score) VALUES ('无事件分析内容', 'TV', 'published', 'series', 9)").run().lastInsertRowid)
+  const episode = Number(db.prepare("INSERT INTO episodes (drama_id, no, title, duration, status) VALUES (?, 1, '第 1 集', 600, 'ready')").run(active).lastInsertRowid)
+  const session = stats.startViewSession({ userId: newUser(), contentId: active, episodeId: episode, duration: 600, source: 'free' })
+  db.prepare("UPDATE content_view_sessions SET effective_seconds=70, max_position_seconds=70, is_valid=1, last_heartbeat_at=datetime('now','-5 seconds') WHERE id=?").run(session.id)
+  const result = stats.contentAnalytics({ days: 7 })
+  assert.ok(result.rows.some((row) => row.contentId === active))
+  assert.ok(!result.rows.some((row) => row.contentId === inactive))
+})
+
 test('心跳超过 45 秒过期，客户端不能缩短片长绕过阈值', () => {
   const uid = newUser()
   const content = db.prepare('SELECT * FROM dramas WHERE content_type IS NOT NULL LIMIT 1').get()

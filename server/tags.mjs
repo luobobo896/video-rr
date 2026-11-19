@@ -45,11 +45,16 @@ export function listTags({ withCount = false, includeDisabled = false, publicOnl
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const order = `ORDER BY COALESCE(${p}parent_id, ${p}id), ${p}parent_id IS NOT NULL, ${p}sort, ${p}id`
 
-  const countJoin = publicOnly
-    ? `JOIN dramas d ON d.id = dt.drama_id AND d.status = 'published' AND ${adultVisibilitySql(scope === 'adult' ? 'adult' : 'general')}`
-    : ''
+  // 标签计数一次聚合，避免对 271 个标签各扫一遍 87 万条 drama_tags。
+  const countSource = `SELECT dt.tag_id, COUNT(*) AS drama_count
+    FROM drama_tags dt
+    ${publicOnly
+      ? `JOIN dramas d ON d.id = dt.drama_id AND d.status = 'published' AND ${adultVisibilitySql(scope === 'adult' ? 'adult' : 'general')}`
+      : ''}
+    GROUP BY dt.tag_id`
   const sql = withCount
-    ? `SELECT t.*, (SELECT COUNT(*) FROM drama_tags dt ${countJoin} WHERE dt.tag_id = t.id) AS drama_count FROM tags t ${where} ${order}`
+    ? `SELECT t.*, COALESCE(x.drama_count, 0) AS drama_count
+      FROM tags t LEFT JOIN (${countSource}) x ON x.tag_id = t.id ${where} ${order}`
     : `SELECT * FROM tags ${where} ${order}`
 
   const rows = all(sql, ...args).map((row) => (withCount ? { ...row, dramaCount: row.drama_count ?? 0 } : row))
