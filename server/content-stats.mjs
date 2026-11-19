@@ -264,7 +264,7 @@ export function rebuildContentStats({ days = 2 } = {}) {
 }
 
 /** 内容分析用的公共 SELECT：9 个时间窗参数在前，筛选参数在后（占位符顺序与 SQL 文本一致）。 */
-function analyticsSelect({ since, contentType, category, contentId }) {
+function analyticsSelect({ since, contentType, category, contentId, candidateJoinSql, candidateJoinArgs }) {
   const clauses = ["d.status = 'published'"]
   const filters = []
   if (contentType && contentType !== 'all') { clauses.push('d.content_type = ?'); filters.push(contentType) }
@@ -282,8 +282,9 @@ function analyticsSelect({ since, contentType, category, contentId }) {
       (SELECT COUNT(*) FROM content_favorite_events f WHERE f.content_id = d.id AND f.is_migration = 0 AND f.action = 'remove' AND f.occurred_at >= ?) AS favoriteRemoveCount,
       (SELECT COUNT(DISTINCT f.user_id) FROM content_favorite_events f WHERE f.content_id = d.id AND f.is_migration = 0 AND f.action = 'add' AND f.occurred_at >= ?) AS favoriteAddUv,
       (SELECT COUNT(*) FROM favorites fv WHERE fv.drama_id = d.id) AS favoriteCount
-    FROM dramas d WHERE ${clauses.join(' AND ')}`
-  return { sql, args: [...Array(9).fill(since), ...filters], since }
+    ${candidateJoinSql ? `FROM dramas d JOIN (${candidateJoinSql}) c ON c.id = d.id` : 'FROM dramas d'}
+    WHERE ${clauses.join(' AND ')}`
+  return { sql, args: [...Array(9).fill(since), ...(candidateJoinArgs ?? []), ...filters], since }
 }
 
 const TOTAL_KEYS = ['clickCount', 'clickUv', 'viewCount', 'viewerCount', 'completionCount', 'watchSeconds', 'favoriteAddCount', 'favoriteRemoveCount', 'favoriteCount']
@@ -302,10 +303,10 @@ function analyticsTotals({ since, contentType, category, contentId }) {
   return totals
 }
 
-function analyticsRows({ days = 7, contentType, category, contentId, limit = 0, offset = 0 } = {}) {
+function analyticsRows({ days = 7, contentType, category, contentId, candidateJoinSql, candidateJoinArgs, limit = 0, offset = 0 } = {}) {
   const span = parseDays(days, 7, 1, 365)
   const since = new Date(Date.now() - span * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
-  const { sql, args } = analyticsSelect({ since, contentType, category, contentId })
+  const { sql, args } = analyticsSelect({ since, contentType, category, contentId, candidateJoinSql, candidateJoinArgs })
   const paged = Number(limit) > 0
   const rows = paged
     ? all(`${sql} ORDER BY d.id ASC LIMIT ? OFFSET ?`, ...args, Math.trunc(Number(limit)), Math.max(0, Math.trunc(Number(offset)) || 0))
@@ -367,7 +368,15 @@ export const CONTENT_RANK_TYPES = Object.fromEntries(Object.entries(RANK_META).m
 export function buildContentRank({ rankType = 'hot', contentType = 'all', days, limit = 20 } = {}) {
   const meta = RANK_META[rankType] ?? RANK_META.hot
   const windowDays = parseDays(days, meta.windowDays, 1, 365)
-  let rows = analyticsRows({ days: windowDays, contentType })
+  // 榜单只可能来自最近有观看或收藏的内容；先收窄候选集，避免每次都把 11 万部剧
+  // 逐部跑 9 个相关子查询。30 天覆盖所有榜单窗口。
+  const since30 = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
+  const candidateJoinSql = `SELECT content_id AS id FROM content_view_sessions
+      WHERE is_valid = 1 AND source NOT IN ('trial','preview') AND started_at >= ?
+    UNION SELECT content_id AS id FROM content_favorite_events
+      WHERE is_migration = 0 AND occurred_at >= ?
+    UNION SELECT drama_id AS id FROM favorites`
+  let rows = analyticsRows({ days: windowDays, contentType, candidateJoinSql, candidateJoinArgs: [since30, since30] })
   rows = rows.filter((row) => Boolean(row.contentType))
   if (rankType === 'hot') rows = rows.filter((row) => row.viewerCount > 0)
   if (rankType === 'favorite') rows = rows.filter((row) => row.favoriteAddUv > 0 || row.favoriteCount > 0)
