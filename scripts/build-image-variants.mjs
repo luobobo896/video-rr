@@ -95,10 +95,12 @@ export async function buildVariants({
       const sourceStat = statSync(source)
       const sourceWidth = await widthOf(source)
       for (const width of widths) {
-        // 源图本来就窄，放大只会更糊更占带宽；探不出宽度的（损坏或非常规格式）照常尝试，转换失败会记进 failed。
-        // 唯一例外：最后一档（最宽的 MAX_FILL_WIDTH）始终产出，给 srcset 保底，
-        // 免得 480 宽的老封面一到 640/1280 就 404（480 ≤ 640*1.05 曾把两档全跳过）。
-        if (sourceWidth && sourceWidth <= width * 1.05 && width !== widths[widths.length - 1]) { stats.skipped += 1; continue }
+        // 源图本来就窄，中间档放大只会更糊更占带宽；探不出宽度（损坏/非常规格式）的照常尝试，失败会记进 failed。
+        // 例外一：最宽那档始终产出，给 srcset 保底（480 ≤ 640*1.05 曾把 640/1280 两档全跳过）。
+        // 例外二：比源图窄的档也照常产出——缩图不放大，且老库大量源图只有 360~480 宽，
+        // 卡死中间档会让 srcset 中间候选永远 404，浏览器只能退回整张原图。
+        const isWidest = width === widths[widths.length - 1]
+        if (sourceWidth && sourceWidth <= width * 1.05 && !isWidest && sourceWidth <= width) { stats.skipped += 1; continue }
         const target = join(targetDir, variantNameOf(file, width))
         if (existsSync(target) && statSync(target).mtimeMs >= sourceStat.mtimeMs) { stats.skipped += 1; continue }
         if (dryRun) { stats.generated += 1; continue }

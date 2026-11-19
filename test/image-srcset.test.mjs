@@ -79,7 +79,9 @@ test('封面 404 时逐档回退：变体 → 原图 → 占位插画，不会�
   assert.match(filmArt, /if \(step === 'art' \|\| !props\.film\?\.coverUrl\) return fallbackArt\(props\.film\)/)
 })
 
-test('变体生成：窄源图只在最宽档被跳过，其余档照常产出以保住 srcset', () => {
+// 只有「会比源图宽」的档才跳过；比源图窄的档照样缩出来，最宽档永远兜底。
+test('变体生成：窄源图只在会放大的档跳过，最宽档与更窄档都产出', () => {
   const script = readFileSync(new URL('../scripts/build-image-variants.mjs', import.meta.url), 'utf8')
-  assert.match(script, /sourceWidth <= width \* 1\.05 && width !== widths\[widths\.length - 1\]/)
+  assert.match(script, /const isWidest = width === widths\[widths\.length - 1\]/)
+  assert.match(script, /sourceWidth <= width \* 1\.05 && !isWidest && sourceWidth <= width/)
 })

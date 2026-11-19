@@ -53,8 +53,8 @@ test('大图生成多个宽度变体且明显更小，二次运行跳过（幂�
   }
 })
 
-// 最宽档永远产出（前端 srcset 的 1280 档靠它兜底），中间档仍按「不放大」跳过。
-test('源图比目标宽度还窄时不放大，中间档跳过但最宽档兜底', { skip: hasFfmpeg ? false : '本机没有 ffmpeg/ffprobe' }, async () => {
+// 比源图宽的档不放大（跳过），比源图窄的档照常缩图，最宽档永远兜底产出。
+test('源图比目标宽度还窄时不放大，窄档照常缩图、最宽档兜底', { skip: hasFfmpeg ? false : '本机没有 ffmpeg/ffprobe' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mh-variants-small-'))
   try {
     makeJpeg(join(dir, 'thumb.jpg'), 300, 450)
@@ -63,6 +63,23 @@ test('源图比目标宽度还窄时不放大，中间档跳过但最宽档兜�
     assert.equal(stats.skipped, 1, '320 档比源图宽，跳过不放大')
     assert.equal(existsSync(join(dir, 'variants', 'thumb-w320.webp')), false)
     assert.equal(existsSync(join(dir, 'variants', 'thumb-w640.webp')), true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// 老库里大量源图只有 360~480 宽：比源图窄的中间档必须照样缩出来（不放大），
+// 否则 srcset 的中间候选永远 404，浏览器只能整张原图。
+test('窄源图也缩出更窄的中间档，只跳过会放大的档', { skip: hasFfmpeg ? false : '本机没有 ffmpeg/ffprobe' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mh-variants-mid-'))
+  try {
+    makeJpeg(join(dir, 'cover-old.jpg'), 480, 720)
+    const stats = await buildVariants({ dir, widths: [320, 640, 1280], concurrency: 1 })
+    assert.equal(stats.generated, 2, '320 与 1280 都要产出')
+    assert.equal(stats.skipped, 1, '只有 640 比源图宽，跳过')
+    assert.ok(existsSync(join(dir, 'variants', 'cover-old-w320.webp')))
+    assert.equal(existsSync(join(dir, 'variants', 'cover-old-w640.webp')), false)
+    assert.ok(existsSync(join(dir, 'variants', 'cover-old-w1280.webp')))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
