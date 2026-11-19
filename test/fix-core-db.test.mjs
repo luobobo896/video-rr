@@ -187,6 +187,18 @@ test('期待榜只收已上架内容，草稿不会提前曝光', () => {
   assert.equal(ids.includes(draft), false)
 })
 
+test('搜索榜按关键词聚合，不把每条搜索事件和全库做笛卡尔连接', () => {
+  const title = `唯一搜索词${randomUUID().slice(0, 8)}`
+  const dramaId = insertDrama({ title })
+  run("INSERT INTO track_events (type, path) VALUES ('search', ?)", title)
+  run("INSERT INTO track_events (type, drama_id, path) VALUES ('search', ?, 'direct')", dramaId)
+  const listInfo = run("INSERT INTO rank_lists (name, type, sort) VALUES ('搜索榜测试', 'SEARCH', 0)")
+  const listId = Number(listInfo.lastInsertRowid)
+  rankModule.refreshRank(listId)
+  const row = one('SELECT * FROM rank_items WHERE list_id = ? AND drama_id = ?', listId, dramaId)
+  assert.ok(row, '关键词命中和直接 drama_id 命中都应进入搜索榜')
+})
+
 test('天数参数非法时回落到默认值并夹在上下限内，报表不会 500', () => {
   assert.equal(analyticsModule.parseDays('abc'), 7)
   assert.equal(analyticsModule.parseDays('30'), 30)

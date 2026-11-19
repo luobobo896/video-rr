@@ -40,18 +40,35 @@ export const RANK_STRATEGIES = {
   SEARCH: {
     label: '搜索榜',
     desc: '近 30 天搜索命中次数',
-    // 搜索埋点通常只记关键词（path），没有 drama_id；先按 drama_id 关联，
-    // 为空时退回关键词匹配标题/副标题，否则热搜榜永远是空的。
-    // 关键词按字面量匹配（% 和 _ 不是通配符），长度 2–40，避免单字符把全站都算一次。
-    sql: `SELECT d.id AS drama_id, COUNT(*) * 1.0 AS score
-      FROM track_events te JOIN dramas d
-        ON d.id = te.drama_id
-        OR (te.drama_id IS NULL AND length(${KEYWORD}) BETWEEN 2 AND 40
-            AND (d.title LIKE '%' || ${KEYWORD} || '%' ESCAPE '\\'
-                 OR COALESCE(d.sub_title, '') LIKE '%' || ${KEYWORD} || '%' ESCAPE '\\'))
-      WHERE te.type = 'search' AND te.created_at >= datetime('now', '-30 days')
-        AND d.status = 'published' AND ${adultVisibilitySql()}
-      GROUP BY d.id HAVING score > 0 ORDER BY score DESC, d.id ASC`,
+    // 搜索埋点通常只记关键词（path），没有 drama_id。不能把每条搜索事件直接和
+    // 11 万部剧做 OR + LIKE 连接；先把关键词聚合成少量候选，再按关键词匹配标题。
+    // 关键词按字面量匹配（% 和 _ 不是通配符），长度 2–40，最多取 200 个热搜词。
+    sql: `WITH kw AS (
+        SELECT ${KEYWORD} AS keyword, COUNT(*) AS n
+        FROM track_events te
+        WHERE te.type = 'search' AND te.drama_id IS NULL
+          AND te.created_at >= datetime('now', '-30 days')
+          AND length(${KEYWORD}) BETWEEN 2 AND 40
+        GROUP BY keyword
+        ORDER BY n DESC
+        LIMIT 200
+      ), hits AS (
+        SELECT d.id AS drama_id, COUNT(*) AS n
+        FROM track_events te JOIN dramas d ON d.id = te.drama_id
+        WHERE te.type = 'search' AND te.created_at >= datetime('now', '-30 days')
+          AND d.status = 'published' AND ${adultVisibilitySql()}
+        GROUP BY d.id
+        UNION ALL
+        SELECT d.id AS drama_id, SUM(kw.n) AS n
+        FROM kw JOIN dramas d
+          ON d.title LIKE '%' || kw.keyword || '%' ESCAPE '\\'
+          OR COALESCE(d.sub_title, '') LIKE '%' || kw.keyword || '%' ESCAPE '\\'
+        WHERE d.status = 'published' AND ${adultVisibilitySql()}
+        GROUP BY d.id
+      )
+      SELECT drama_id, SUM(n) * 1.0 AS score
+      FROM hits GROUP BY drama_id HAVING score > 0
+      ORDER BY score DESC, drama_id ASC`,
   },
   CLASSIC: {
     label: '口碑榜',
