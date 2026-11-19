@@ -4,7 +4,7 @@ import CheckoutDialog from '../../components/CheckoutDialog.vue';
 import Icon from '../../components/Icon.vue';
 import PosterCard from '../../components/PosterCard.vue';
 import RankRow from '../../components/RankRow.vue';
-import { mediaUrl, publicApi } from '../../api.js';
+import { imageSrcset, imageVariant, mediaUrl, publicApi } from '../../api.js';
 import { t } from '../../i18n.js';
 import { normalizeCard, normalizedSection } from '../../models.js';
 import { formatElapsed, watchedPercent } from '../../time.js';
@@ -97,6 +97,20 @@ const continueItems = computed(() =>
 /** 续播进度条的宽度只能是「已看 / 全片」的百分比；没有全片时长就不画比例（别把秒当百分比）。 */
 function continuePercent(item) {
   return watchedPercent(item.position, item.duration ?? item.episodeDuration);
+}
+
+/** 续播封面取不到就退回原图，原图也没有时隐掉 img，让首字水印接管。 */
+function onCoverError(event) {
+  const img = event?.target;
+  if (!img) return;
+  const original = img.dataset.original;
+  if (img.dataset.fallback === '1' || !original) {
+    img.style.display = 'none';
+    return;
+  }
+  img.dataset.fallback = '1';
+  img.removeAttribute('srcset');
+  img.src = original;
 }
 
 function rotate(items, offset) {
@@ -311,7 +325,17 @@ onBeforeUnmount(() => {
           :href="href(`/play/${item.dramaId}/${item.episode}`)"
         >
           <div class="continue-art">
-            <img v-if="item.film.coverUrl" :src="item.film.coverUrl" alt="" />
+            <img
+              v-if="item.film.coverUrl"
+              :src="imageVariant(item.film.coverUrl, 320) || item.film.coverUrl"
+              :srcset="imageSrcset(item.film.coverUrl) || undefined"
+              :data-original="item.film.coverUrl"
+              sizes="(max-width: 900px) 45vw, 320px"
+              alt=""
+              loading="lazy"
+              decoding="async"
+              @error="onCoverError"
+            />
             <span class="continue-glyph">{{ item.film.title[0] }}</span>
             <span class="continue-label">看到第 {{ item.episode }} 集</span>
             <div v-if="continuePercent(item) !== null" class="progress">
