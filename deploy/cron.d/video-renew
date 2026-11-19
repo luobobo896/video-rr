@@ -1,0 +1,10 @@
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# 只续期已入库的 jable 直链，不导入新片：
+# - --refresh 只处理库里已有的 jable source_key
+# - --no-images/--no-preview 不下载图片，减少磁盘和 IO 竞争
+# - 独立 profile/lock，避免和用户点击触发的按需续期互相抢浏览器
+# - nice/ionice 让续期任务给线上播放和 API 让路
+# 每 5 分钟一轮，单轮最多 200 条；上一轮没跑完时 flock 会自动跳过。
+*/5 * * * * root cd /opt/video-rr && flock -n -E 99 /tmp/jable-renew.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome-renew MH_LOCK=/opt/video-rr/storage/.jable-renew.lock /usr/bin/nice -n 19 /usr/bin/ionice -c 3 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 60 --limit 200 --no-images --no-preview >> /var/log/video-renew.log 2>&1

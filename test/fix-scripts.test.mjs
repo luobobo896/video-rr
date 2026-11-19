@@ -725,6 +725,22 @@ test('cron：两轮刷新都用 flock -E 99，且各用独立进程锁', () => {
   assert.equal(source.endsWith('\n'), true, 'cron 文件末尾必须有换行')
 })
 
+test('续期 cron 只刷新已有直链，不导新片，并给播放让路', () => {
+  const source = read('deploy/cron.d/video-renew')
+  const lines = source.split('\n').filter((line) => line.includes('jable-import.mjs'))
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /--refresh/)
+  assert.match(lines[0], /--max-left 60/)
+  assert.match(lines[0], /--no-images/)
+  assert.match(lines[0], /--no-preview/)
+  assert.match(lines[0], /nice -n 19/)
+  assert.match(lines[0], /ionice -c 3/)
+  assert.match(lines[0], /\.jable-chrome-renew/)
+  assert.match(lines[0], /\.jable-renew\.lock/)
+  assert.doesNotMatch(lines[0], /--page|--skip-existing|--every/)
+  assert.equal(source.endsWith('\n'), true, 'cron 文件末尾必须有换行')
+})
+
 test('jable-health 把 99 当“上一轮仍在跑”，并按 rename 链轮转日志', () => {
   const source = read('scripts/jable-health.mjs')
   assert.match(source, /EXIT_LOCK_BUSY|99/)

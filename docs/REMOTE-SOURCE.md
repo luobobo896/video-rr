@@ -127,8 +127,7 @@ jable 的 m3u8 直链签名写在 URL 里（`/hls/<token>/<exp>/...`），有效
 `deploy/cron.d/video-refresh`（装到 `/etc/cron.d/video-refresh`）三条：
 
 ```cron
-*/5 * * * * root cd /opt/video-rr && flock -n /tmp/jable-refresh.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome MH_SHARD=0/2 /usr/bin/nice -n 19 /usr/bin/ionice -c 3 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 45 --limit 600 >> /var/log/video-refresh.log 2>&1
-2-59/5 * * * * root cd /opt/video-rr && flock -n /tmp/jable-refresh-2.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome-2 MH_SHARD=1/2 /usr/bin/nice -n 19 /usr/bin/ionice -c 3 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 45 --limit 600 >> /var/log/video-refresh.log 2>&1
+当前启用的是只续期任务 `deploy/cron.d/video-renew`：每 5 分钟刷新 60 分钟内到期的已有直链，不导入新片、不生成图片，独立 profile/lock 并降为最低 CPU/IO 优先级。批量导入配置 `deploy/cron.d/video-refresh` 暂时停用，需要补片时再单独启用。
 3,13,23,33,43,53 * * * * root cd /opt/video-rr && /usr/bin/node scripts/jable-health.mjs --fix >> /var/log/video-refresh.log 2>&1
 ```
 
