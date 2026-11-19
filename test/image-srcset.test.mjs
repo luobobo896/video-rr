@@ -83,6 +83,6 @@ test('封面 404 时逐档回退：变体 → 原图 → 占位插画，不会�
 test('变体生成：窄源图只在会放大的档跳过，最宽档与更窄档都产出', () => {
   const script = readFileSync(new URL('../scripts/build-image-variants.mjs', import.meta.url), 'utf8')
   assert.match(script, /const isWidest = width === widths\[widths\.length - 1\]/)
-  assert.match(script, /const skipIfUpscale = sourceWidth && sourceWidth <= width \* 1\.05 && sourceWidth <= width/)
+  assert.match(script, /const skipIfUpscale = sourceWidth > 0 && sourceWidth \* 1\.05 < width/)
   assert.match(script, /if \(skipIfUpscale && !isWidest\) \{ stats\.skipped \+= 1; continue \}/)
 })
