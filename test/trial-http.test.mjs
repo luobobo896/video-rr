@@ -46,6 +46,7 @@ function freePort() {
 
 /** 访客身份是服务端签发的 Cookie：不带上就会每次都被当成新访客，试看额度永远用不完 */
 const jar = new Map()
+let trialLink
 
 function cookieHeader() {
   return [...jar.entries()].map(([name, value]) => `${name}=${value}`).join('; ')
@@ -126,6 +127,7 @@ test('访客试看：签发 /media/trial 链接且只放出窗口内的分片', 
   const play = await get(`/api/play/${dramaId}/1?trial=1`)
   assert.equal(play.status, 200, play.text)
   const link = String(play.json?.data?.hls ?? '')
+  trialLink = link
   assert.match(link, new RegExp(`^/media/trial/${episodeId}/index\\.m3u8\\?sign=`), '试看必须走 /media/trial 专用链接')
   const grantSeconds = Number(play.json.data.trialSeconds)
   assert.ok(grantSeconds > 0 && grantSeconds <= 15, `访客单次试看应封顶 15 秒，实际 ${grantSeconds}`)
@@ -151,8 +153,7 @@ test('访客试看：签发 /media/trial 链接且只放出窗口内的分片', 
 })
 
 test('试看：改 sec、越界分片、缺票都必须 403', async () => {
-  const play = await get(`/api/play/${dramaId}/1?trial=1`)
-  const url = new URL(`${base}${String(play.json?.data?.hls ?? '')}`)
+  const url = new URL(trialLink, base)
   const params = url.searchParams
 
   const tampered = new URLSearchParams(params)
@@ -171,8 +172,6 @@ test('试看：改 sec、越界分片、缺票都必须 403', async () => {
 })
 
 test('试看额度用尽后返回 402 trial_exhausted，不再签发新链接', async () => {
-  // 访客 24h 内同剧最多 3 个窗口：用例 1/2 已各用掉一个
-  await get(`/api/play/${dramaId}/1?trial=1`)
   const last = await get(`/api/play/${dramaId}/1?trial=1`)
   assert.equal(last.status, 402, last.text)
   assert.equal(last.json?.data?.reason, 'trial_exhausted')

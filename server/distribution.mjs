@@ -874,7 +874,7 @@ export function reviewSettlement({ settlementId, action, reviewerId, payoutRef, 
     if (action === 'pay') {
       if (settlement.status !== 'approved') throw new DistributionError('settlement_state_invalid', '结算单需先批准', 409)
       const items = all('SELECT * FROM commission_settlement_items WHERE settlement_id = ?', settlement.id)
-      let actualTotal = 0
+      let grossTotal = 0
       for (const item of items) {
         const commission = one('SELECT * FROM commission_records WHERE id = ? AND status = ?', item.commission_id, 'settling')
         if (!commission) continue
@@ -889,18 +889,19 @@ export function reviewSettlement({ settlementId, action, reviewerId, payoutRef, 
         run(`INSERT INTO commission_events (commission_id, event_type, amount_fen, reason, operator_id, reference_type, reference_id)
           VALUES (?, 'settled', ?, ?, ?, 'settlement', ?)`,
         item.commission_id, -payAmount, reason ?? 'settlement_paid', reviewerId ?? null, settlement.id)
-        actualTotal += payAmount
+        grossTotal += payAmount
       }
-      if (actualTotal <= 0) throw new DistributionError('commission_state_invalid', '结算佣金已被退款或占用，无法打款', 409)
+      if (grossTotal <= 0) throw new DistributionError('commission_state_invalid', '结算佣金已被退款或占用，无法打款', 409)
       const oldDebtOffset = Number(settlement.debt_offset_fen ?? 0)
-      const newDebtOffset = Math.min(oldDebtOffset, actualTotal)
+      const newDebtOffset = Math.min(oldDebtOffset, grossTotal)
+      const payable = grossTotal - newDebtOffset
       if (newDebtOffset < oldDebtOffset) {
         run(`UPDATE distributor_profiles SET debt_offset_fen = MAX(0, debt_offset_fen - ?), updated_at = datetime('now')
           WHERE user_id = ?`, oldDebtOffset - newDebtOffset, settlement.distributor_user_id)
       }
-      if (actualTotal !== Number(settlement.amount_fen) || newDebtOffset !== oldDebtOffset) {
+      if (payable !== Number(settlement.amount_fen) || newDebtOffset !== oldDebtOffset) {
         run('UPDATE commission_settlements SET amount_fen = ?, debt_offset_fen = ? WHERE id = ?',
-          actualTotal, newDebtOffset, settlement.id)
+          payable, newDebtOffset, settlement.id)
       }
       const changed = run(`UPDATE commission_settlements SET status = 'paid', payout_ref = ?, paid_at = datetime('now')
         WHERE id = ? AND status = 'approved'`,

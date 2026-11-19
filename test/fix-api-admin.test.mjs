@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -77,14 +77,16 @@ const call = async (method, path, { body, token } = {}) => {
 before(async () => {
   server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    const chunks = []
-    for await (const chunk of req) chunks.push(chunk)
-    const raw = Buffer.concat(chunks).toString('utf8')
-    let body = {}
-    if (raw) {
-      try { body = JSON.parse(raw) } catch { body = {} }
+    try {
+      if (url.pathname.endsWith('/upload')) {
+        req.resume()
+        return await adminApi.handleAdmin(url.pathname, url, req, res, {}, { uploadPath: join(root, 'invalid-upload.part') })
+      }
+      await adminApi.handleAdmin(url.pathname, url, req, res)
+    } catch (error) {
+      res.writeHead(error.status ?? 500, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ code: error.code, msg: error.message }))
     }
-    await adminApi.handleAdmin(url.pathname, url, req, res, body)
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   base = `http://127.0.0.1:${server.address().port}`
@@ -106,6 +108,48 @@ before(async () => {
   dramaId = Number(drama.lastInsertRowid)
   const plan = db.prepare("INSERT INTO plans (code, name, price_cny, duration_days, scope, sort, status) VALUES ('900001', '回归套餐', 9.9, 30, 'all', 0, 'active')").run()
   planId = Number(plan.lastInsertRowid)
+})
+
+test('后台拒绝非法 JSON，且不创建默认榜单', async () => {
+  const count = () => db.prepare('SELECT COUNT(*) AS total FROM rank_lists').get().total
+  const before = count()
+  const response = await fetch(`${base}/admin/api/ranks`, {
+    method: 'POST', headers: { authorization: `Bearer ${actors.root.token}`, 'content-type': 'application/json' }, body: '{',
+  })
+  assert.equal(response.status, 400)
+  assert.equal((await response.json()).code, '0400')
+  assert.equal(count(), before)
+})
+
+test('无效视频上传不修改分集并清除临时文件', async () => {
+  const episode = db.prepare("INSERT INTO episodes (drama_id, no, title, status) VALUES (?, 90, '上传校验', 'pending') RETURNING id").get(dramaId)
+  const path = join(root, 'invalid-upload.part')
+  writeFileSync(path, '不是视频')
+  const result = await call('POST', `/admin/api/episodes/${episode.id}/upload`, { token: actors.root.token })
+  assert.equal(result.status, 400)
+  const row = db.prepare('SELECT status, source_path FROM episodes WHERE id = ?').get(episode.id)
+  assert.equal(row.status, 'pending')
+  assert.equal(row.source_path, null)
+  assert.equal(existsSync(path), false)
+})
+
+test('旧支付配置接口停用，升级清理明文但保留原渠道和审计记录', async () => {
+  dbModule.migratePayChannels()
+  const before = db.prepare("SELECT config_cipher FROM pay_channels WHERE channel_code = 'alipay'").get().config_cipher
+  const sentinel = 'fixture-key-not-a-real-secret'
+  dbModule.setSetting('pay', { alipay: { privateKey: sentinel, refundEnabled: false } })
+  const audit = db.prepare("INSERT INTO audit_logs (actor_type, action, before_json, after_json) VALUES ('admin', 'admin.pay.settings', ?, ?) RETURNING id").get(sentinel, sentinel)
+  const legacy = await call('GET', '/admin/api/pay-settings', { token: actors.root.token })
+  assert.equal(legacy.status, 410)
+  assert.ok(!JSON.stringify(legacy).includes(sentinel))
+  const write = await call('PUT', '/admin/api/pay-settings', { token: actors.root.token, body: { pay: {} } })
+  assert.equal(write.status, 410)
+  dbModule.migratePayChannels()
+  assert.ok(!JSON.stringify(dbModule.getSetting('pay')).includes(sentinel))
+  assert.equal(db.prepare("SELECT config_cipher FROM pay_channels WHERE channel_code = 'alipay'").get().config_cipher, before)
+  const auditRow = db.prepare('SELECT before_json, after_json FROM audit_logs WHERE id = ?').get(audit.id)
+  assert.equal(auditRow.before_json, null)
+  assert.equal(auditRow.after_json, null)
 })
 
 after(() => {

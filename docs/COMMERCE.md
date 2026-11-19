@@ -66,7 +66,7 @@ created ──支付成功──▶ paid ──发放权益──▶ fulfilled
 
 ```
 财务 A 发起（原因必填）→ refunds.status=pending
-财务 B 审批 → approved → 执行：回收 subscriptions/purchases → 订单 refunded
+财务 B 审批 → approved → 执行：累计全额退款时回收 subscriptions/purchases，订单标记 refunded；部分退款保留权益
 ```
 
 - 发起人 = 审批人时接口直接 400（`dual_control_required`）。

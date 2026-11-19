@@ -106,7 +106,7 @@ test('结算单需要双人复核，打款后佣金记已结算', () => {
   assert.ok(db.prepare("SELECT COUNT(*) AS n FROM commission_records WHERE distributor_user_id = ? AND status = 'paid'").get(a).n >= 1)
 })
 
-test('已结算后退款形成待抵扣负余额', () => {
+test('已结算后部分退款形成负余额，下次确认打款仍按净额记账', () => {
   const { a, d } = chain()
   const order = commerce.createOrder({ userId: d, visitorId: 'v-d', productType: 'subscription', planId: 1, channel: 'mock' })
   const paid = commerce.markPaid({ outTradeNo: order.order.out_trade_no, channel: 'mock', channelTxnId: `DEBT-${Date.now()}` })
@@ -116,10 +116,23 @@ test('已结算后退款形成待抵扣负余额', () => {
   const settlement = dist.createSettlement({ distributorUserId: a, periodStart: '2000-01-01', periodEnd: '2099-12-31', createdBy: 31 })
   dist.reviewSettlement({ settlementId: settlement.id, action: 'approve', reviewerId: 32 })
   dist.reviewSettlement({ settlementId: settlement.id, action: 'pay', reviewerId: 32, payoutRef: 'BANK-DEBT' })
-  const refund = commerce.createRefund({ orderId: paid.order.id, amount: paid.order.amount_cny, reason: '已结算后退款', operatorId: 33 })
+  const refund = commerce.createRefund({ orderId: paid.order.id, amount: paid.order.amount_cny / 2, reason: '已结算后退款', operatorId: 33 })
   commerce.approveRefund({ refundId: refund.id, approverId: 34 })
   dist.refreshBalances(a)
-  assert.ok(Number(db.prepare('SELECT debt_fen FROM distributor_profiles WHERE user_id = ?').get(a).debt_fen) > 0)
+  const debt = db.prepare('SELECT debt_fen FROM distributor_profiles WHERE user_id = ?').get(a).debt_fen
+  assert.ok(debt > 0)
+  const next = commerce.createOrder({ userId: d, visitorId: 'v-d', productType: 'subscription', planId: 2, channel: 'mock' })
+  commerce.markPaid({ orderId: next.order.id, channel: 'mock', channelTxnId: `DEBT-NEXT-${next.order.id}` })
+  db.prepare("UPDATE commission_records SET available_at = datetime('now','-1 minute') WHERE order_id = ?").run(next.order.id)
+  dist.markCommissionsAvailable()
+  const nextSettlement = dist.createSettlement({ distributorUserId: a, periodStart: '2000-01-01', periodEnd: '2099-12-31', createdBy: 31 })
+  assert.equal(nextSettlement.debt_offset_fen, debt)
+  dist.reviewSettlement({ settlementId: nextSettlement.id, action: 'approve', reviewerId: 32 })
+  const completed = dist.reviewSettlement({ settlementId: nextSettlement.id, action: 'pay', reviewerId: 32, payoutRef: 'BANK-DEBT-NEXT' })
+  assert.equal(completed.amount_fen, nextSettlement.amount_fen)
+  assert.equal(completed.debt_offset_fen, debt)
+  const gross = db.prepare('SELECT SUM(amount_fen) AS total FROM commission_settlement_items WHERE settlement_id = ?').get(completed.id).total
+  assert.equal(gross, completed.amount_fen + completed.debt_offset_fen)
 })
 
 test('按 IP/手动币种返回 CNY 或 USD 展示余额，并可提交提现', () => {

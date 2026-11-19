@@ -2,8 +2,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { join } from 'node:path'
-import { db, getSetting, ROOT } from './db.mjs'
-import * as dbModule from './db.mjs'
+import { db, getSetting, recordTrialUse, ROOT, trialBudget } from './db.mjs'
 import { adultMenuSettings } from './adult-menu.mjs'
 import { adultVisibilitySql } from './content-visibility.mjs'
 import { adultStatsFor } from './adult-stats.mjs'
@@ -219,49 +218,24 @@ function searchTrackFresh(subject, keyword) {
 
 /* ---------- 试看台账：登录与匿名都计量，按 subject + 剧 24h 结算 ---------- */
 
-let trialTableReady = false
-/** trial_uses 由 db.mjs 建立；这里补一次幂等建表，缺表也不会把试看打成 500。 */
-function ensureTrialTable() {
-  if (trialTableReady) return
+function reserveGuestTrial({ visitorId, dramaId, episode, grantSeconds, ip, ua }) {
+  db.exec('BEGIN IMMEDIATE')
   try {
-    db.exec(`CREATE TABLE IF NOT EXISTS trial_uses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      subject_kind TEXT NOT NULL,
-      subject TEXT NOT NULL,
-      drama_id INTEGER NOT NULL,
-      episode_id INTEGER,
-      seconds_used INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )`)
-    db.exec('CREATE INDEX IF NOT EXISTS idx_trial_uses_budget ON trial_uses(subject_kind, subject, drama_id, created_at)')
+    const budget = trialBudget({ subjectKind: 'visitor', subject: visitorId, dramaId })
+    if (budget.windows) {
+      db.exec('COMMIT')
+      return { budget, session: null }
+    }
+    const session = startViewSession({ visitorId, contentId: dramaId, episodeId: episode.id,
+      source: 'trial', duration: Math.min(grantSeconds, Number(episode.duration) || grantSeconds), ip, ua })
+    db.prepare(`INSERT INTO trial_uses (subject_kind, subject, drama_id, episode_id, view_session_id)
+      VALUES ('visitor', ?, ?, ?, ?)`).run(visitorId, dramaId, episode.id, session.id)
+    db.exec('COMMIT')
+    return { budget, session }
   } catch (error) {
-    logWarn('trial.schema_unavailable', { error })
+    db.exec('ROLLBACK')
+    throw error
   }
-  trialTableReady = true
-}
-
-/**
- * 24h 试看额度。db.mjs 的 trialBudget() 是权威实现；下面的同表 SQL 只在它还没导出时兜底
- * （并行子代理交付后走不到这一支），保证本文件的额度判定在任何部署顺序下都成立。
- */
-function trialBudgetOf({ subjectKind, subject, dramaId, windowHours = 24 }) {
-  ensureTrialTable()
-  if (typeof dbModule.trialBudget === 'function') return dbModule.trialBudget({ subjectKind, subject, dramaId, windowHours })
-  const row = one(`SELECT COALESCE(SUM(seconds_used), 0) AS used, COUNT(*) AS windows FROM trial_uses
-    WHERE subject_kind = ? AND subject = ? AND drama_id = ? AND created_at >= datetime('now', ?)`,
-  subjectKind, subject, dramaId, `-${intOf(windowHours, 24, 1, 168)} hours`)
-  return { usedSeconds: Number(row?.used ?? 0), windows: Number(row?.windows ?? 0) }
-}
-
-function recordTrialUse({ subjectKind, subject, dramaId, episodeId, secondsUsed }) {
-  // db.mjs 的 recordTrialUse 是权威实现（参数名 secondsUsed），只在它还没导出时走同表兜底
-  if (typeof dbModule.recordTrialUse === 'function') {
-    return dbModule.recordTrialUse({ subjectKind, subject, dramaId, episodeId, secondsUsed })
-  }
-  ensureTrialTable()
-  db.prepare(`INSERT INTO trial_uses (subject_kind, subject, drama_id, episode_id, seconds_used, created_at)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))`)
-    .run(subjectKind, String(subject), dramaId, episodeId, intOf(secondsUsed, 0, 0, 86400))
 }
 
 /* ---------- 「全部分类」筛选taxonomy：固定枚举，空库也有完整分类树 ---------- */
@@ -540,7 +514,8 @@ export async function handlePublic(pathname, url, req, res) {
   const OPEN_PREFIXES = ['/api/drama/', '/api/category/', '/api/tags/']
   // 只有支付宝服务端回调是公开的（自带 RSA2 验签）；其余回调一律留在内网/进程内
   const guestTrial = pathname.startsWith('/api/play/') && method === 'GET' && url.searchParams.get('trial') === '1'
-  const isOpen = OPEN_PATHS.has(pathname) || OPEN_PREFIXES.some((p) => pathname.startsWith(p)) || guestTrial || pathname === '/api/notify/alipay'
+  const heartbeat = method === 'POST' && /^\/api\/play\/session\/[^/]+\/heartbeat$/.test(pathname)
+  const isOpen = OPEN_PATHS.has(pathname) || OPEN_PREFIXES.some((p) => pathname.startsWith(p)) || guestTrial || heartbeat || pathname === '/api/notify/alipay'
   if (!isOpen && !userId) {
     return fail(res, '0401', '登录后才可播放与查看个人内容', 401)
   }
@@ -1214,7 +1189,7 @@ export async function handlePublic(pathname, url, req, res) {
       return send(res, resolveAccess(userId, dramaId, no))
     }
 
-    if (pathname.startsWith('/api/play/session/') && pathname.endsWith('/heartbeat') && method === 'POST') {
+    if (heartbeat) {
       const sessionId = pathname.split('/')[4]
       const body = await readBody(req)
       const result = applyHeartbeat({
@@ -1296,7 +1271,7 @@ export async function handlePublic(pathname, url, req, res) {
       const ua = String(req.headers['user-agent'] ?? '')
       /**
        * 试看：scope 收窄到 /media/trial/<episodeId>/（index.mjs 按 sec 秒数截断清单、只放行窗口内分片），
-       * 登录与匿名都写 trial_uses 计量：24h 内同 subject 同剧累计超过 trialSeconds+60 或窗口数 ≥3 就封顶。
+       * 游客同剧 24h 只签发一个窗口；登录用户保留原额度。
        */
       if (!access.allow && access.trialSeconds > 0 && trialWanted) {
         const episode = loadEpisode()
@@ -1315,11 +1290,13 @@ export async function handlePublic(pathname, url, req, res) {
         const policyTrial = intOf(access.trialSeconds, 0, 1, 3600)
         // 访客单次封顶 15 秒（老口径），登录用户按剧的 trial_seconds
         const grantSeconds = Math.max(1, Math.min(policyTrial, userId ? 3600 : 15))
-        const capSeconds = policyTrial + 60
-        const budget = trialBudgetOf({ subjectKind, subject, dramaId })
+        const tracks = publicTracksOf(episode.id, lang)
+        const capSeconds = userId ? policyTrial + 60 : grantSeconds
+        const guest = userId ? null : reserveGuestTrial({ visitorId, dramaId, episode, grantSeconds, ip: clientIp(req), ua })
+        const budget = guest?.budget ?? trialBudget({ subjectKind, subject, dramaId })
         const usedSeconds = intOf(budget?.usedSeconds, 0, 0, 86400)
         const windows = intOf(budget?.windows, 0, 0, 1000)
-        if (windows >= 3 || usedSeconds + grantSeconds > capSeconds) {
+        if (guest ? !guest.session : windows >= 3 || usedSeconds + grantSeconds > capSeconds) {
           logWarn('trial.exhausted', { requestId: res.getHeader?.('x-request-id'), subjectKind, dramaId, usedSeconds, windows })
           return send(res, {
             reason: 'trial_exhausted', code: 'trial_exhausted', gated: false,
@@ -1329,38 +1306,34 @@ export async function handlePublic(pathname, url, req, res) {
             message: '本剧试看额度已用完，购买后可看完整剧集',
           }, '0402', '试看额度已用完', 402)
         }
-        const fresh = await freshen(episode)
-        if (fresh.reject) return sendReject(fresh.reject)
-        const playable = fresh.episode
-        const tracks = publicTracksOf(playable.id, lang)
         // 签名 TTL 覆盖整个试看窗口：秒数已进 scope，链接过期前都能拿到窗口内分片
-        const trialTtl = Math.min(3600, Math.max(1, grantSeconds)) + 5
+        const trialTtl = grantSeconds + (guest ? 60 : 5)
         // scope 里带秒数（防篡改），对外 URL 仍是 /media/trial/<id>/index.m3u8，秒数走 query
-        const scope = `/media/trial/${playable.id}/${grantSeconds}/`
+        const scope = `/media/trial/${episode.id}/${grantSeconds}/`
         // ua 必须显式传：handlePublic 里没有 res.req，缺省会签成 noua 与 index.mjs 的校验不一致
         const link = secureLinkScoped(res, scope, trialTtl, ua)
-        const trialHls = `/media/trial/${playable.id}/index.m3u8?sign=${encodeURIComponent(link.sign)}&expires=${link.expires}&sec=${grantSeconds}`
+        const trialHls = `/media/trial/${episode.id}/index.m3u8?sign=${encodeURIComponent(link.sign)}&expires=${link.expires}&sec=${grantSeconds}`
         // 首次试看才下发访客 Cookie；必须排在 secureLinkScoped 之后（它会整块覆盖 set-cookie）
         if (visitor.fresh) appendSetCookie(res, visitorCookie(req, visitor.id))
-        recordTrialUse({ subjectKind, subject, dramaId, episodeId: playable.id, secondsUsed: grantSeconds })
-        recordPlay({ userId, visitorId, dramaId, episodeId: playable.id, episodeNo: no, source: 'trial', ip: clientIp(req), ua: req.headers['user-agent'] })
-        let viewSession = null
+        if (!guest) recordTrialUse({ subjectKind, subject, dramaId, episodeId: episode.id, secondsUsed: grantSeconds })
+        recordPlay({ userId, visitorId, dramaId, episodeId: episode.id, episodeNo: no, source: 'trial', ip: clientIp(req), ua: req.headers['user-agent'] })
+        let viewSession = guest?.session ?? null
         try {
-          viewSession = startViewSession({
-            userId, visitorId, contentId: dramaId, episodeId: playable.id, source: 'trial',
-            duration: playable.duration, ip: clientIp(req), ua: req.headers['user-agent'],
+          viewSession ??= startViewSession({
+            userId, visitorId, contentId: dramaId, episodeId: episode.id, source: 'trial',
+            duration: episode.duration, ip: clientIp(req), ua: req.headers['user-agent'],
           })
         } catch (error) {
           logWarn('content.view_session_failed', { requestId: res.getHeader?.('x-request-id'), userId, dramaId, error })
         }
         return send(res, {
-          dramaId, title: drama.title, episodeId: playable.id, episodeStatus: playable.status,
-          episode: { id: playable.id, no: playable.no, title: playable.title },
+          dramaId, title: drama.title, episodeId: episode.id, episodeStatus: episode.status,
+          episode: { id: episode.id, no: episode.no, title: episode.title },
           source: 'trial', hls: trialHls, expiresIn: trialTtl, trialSeconds: grantSeconds,
-          trialBudget: { usedSeconds: usedSeconds + grantSeconds, windows: windows + 1, capSeconds },
+          trialBudget: { usedSeconds: guest ? 0 : usedSeconds + grantSeconds, windows: windows + 1, capSeconds },
           danmu: [],
-          viewSessionId: viewSession?.id ?? null, heartbeatIntervalSeconds: 15,
-          viewThresholdSeconds: viewSession?.thresholdSeconds ?? 30, duration: Number(playable.duration ?? 0),
+          viewSessionId: viewSession?.id ?? null, heartbeatIntervalSeconds: guest ? 3 : 15,
+          viewThresholdSeconds: viewSession?.thresholdSeconds ?? 30, duration: Number(episode.duration ?? 0),
           ...tracks,
         })
       }

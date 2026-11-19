@@ -169,24 +169,12 @@ test('访客换 x-mh-visitor 头不能重置试看额度，且伪造 Cookie 会�
   assert.ok(visitorCookie, '首次试看必须由服务端下发 mh_visitor Cookie')
   assert.match(first.cookies.join('\n'), /mh_visitor=[^;]+;.*HttpOnly/i)
 
-  // 同一个 Cookie，换三个不同的 x-mh-visitor：仍是同一个访客，额度必须共享
+  // 同一个 Cookie，额度必须共享
   const second = await call(`/api/play/${visitorDrama.dramaId}/1?trial=1`, {
     headers: { cookie: visitorCookie, 'x-mh-visitor': 'visitor-b' },
   })
-  assert.equal(second.status, 200, second.text)
-  assert.equal(second.json.data.trialBudget.windows, 2)
-
-  const third = await call(`/api/play/${visitorDrama.dramaId}/1?trial=1`, {
-    headers: { cookie: visitorCookie, 'x-mh-visitor': 'visitor-c' },
-  })
-  assert.equal(third.status, 200, third.text)
-  assert.equal(third.json.data.trialBudget.windows, 3)
-
-  const fourth = await call(`/api/play/${visitorDrama.dramaId}/1?trial=1`, {
-    headers: { cookie: visitorCookie, 'x-mh-visitor': 'visitor-d' },
-  })
-  assert.equal(fourth.status, 402, fourth.text)
-  assert.equal(fourth.json.data.code, 'trial_exhausted')
+  assert.equal(second.status, 402, second.text)
+  assert.equal(second.json.data.code, 'trial_exhausted')
 
   // 伪造签名的 mh_visitor：不信任客户端原值，重新签发
   const forged = `mh_visitor=${encodeURIComponent(`v1.hacker.${'a'.repeat(32)}`)}`
@@ -194,6 +182,28 @@ test('访客换 x-mh-visitor 头不能重置试看额度，且伪造 Cookie 会�
   assert.equal(forgedRetry.status, 200, forgedRetry.text)
   const reissued = cookieOf(forgedRetry, 'mh_visitor')
   assert.ok(reissued && reissued !== forged, '伪造的访客 Cookie 必须被丢弃并重新签发')
+})
+
+test('游客试看仅累计可见且正在推进的播放', async () => {
+  const first = await call(`/api/play/${visitorDrama.dramaId}/1?trial=1`)
+  assert.equal(first.status, 200, first.text)
+  const session = first.json.data.viewSessionId
+  const cookie = cookieOf(first, 'mh_visitor')
+  const usage = () => db.prepare('SELECT seconds_used FROM trial_uses WHERE view_session_id = ?').get(session).seconds_used
+  const beat = async (positionSeconds, playing, visible) => {
+    db.prepare("UPDATE content_view_sessions SET last_heartbeat_at = datetime('now', '-4 seconds') WHERE id = ?").run(session)
+    const result = await call(`/api/play/session/${session}/heartbeat`, {
+      method: 'POST', headers: { cookie }, body: { positionSeconds, playing, visible },
+    })
+    assert.equal(result.status, 200, result.text)
+  }
+  assert.equal(usage(), 0)
+  await beat(4, false, true)
+  await beat(7, true, false)
+  await beat(7, true, true)
+  assert.equal(usage(), 0)
+  await beat(10, true, true)
+  assert.equal(usage(), 3)
 })
 
 test('验证码接口在测试钩子关闭时不回传 testCode', async () => {

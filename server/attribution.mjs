@@ -219,15 +219,18 @@ export function bindUserAcquisition({ userId, visitorId } = {}) {
   const now = nowSql()
   const firstEnterAt = withinWindow ? visitor.first_enter_at : now
   const touchId = withinWindow ? visitor?.first_channel_touch_id ?? null : null
+  const cutoff = one('SELECT created_at FROM users WHERE id = ?', userId)?.created_at ?? now
+  const registrationTouchId = visitor ? one(`SELECT MAX(id) AS id FROM channel_touches
+    WHERE visitor_id = ? AND occurred_at <= ? AND user_id IS NULL`, visitorId, cutoff)?.id : null
   run(`INSERT OR IGNORE INTO user_acquisitions
     (user_id, first_channel_id, first_campaign_id, first_promo_code, first_domain_source,
-     first_enter_at, attributed_at, attribution_model, attribution_touch_id, last_channel_id, last_touch_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'first_touch', ?, ?, ?)`,
+     first_enter_at, attributed_at, attribution_model, attribution_touch_id, last_channel_id, last_touch_at, pre_binding_touch_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'first_touch', ?, ?, ?, ?)`,
   userId, channelId, canUseVisitorChannel ? visitor?.first_campaign_id ?? null : null,
   promoCode,
   canUseVisitorChannel ? visitor?.first_domain_source ?? null : null, firstEnterAt, now, touchId,
   canUseVisitorChannel ? visitor?.last_channel_id ?? channelId : channelId,
-  canUseVisitorChannel ? visitor?.last_touch_at ?? now : now)
+  canUseVisitorChannel ? visitor?.last_touch_at ?? now : now, registrationTouchId ?? 0)
   if (visitorId) run('UPDATE visitors SET user_id = COALESCE(user_id, ?) WHERE id = ?', userId, visitorId)
   return one('SELECT * FROM user_acquisitions WHERE user_id = ?', userId)
 }
@@ -255,10 +258,13 @@ export function getOrderAttribution({ userId, visitorId } = {}) {
     const attributionConfig = getSetting('attribution', {})
     const windowDays = Math.max(1, Math.min(180, Number(attributionConfig.windowDays ?? 30) || 30))
     const since = new Date(Date.now() - windowDays * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
-    const lastTouch = one(`SELECT t.*, c.channel_type AS resolved_channel_type
-      FROM channel_touches t JOIN channels c ON c.id = t.channel_id
-      WHERE (t.user_id = ? OR t.visitor_id = ?) AND t.match_rule <> 'direct' AND t.occurred_at >= ?
-      ORDER BY t.id DESC LIMIT 1`, Number(userId) || 0, String(visitorId ?? ''), since)
+    const lastTouch = one(`SELECT t.* FROM channel_touches t
+      WHERE t.visitor_id = COALESCE((SELECT visitor_id FROM channel_touches WHERE id = ?), ?)
+        AND t.user_id IS NULL AND t.is_valid = 1 AND t.match_rule <> 'direct' AND t.occurred_at >= ?
+        AND CASE WHEN ? IS NOT NULL THEN t.id <= ?
+          ELSE t.occurred_at < (SELECT created_at FROM users WHERE id = ?) OR t.id = ? END
+      ORDER BY t.id DESC LIMIT 1`, acquisition.pre_binding_touch_id, String(visitorId ?? ''), since,
+    acquisition.pre_binding_touch_id, acquisition.pre_binding_touch_id, Number(userId), acquisition.attribution_touch_id)
     if (lastTouch) {
       selectedChannelId = lastTouch.channel_id
       selectedCampaignId = lastTouch.campaign_id

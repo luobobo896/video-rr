@@ -14,22 +14,49 @@ BROWSER_UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
+command -v node >/dev/null || { echo "缺少 node >=22.5（需要 node:sqlite）"; exit 1; }
+node -e "require('node:sqlite')" 2>/dev/null || { echo "node 版本过低：$(node -v)"; exit 1; }
+if [ -f "$APP/.env" ]; then
+  set -a; . "$APP/.env"; set +a
+fi
+DB_PATH=${MH_DB:-"$APP/storage/app.db"}
 log "0/7 备份数据库"
-if [ -f "$APP/storage/app.db" ]; then
-  BK="$APP/storage/backup/app.db.$(date +%Y%m%d-%H%M%S)"
+if [ -f "$DB_PATH" ]; then
+  BK="$APP/storage/backup/app.db.$(date +%Y%m%d-%H%M%S).sqlite"
   mkdir -p "$APP/storage/backup"
-  cp -a "$APP/storage/app.db" "$BK"
-  [ -f "$APP/storage/app.db-wal" ] && cp -a "$APP/storage/app.db-wal" "$BK-wal"
+  (
+    umask 077
+    temp=$(mktemp -d "$APP/storage/backup/.snapshot.XXXXXXXX")
+    trap 'rm -rf -- "$temp"' EXIT
+    node --input-type=module - "$DB_PATH" "$temp/app.db" <<'JS'
+import { DatabaseSync } from 'node:sqlite'
+
+const [source, target] = process.argv.slice(2)
+const db = new DatabaseSync(source, { readOnly: true })
+try {
+  db.exec('PRAGMA busy_timeout = 5000')
+  db.prepare('VACUUM INTO ?').run(target)
+} finally {
+  db.close()
+}
+const snapshot = new DatabaseSync(target, { readOnly: true })
+try {
+  const rows = snapshot.prepare('PRAGMA integrity_check').all()
+  if (rows.length !== 1 || rows[0].integrity_check !== 'ok') throw new Error('SQLite 备份完整性校验失败')
+} finally {
+  snapshot.close()
+}
+JS
+    mv -- "$temp/app.db" "$BK"
+  )
   echo "已备份：$BK"
-  ls -1t "$APP"/storage/backup/app.db.* 2>/dev/null | tail -n +11 | xargs -r rm -f
+  ls -1t "$APP"/storage/backup/app.db.*.sqlite | tail -n +11 | xargs -r rm -f
 fi
 
 log "1/7 依赖检查与前端构建"
 mkdir -p "$APP/storage/hls" "$APP/storage/uploads" "$APP/storage/images"
 command -v ffmpeg >/dev/null || { echo "缺少 ffmpeg"; exit 1; }
-command -v node >/dev/null || { echo "缺少 node >=22.5（需要 node:sqlite）"; exit 1; }
 command -v npm >/dev/null || { echo "缺少 npm（构建 Vue + Vite 前端需要）"; exit 1; }
-node -e "require('node:sqlite')" 2>/dev/null || { echo "node 版本过低：$(node -v)"; exit 1; }
 
 # 每次都从当前源码重建，避免部署包里的旧 dist 或漏构建让线上继续跑旧前端。
 if [ -f package-lock.json ]; then

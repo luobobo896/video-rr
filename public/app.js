@@ -2288,7 +2288,7 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
   const danmuLayer = $('#danmu-layer')
   const viewSessionId = data.viewSessionId
   let heartbeatTimer = 0
-  const sendViewHeartbeat = () => {
+  const sendViewHeartbeat = (_event, finished = false) => {
     if (!viewSessionId || !video) return
     const duration = Number(video.duration || data.duration || 0)
     void api(`/api/play/session/${encodeURIComponent(viewSessionId)}/heartbeat`, {
@@ -2296,7 +2296,7 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
       body: JSON.stringify({
         positionSeconds: Number(video.currentTime || 0),
         durationSeconds: duration,
-        playing: !video.paused && !video.ended,
+        playing: finished || (!video.paused && !video.ended && !video.seeking && video.readyState >= 3),
         visible: !document.hidden,
         playbackRate: Number(video.playbackRate || 1),
       }),
@@ -2305,7 +2305,7 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
   if (viewSessionId) {
     heartbeatTimer = setInterval(() => {
       if (!video?.ended) sendViewHeartbeat()
-    }, 15_000)
+    }, (data.heartbeatIntervalSeconds || 15) * 1000)
     video?.addEventListener('play', sendViewHeartbeat)
     video?.addEventListener('pause', sendViewHeartbeat)
     onCleanup(() => {
@@ -2648,14 +2648,15 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
     }
     video.addEventListener('seeking', clampTrialSeek)
     onCleanup(() => video.removeEventListener('seeking', clampTrialSeek))
-    video.addEventListener('timeupdate', () => {
+    const finishTrial = (event) => {
       if (trialHit) return
       const left = trialSeconds - video.currentTime
-      if (left > 0) {
+      if (left > 0 && event.type !== 'ended') {
         notice(`试看剩余 ${remainText(left)}，结束后需开通会员或购买`)
         return
       }
       trialHit = true
+      sendViewHeartbeat(event, true)
       video.pause()
       track('trial_end', { dramaId: detail.dramaId, episodeId: episode.id, position: Math.round(video.currentTime), meta: { reason: 'timeout' } })
       openPaywall(detail, {
@@ -2663,11 +2664,14 @@ async function renderPlay(id, episodeNo, params = new URLSearchParams()) {
         reason: detail.accessMode === 'paid' ? 'single_purchase_required' : 'subscription_required',
         title: '试看结束',
       })
-    })
+    }
+    video.addEventListener('timeupdate', finishTrial)
+    video.addEventListener('ended', finishTrial)
   }
 
   // 连播：本集播完自动进下一集
   video.addEventListener('ended', () => {
+    if (data.source === 'trial') return
     saveHistory()
     reportEnd('ended')
     if (!data.nextEpisodeNo) return toast('已是最后一集')

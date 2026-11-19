@@ -2993,13 +2993,13 @@ async function pageRefunds() {
       const info = button.dataset.info ?? ''
       if (!(await askConfirm({
         title: '通过退款',
-        message: `${info}\n\n通过后订单置为已退款，该用户对应权益立即回收。`,
-        confirmText: '通过并回收权益',
+        message: `${info}\n\n累计全额退款才会收回对应权益；部分退款保留权益。`,
+        confirmText: '通过退款',
         danger: true,
       }))) return
       try {
         const result = await api(`/admin/api/refunds/${button.dataset.approve}/approve`, { method: 'POST', body: {} })
-        toast(result.warning ?? '退款完成，权益已回收')
+        toast(result.warning ?? (result.fullyRefunded ? '全额退款完成，订单对应权益已回收' : '部分退款完成，权益保留'))
       } catch (error) { toast(error.message) }
       await pageRefunds()
     })

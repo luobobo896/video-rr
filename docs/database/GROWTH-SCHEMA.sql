@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS user_acquisitions (
   attributed_at TEXT NOT NULL,
   attribution_model TEXT NOT NULL DEFAULT 'first_touch',
   attribution_touch_id INTEGER REFERENCES channel_touches(id) ON DELETE SET NULL,
+  pre_binding_touch_id INTEGER,
   last_channel_id INTEGER REFERENCES channels(id) ON DELETE SET NULL,
   last_touch_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),

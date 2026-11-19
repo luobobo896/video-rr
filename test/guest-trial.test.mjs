@@ -58,20 +58,14 @@ before(async () => {
 
 after(() => { try { db?.close() } catch { /* ignore */ } })
 
-test('游客试看每次 15 秒、同一访客三个窗口后限额', async () => {
+test('游客同剧只发放一次 15 秒试看，发放时不计播放秒数', async () => {
   const first = await callTrial()
   assert.equal(first.status, 200, first.msg)
   assert.equal(first.data.source, 'trial')
   assert.equal(first.data.trialSeconds, 15)
   assert.equal(first.data.trialBudget.windows, 1)
-
-  const second = await callTrial()
-  assert.equal(second.status, 200, second.msg)
-  assert.equal(second.data.trialBudget.windows, 2)
-
-  const third = await callTrial()
-  assert.equal(third.status, 200, third.msg)
-  assert.equal(third.data.trialBudget.windows, 3)
+  assert.equal(first.data.trialBudget.usedSeconds, 0)
+  assert.equal(first.data.expiresIn, 75)
 
   const exhausted = await callTrial()
   assert.equal(exhausted.status, 402)

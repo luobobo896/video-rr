@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import CheckoutDialog from '../../components/CheckoutDialog.vue';
 import Icon from '../../components/Icon.vue';
 import PosterCard from '../../components/PosterCard.vue';
@@ -7,7 +7,8 @@ import VideoPlayer from '../../components/VideoPlayer.vue';
 import { hlsUrl, mediaUrl, publicApi } from '../../api.js';
 import { normalizeCard } from '../../models.js';
 import { go, href, route } from '../../router.js';
-import { confirmAdult, requireLogin, state, toast } from '../../authState.js';
+import { confirmAdult, requireLogin, state } from '../../authState.js';
+import { trackEvent } from '../../track.js';
 
 const segments = route.path.split('/');
 const dramaId = Number(segments[2] || 0);
@@ -27,12 +28,11 @@ const adultUnlocked = ref(true);
 const retryToken = ref(0);
 
 let heartbeatTimer = 0;
-let heartbeatTick = 0;
-let heartbeatSession = '';
-let heartbeatEpisode = '';
-let historyTimer = 0;
+let video;
+const trialEnded = ref(false);
 let lastHistorySecond = 0;
 let countdownTimer = 0;
+let loadController;
 
 const trialMode = computed(() => route.query.trial === '1' || !state.user);
 const episode = computed(
@@ -45,7 +45,7 @@ const related = computed(() => (detail.value?.similar ?? []).map(normalizeCard))
 const playable = computed(() => Boolean(playback.value?.hls));
 
 async function saveHistory(force = false) {
-  if (!state.user || !detail.value) return;
+  if (!state.user || !playback.value || playback.value.source === 'trial') return;
   const seconds = Math.round(Number(playback.value?.position ?? lastHistorySecond ?? 0));
   if (!force && Math.abs(seconds - lastHistorySecond) < 20) return;
   lastHistorySecond = seconds;
@@ -59,16 +59,16 @@ async function saveHistory(force = false) {
   }
 }
 
-async function sendHeartbeat(event) {
-  if (!playback.value?.viewSessionId) return;
-  const video = event?.target;
+async function sendHeartbeat(event, finished = false) {
+  if (event?.target) video = event.target;
+  if (!playback.value?.viewSessionId || !video) return;
   try {
     await publicApi(`/play/session/${playback.value.viewSessionId}/heartbeat`, {
       method: 'POST',
       body: {
         positionSeconds: Number(video?.currentTime ?? playback.value.position ?? playback.value.resumePosition ?? 0),
         durationSeconds: Number(video?.duration ?? playback.value.duration ?? 0),
-        playing: !video?.paused,
+        playing: finished || (!video.paused && !video.ended && !video.seeking && video.readyState >= 3),
         visible: !document.hidden,
         playbackRate: Number(video?.playbackRate ?? 1)
       }
@@ -79,19 +79,40 @@ async function sendHeartbeat(event) {
 }
 
 function onTimeUpdate(event) {
+  if (!playback.value) return;
   playback.value.position = event.target.currentTime;
+  if (playback.value.source === 'trial' && playback.value.position >= playback.value.trialSeconds) {
+    onEnded(event);
+    return;
+  }
   void saveHistory();
 }
 
 function onEnded(event) {
+  if (playback.value?.source === 'trial') {
+    if (trialEnded.value) return;
+    trialEnded.value = true;
+    void sendHeartbeat(event, true);
+    trackEvent({ type: 'trial_end', extra: { dramaId, episodeId: playback.value.episodeId, position: Math.round(event.target.currentTime) } });
+    stopHeartbeat();
+    event.target.pause();
+    return;
+  }
   void sendHeartbeat(event);
   void saveHistory(true);
 }
 
 async function load() {
+  loadController?.abort();
+  const controller = new AbortController();
+  loadController = controller;
+  const { signal } = controller;
   // 换集、重试、成人门槛拦截：任何一次 load 都先停掉上一轮心跳，
   // 否则切到 402/503 之后旧的 15s timer 还在给上一集发心跳，污染完播率与结算。
   stopHeartbeat();
+  video = undefined;
+  trialEnded.value = false;
+  playback.value = null;
   loading.value = true;
   error.value = '';
   errorCode.value = '';
@@ -100,50 +121,44 @@ async function load() {
   window.clearInterval(countdownTimer);
   retryCountdown.value = 0;
   try {
-    detail.value = await publicApi(`/drama/${dramaId}`);
+    const nextDetail = await publicApi(`/drama/${dramaId}`, { signal });
+    if (signal.aborted) return;
+    detail.value = nextDetail;
     adultUnlocked.value = !detail.value.isAdult || state.adultConfirmed;
     if (!adultUnlocked.value) return;
     const suffix = trialMode.value ? '?trial=1' : '';
-    playback.value = await publicApi(`/play/${dramaId}/${episodeNo}${suffix}`);
+    const nextPlayback = await publicApi(`/play/${dramaId}/${episodeNo}${suffix}`, { signal });
+    if (signal.aborted) return;
+    playback.value = nextPlayback;
     lastHistorySecond = Number(playback.value.resumePosition ?? 0);
-    startHeartbeat(playback.value.viewSessionId);
+    startHeartbeat(nextPlayback);
   } catch (requestError) {
+    if (signal.aborted) return;
     error.value = requestError.message;
     errorCode.value = requestError.code || String(requestError.status || '');
     errorReason.value = requestError.data?.reason || '';
     if (errorReason.value === 'source_link_expired') startCountdown(requestError.data?.retryAfterSeconds);
   } finally {
     // 失败/拦截路径不留下任何心跳：没人看的会话不该继续报表
-    if (!playback.value?.viewSessionId || error.value) stopHeartbeat();
-    loading.value = false;
+    if (!signal.aborted) {
+      if (!playback.value?.viewSessionId || error.value) stopHeartbeat();
+      loading.value = false;
+    }
   }
 }
 
 /** 心跳只对「当前这一集 + 当前这个观看会话」生效，其它情况立刻停表 */
-function startHeartbeat(sessionId) {
+function startHeartbeat({ viewSessionId, heartbeatIntervalSeconds = 15 }) {
   stopHeartbeat();
-  if (!sessionId) return;
-  heartbeatSession = String(sessionId);
-  heartbeatEpisode = `${dramaId}:${episodeNo}`;
-  heartbeatTick = 0;
+  if (!viewSessionId) return;
   heartbeatTimer = window.setInterval(() => {
-    const currentSession = String(playback.value?.viewSessionId ?? '');
-    const currentEpisode = `${dramaId}:${episodeNo}`;
-    if (!currentSession || currentSession !== heartbeatSession || currentEpisode !== heartbeatEpisode) {
-      stopHeartbeat();
-      return;
-    }
-    heartbeatTick += 15;
     void sendHeartbeat();
-  }, 15000);
+  }, heartbeatIntervalSeconds * 1000);
 }
 
 function stopHeartbeat() {
   if (heartbeatTimer) window.clearInterval(heartbeatTimer);
   heartbeatTimer = 0;
-  heartbeatTick = 0;
-  heartbeatSession = '';
-  heartbeatEpisode = '';
 }
 
 /** 片源续期期间：显示倒计时，到点自动重拉一次播放信息 */
@@ -198,13 +213,9 @@ function openPaywall() {
 
 onMounted(load);
 
-// 换集（路由变化）时先停心跳再重载：绝不让上一集的 timer 继续跑
-watch(() => route.path, () => {
-  stopHeartbeat();
-  void load();
-});
-
 onBeforeUnmount(() => {
+  loadController?.abort();
+  if (playback.value?.source === 'trial' && !trialEnded.value) void sendHeartbeat();
   stopHeartbeat();
   window.clearInterval(countdownTimer);
   void saveHistory(true);
@@ -269,6 +280,7 @@ onBeforeUnmount(() => {
       <a class="section-link" :href="href(`/detail/${dramaId}`)">返回详情<Icon name="chevron" /></a>
     </div>
     <VideoPlayer
+      v-if="!trialEnded"
       :key="`${playback?.hls || ''}-${retryToken}`"
       :src="hlsUrl(playback?.hls)"
       :poster="mediaUrl(detail.coverUrl)"
@@ -279,6 +291,10 @@ onBeforeUnmount(() => {
       @pause="sendHeartbeat"
       @failed="onPlayerFailed"
     />
+    <div v-else class="empty">
+      <h3>试看结束</h3>
+      <button class="btn btn--primary" type="button" @click="openPaywall">查看购买选项</button>
+    </div>
     <div v-if="playerIssue" class="empty" style="padding: 20px">
       <p>{{ playerIssue }}</p>
       <div class="toolbar" style="justify-content: center">

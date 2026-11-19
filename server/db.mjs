@@ -808,6 +808,10 @@ function writeInitialAdminPasswords(list) {
 export function ensureOpsSchema() {
   const has = (table) => Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
   const cols = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name)
+  if (!cols('trial_uses').includes('view_session_id')) {
+    db.exec('ALTER TABLE trial_uses ADD COLUMN view_session_id TEXT')
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_trial_uses_session ON trial_uses(view_session_id)')
 
   if (has('dramas')) {
     const columns = cols('dramas')
@@ -1431,8 +1435,8 @@ CREATE INDEX IF NOT EXISTS idx_feedbacks_created ON feedbacks(created_at)
  * 幂等：pay_channels 已有数据则跳过。
  */
 export function migratePayChannels() {
-  if (count('pay_channels') > 0) return { migrated: false }
   const pay = getSetting('pay', {}) ?? {}
+  const hasChannels = count('pay_channels') > 0
   const site = getSetting('site', {}) ?? {}
   const rows = [
     {
@@ -1468,19 +1472,27 @@ export function migratePayChannels() {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
   db.exec('BEGIN')
   try {
-    let firstEnabled = true
-    for (const row of rows) {
-      const isDefault = row.status === 'enabled' && firstEnabled ? 1 : 0
-      if (isDefault) firstEnabled = false
-      insert.run(row.channel_code, row.name, row.scene, row.env, row.status, isDefault, row.priority, row.currency,
-        sealSecret(row.config), JSON.stringify(maskConfig(row.config)), currentKeyVersion())
+    if (!hasChannels) {
+      let firstEnabled = true
+      for (const row of rows) {
+        const isDefault = row.status === 'enabled' && firstEnabled ? 1 : 0
+        if (isDefault) firstEnabled = false
+        insert.run(row.channel_code, row.name, row.scene, row.env, row.status, isDefault, row.priority, row.currency,
+          sealSecret(row.config), JSON.stringify(maskConfig(row.config)), currentKeyVersion())
+      }
     }
+    if (pay.alipay && Object.hasOwn(pay.alipay, 'privateKey')) {
+      const { privateKey, ...alipay } = pay.alipay
+      if (hasChannels && privateKey) alipay.legacyPrivateKeyCipher = sealSecret({ privateKey })
+      setSetting('pay', { ...pay, alipay })
+    }
+    db.exec("UPDATE audit_logs SET before_json = NULL, after_json = NULL WHERE action = 'admin.pay.settings' AND (before_json IS NOT NULL OR after_json IS NOT NULL)")
     db.exec('COMMIT')
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
   }
-  return { migrated: true, channels: rows.length }
+  return hasChannels ? { migrated: false } : { migrated: true, channels: rows.length }
 }
 
 export function getSetting(key, fallback) {
@@ -1979,6 +1991,7 @@ CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_status ON withdrawal_requests
     if (!has(table)) return
     if (!cols(table).includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
   }
+  addColumn('user_acquisitions', 'pre_binding_touch_id', 'INTEGER')
 
   for (const [column, definition] of [
     ['first_channel_id', 'INTEGER'],

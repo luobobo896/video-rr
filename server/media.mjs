@@ -2,7 +2,7 @@
  * 视频处理：上传落盘 → ffprobe 探测 → ffmpeg 转多码率 HLS（720p/480p + master）→ 进度回写。
  * 单进程串行队列（并发 1）；1000 并发播放靠 nginx 直接吐切片 + 可选 CDN，Node 不碰视频字节。
  */
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { db, ROOT } from './db.mjs'
@@ -34,11 +34,8 @@ export function queueState() {
 
 export function probe(file) {
   return new Promise((resolve) => {
-    const child = spawn(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', file], { windowsHide: true })
-    let out = ''
-    child.stdout.on('data', (chunk) => { out += chunk })
-    child.on('error', () => resolve(undefined))
-    child.on('close', () => {
+    execFile(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', file], { windowsHide: true, timeout: 30_000 }, (error, out) => {
+      if (error) return resolve(undefined)
       try {
         const parsed = JSON.parse(out)
         const video = (parsed.streams ?? []).find((stream) => stream.codec_type === 'video')

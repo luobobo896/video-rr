@@ -87,6 +87,7 @@ export function applyHeartbeat({
   if (!session.user_id && normalizeVisitorId(visitorId) !== session.visitor_id) {
     throw Object.assign(new Error('观看会话不属于当前访客'), { code: 'session_forbidden', status: 403 })
   }
+  const guestTrial = session.source === 'trial' && !session.user_id
   const storedDuration = Number(session.duration_seconds ?? 0)
   const clientDuration = Number(durationSeconds ?? 0)
   const duration = storedDuration > 0 ? storedDuration : clientDuration
@@ -102,11 +103,11 @@ export function applyHeartbeat({
   // 视为伪造心跳——不推进进度、不置完播，只能沿用已累计的最远位置。
   const rawPosition = Number(positionSeconds ?? 0)
   const storedPosition = Number(session.max_position_seconds ?? 0)
-  const plausible = Number.isFinite(rawPosition) && rawPosition >= 0 && rawPosition <= duration + 2
+  const plausible = Number.isFinite(rawPosition) && rawPosition >= 0 && (guestTrial || rawPosition <= duration + 2)
   const position = plausible ? Math.min(duration, rawPosition) : Math.min(duration, Math.max(0, storedPosition))
   const last = new Date(String(session.last_heartbeat_at).replace(' ', 'T') + 'Z').getTime()
   const elapsedSinceLast = Number.isFinite(last) ? Math.max(0, (Date.now() - last) / 1000) : 0
-  if (elapsedSinceLast > 45) {
+  if (!guestTrial && elapsedSinceLast > 45) {
     run("UPDATE content_view_sessions SET status = 'expired', ended_at = datetime('now') WHERE id = ?", session.id)
     return {
       sessionId: session.id, effectiveSeconds: Number(session.effective_seconds ?? 0),
@@ -118,7 +119,18 @@ export function applyHeartbeat({
   const progressDelta = Math.max(0, position - Number(session.max_position_seconds ?? 0))
   const rate = Math.max(0.25, Math.min(4, Number(playbackRate) || 1))
   const effectiveDelta = playing && visible && progressDelta > 0.05 ? Math.min(elapsed, 20) : 0
-  const effective = Number(session.effective_seconds ?? 0) + effectiveDelta
+  const previous = Number(session.effective_seconds ?? 0)
+  const effective = guestTrial
+    ? Math.min(duration, previous + (elapsedSinceLast <= 20 && playing && visible ? Math.min(elapsed, progressDelta / rate) : 0))
+    : previous + effectiveDelta
+  if (guestTrial) {
+    run(`UPDATE content_view_sessions SET effective_seconds = ?, max_position_seconds = ?,
+      last_heartbeat_at = datetime('now') WHERE id = ?`, effective, position, session.id)
+    run(`UPDATE trial_uses SET seconds_used = ? WHERE view_session_id = ?
+      AND created_at >= datetime('now', ?)`, Math.floor(effective), session.id, `-${duration + 60} seconds`)
+    return { sessionId: session.id, effectiveSeconds: effective, thresholdSeconds: threshold,
+      valid: false, completed: false, sessionStatus: 'active' }
+  }
   // 完播一旦达成就保持（回拖不该把已有的完播抹掉），且伪造心跳永远不算完播
   const completed = Number(session.completed ?? 0) || (plausible && position / duration >= 0.9) ? 1 : 0
   let valid = Number(session.is_valid ?? 0)

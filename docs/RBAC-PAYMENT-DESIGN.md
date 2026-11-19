@@ -242,7 +242,7 @@ orders(channel, channel_id, channel_env, channel_key_version, channel_txn_id, us
 | MySQL 生成列唯一默认 | SQLite 靠 `setDefaultChannel` 事务 + 应用校验 |
 | 密钥轮换 | `MH_CONFIG_KEYS` 多版本 + `key_version` 列 |
 
-迁移脚本：`syncMenuCatalog()` 每次启动幂等补齐树节点并给超管全量授权；`migratePayChannels()` 把旧的 `settings.pay` JSON 拆成渠道行并按新密钥加密。
+启动迁移：`syncMenuCatalog()` 幂等补齐树节点并给超管全量授权；`migratePayChannels()` 将旧私钥加密、保留已配置的渠道，并清空旧支付配置审计中的明文载荷（保留操作元数据）。旧 `/admin/api/pay-settings` 停用（410）；读写统一走 `/admin/api/pay-channels`。
 
 ---
 

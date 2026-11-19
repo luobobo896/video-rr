@@ -76,16 +76,18 @@ test('渠道分析按订单归因快照聚合支付金额', () => {
   assert.ok(report.totals.createdOrders >= 1)
 })
 
-test('末次归因切换只影响新订单快照', () => {
+test('末次归因只选注册前最后一次触达，注册后的触达不覆盖', () => {
   const first = attr.upsertChannel({ channelCode: 'last_a', channelName: '首次渠道', channelType: 'paid_ad' })
   const last = attr.upsertChannel({ channelCode: 'last_b', channelName: '末次渠道', channelType: 'kol' })
   attr.upsertChannelDomain({ channelId: first.id, host: 'last-a.example.com', pathPrefix: '/' })
   attr.upsertChannelDomain({ channelId: last.id, host: 'last-b.example.com', pathPrefix: '/' })
   const visitor = `last-visitor-${Date.now()}`
   attr.recordTouch({ visitorId: visitor, host: 'last-a.example.com', pathname: '/' })
+  attr.recordTouch({ visitorId: visitor, host: 'last-b.example.com', pathname: '/' })
   const userId = newUser()
   attr.bindUserAcquisition({ userId, visitorId: visitor })
-  attr.recordTouch({ visitorId: visitor, userId, host: 'last-b.example.com', pathname: '/' })
+  db.prepare("UPDATE channel_touches SET occurred_at = datetime('now', '-6 seconds') WHERE visitor_id = ? AND channel_id = ?").run(visitor, first.id)
+  attr.recordTouch({ visitorId: visitor, userId, host: 'last-a.example.com', pathname: '/' })
   db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('attribution', ?)")
     .run(JSON.stringify({ model: 'last_touch', windowDays: 30 }))
   try {

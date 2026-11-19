@@ -303,7 +303,13 @@ const readBody = (req, limit = 2e6) => new Promise((resolve, reject) => {
   })
   req.on('end', () => {
     if (!raw) return finish(resolve, {})
-    try { finish(resolve, JSON.parse(raw)) } catch { finish(resolve, {}) }
+    try {
+      const body = JSON.parse(raw)
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error()
+      finish(resolve, body)
+    } catch {
+      finish(reject, Object.assign(new Error('请求体须为 JSON 对象'), { code: '0400', status: 400 }))
+    }
   })
   req.on('error', (error) => finish(reject, error))
 })
@@ -373,7 +379,6 @@ const PERM = {
   emailRead: 'email.read',
   emailWrite: 'email.write',
   audit: 'audit.read',
-  paySettings: 'admin.write',
   channelRead: 'growth.channel.read',
   channelWrite: 'growth.channel.write',
   contentStats: 'growth.content.read',
@@ -1478,6 +1483,10 @@ const deny = (perm) => {
     if (!episode) return send(res, {}, '0404', '分集不存在', 404)
     if (!opts.uploadPath) return send(res, {}, '0400', '未收到上传文件', 400)
     const info = await probe(opts.uploadPath)
+    if (!info?.width || !info?.height || !info?.duration) {
+      try { unlinkSync(opts.uploadPath) } catch (error) { logWarn('media.upload_cleanup_failed', { error }) }
+      return send(res, {}, '0400', '上传内容不是可识别的视频文件', 400)
+    }
     // 分集元数据 + 入队 + 剧集时间戳一次提交，避免留下「文件写了但没入队」的孤儿状态
     tx(() => {
       run('UPDATE episodes SET duration = ?, source_path = ? WHERE id = ?', info?.duration ?? 0, opts.uploadPath, episode.id)
@@ -2318,14 +2327,14 @@ const deny = (perm) => {
   if (pathname === '/admin/api/pay-channels' && method === 'POST') {
     if (!guard(PERM.payChannelWrite)) return deny(PERM.payChannelWrite)
     const channel = upsertChannel(body)
-    log('payment.channel.create', 'pay_channel', channel.id, null, { ...body, config: Object.keys(body.config ?? {}) })
+    log('payment.channel.create', 'pay_channel', channel.id, null, { fields: Object.keys(body), config: Object.keys(body.config ?? {}) })
     return send(res, { id: channel.id })
   }
 
   if (seg[0] === 'pay-channels' && seg[1] && seg.length === 2 && method === 'PUT') {
     if (!guard(PERM.payChannelWrite)) return deny(PERM.payChannelWrite)
     const channel = upsertChannel(body, Number(seg[1]))
-    log('payment.channel.update', 'pay_channel', seg[1], null, { ...body, config: Object.keys(body.config ?? {}) })
+    log('payment.channel.update', 'pay_channel', seg[1], null, { fields: Object.keys(body), config: Object.keys(body.config ?? {}) })
     return send(res, { id: channel.id })
   }
 
@@ -2577,21 +2586,8 @@ const deny = (perm) => {
     }
   }
 
-  if (pathname === '/admin/api/pay-settings' && method === 'GET') {
-    if (!guard(PERM.paySettings)) return deny(PERM.paySettings)
-    const pay = getSetting('pay', {})
-    return send(res, {
-      pay,
-      usdtRate: getSetting('site', {}).usdtRate ?? 7.2,
-    })
-  }
-  if (pathname === '/admin/api/pay-settings' && method === 'PUT') {
-    if (!guard(PERM.paySettings)) return deny(PERM.paySettings)
-    const before = getSetting('pay', {})
-    setSetting('pay', body.pay ?? before)
-    if (body.usdtRate) setSetting('site', { ...getSetting('site', {}), usdtRate: Number(body.usdtRate) })
-    log('admin.pay.settings', 'settings', 'pay', before, body.pay)
-    return send(res, { ok: true })
+  if (pathname === '/admin/api/pay-settings' && ['GET', 'PUT'].includes(method)) {
+    return send(res, {}, '0410', '旧支付配置接口已停用，请使用支付渠道配置', 410)
   }
 
   return send(res, {}, '0404', '接口不存在', 404)

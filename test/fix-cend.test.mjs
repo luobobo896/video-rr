@@ -229,14 +229,13 @@ test('静态断言：SearchPage 空关键词早退前复位 loading', () => {
   assert.match(source, /const term = keyword\.trim\(\)/);
 });
 
-test('静态断言：PlayPage 心跳 timer 由 onBeforeUnmount + watch + try/finally 三重收口', () => {
+test('静态断言：换集重建 PlayPage，离开时取消请求，迟到的响应不启动心跳', () => {
   const source = src('public/src/pages/c/PlayPage.vue');
-  assert.match(source, /function stopHeartbeat\(\)/);
-  assert.match(source, /onBeforeUnmount\(\(\)\s*=>\s*\{[\s\S]{0,260}stopHeartbeat\(\)/);
-  assert.match(source, /watch\(\s*\(\)\s*=>\s*route\.path[\s\S]{0,120}stopHeartbeat\(\)/);
-  assert.match(source, /finally\s*\{[\s\S]{0,160}stopHeartbeat\(\)/);
-  assert.match(source, /heartbeatEpisode\s*!==\s*heartbeatEpisode|currentEpisode\s*!==\s*heartbeatEpisode/);
-  assert.match(source, /`\$\{dramaId\}:\$\{episodeNo\}`/);
+  const app = src('public/src/App.vue');
+  assert.match(app, /const componentKey = computed\(\(\) => `\$\{route\.path\}/);
+  assert.match(app, /:key="componentKey"/);
+  assert.match(source, /onBeforeUnmount\(\(\)\s*=>\s*\{[\s\S]{0,260}loadController\?\.abort\(\)[\s\S]{0,260}stopHeartbeat\(\)/);
+  assert.match(source, /const nextPlayback = await publicApi\([^\n]+\{ signal \}\);\s*if \(signal\.aborted\) return;[\s\S]{0,220}startHeartbeat\(nextPlayback\)/);
 });
 
 test('静态断言：track.js 使用一次性 guard 与进入时上下文发送 loose', () => {
