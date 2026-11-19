@@ -87,6 +87,19 @@ test('限流：auth-send 每分钟 10 次，第 11 次 429；本机回环放行'
   assert.equal(loop.blocked, false, '本机回环应放行')
 })
 
+test('限流：埋点走独立额度，不会把写操作额度吃光', async () => {
+  const req = () => ({
+    socket: { remoteAddress: '203.0.113.44' },
+    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+  })
+  for (let i = 0; i < 100; i += 1) {
+    const result = await ratelimit.inspect(req(), '/api/track', 'POST')
+    assert.equal(result.blocked, false, `第 ${i + 1} 条埋点应放行`)
+  }
+  const write = await ratelimit.inspect(req(), '/api/favorites', 'POST')
+  assert.equal(write.blocked, false, '埋点 100 条之后写操作仍应放行')
+})
+
 test('限流：伪造 X-Forwarded-For 不能绕过（只信反代来源的 x-real-ip）', async () => {
   // 公网直连 + 伪造回环 XFF：应仍按 socket 地址限流，且不被当作回环放行
   const forged = { socket: { remoteAddress: '198.51.100.66' }, headers: { 'user-agent': 'Mozilla/5.0', 'x-forwarded-for': '127.0.0.1' } }

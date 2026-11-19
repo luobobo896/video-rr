@@ -24,6 +24,9 @@ const RULES = [
   { name: 'pay', match: (path) => path.startsWith('/api/pay/') || path.startsWith('/api/orders') || path.startsWith('/api/notify/'), limit: 40, window: 60_000 },
   { name: 'play', match: (path) => path.startsWith('/api/play/') || path.startsWith('/api/drama/'), limit: 120, window: 60_000 },
   { name: 'media', match: (path) => path.startsWith('/media/'), limit: 600, window: 60_000 },
+  // 埋点单独一档：点击/切页都会发 POST，混进 api-write（60/分钟）会把额度吃光，
+  // 用户随后点「收藏」「下单」直接 429。埋点丢几条无所谓，写操作不能被它拖累。
+  { name: 'track', match: (path) => path === '/api/track', limit: 1200, window: 60_000 },
   { name: 'api-write', match: (path, method) => method !== 'GET' && path.startsWith('/api/'), limit: 60, window: 60_000 },
   { name: 'api', match: (path) => path.startsWith('/api/'), limit: 400, window: 60_000 },
   { name: 'admin', match: (path) => path.startsWith('/admin/api/'), limit: 240, window: 60_000 },
