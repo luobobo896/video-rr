@@ -50,12 +50,11 @@ test('srcset 给出 320/640/1280 三档候选，非站内图返回空串交给�
 
 test('卡片接上了 srcset/sizes，加载失败回退原图（静态断言）', () => {
   const filmArt = readFileSync(new URL('../public/src/components/FilmArt.vue', import.meta.url), 'utf8')
-  assert.match(filmArt, /:srcset="coverSrcset \|\| undefined"/)
-  assert.match(filmArt, /:sizes="coverSrcset \? coverSizes : undefined"/)
+  assert.match(filmArt, /:srcset="displaySrcset \|\| undefined"/)
+  assert.match(filmArt, /:sizes="displaySrcset \? coverSizes : undefined"/)
   assert.match(filmArt, /loading="lazy"/)
   assert.match(filmArt, /decoding="async"/)
   assert.match(filmArt, /@error="onCoverError"/)
-  assert.match(filmArt, /img\.removeAttribute\('srcset'\)/)
 })
 
 test('封面到位前不留白：渐变占位上淡入，失败就退成占位图', () => {
@@ -68,4 +67,19 @@ test('封面到位前不留白：渐变占位上淡入，失败就退成占位�
   assert.match(styles, /\.film-art img\.is-failed \{ display: none; \}/)
   // hover 预览视频的 poster 也别再挂整张原图。
   assert.match(filmArt, /:poster="imageVariant\(film\.coverUrl, 640\) \|\| film\.coverUrl \|\| ''"/)
+})
+
+test('封面 404 时逐档回退：变体 → 原图 → 占位插画，不会停在裂图', () => {
+  const filmArt = readFileSync(new URL('../public/src/components/FilmArt.vue', import.meta.url), 'utf8')
+  // 回退链按宽度从窄到宽，最后一档是占位插画。
+  assert.match(filmArt, /const FALLBACK_CHAIN = \['w320', 'w640', 'w1280', 'source', 'art'\]/)
+  assert.match(filmArt, /fallbackStep\.value = next/)
+  assert.match(filmArt, /@error="onCoverError"/)
+  // 没有 coverUrl 的片子直接走 fallbackArt，不渲染空 src。
+  assert.match(filmArt, /if \(step === 'art' \|\| !props\.film\?\.coverUrl\) return fallbackArt\(props\.film\)/)
+})
+
+test('变体生成：窄源图只在最宽档被跳过，其余档照常产出以保住 srcset', () => {
+  const script = readFileSync(new URL('../scripts/build-image-variants.mjs', import.meta.url), 'utf8')
+  assert.match(script, /sourceWidth <= width \* 1\.05 && width !== widths\[widths\.length - 1\]/)
 })

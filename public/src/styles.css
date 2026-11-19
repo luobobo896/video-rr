@@ -517,7 +517,10 @@ svg { display: block; }
   mix-blend-mode: soft-light;
   transform: translateY(-8px);
   z-index: 1;
+  transition: opacity 260ms ease;
 }
+/* 封面加载成功后首字水印让位，避免压在真实海报上。 */
+.film-cjk.is-fading { opacity: 0; }
 .film-en {
   position: absolute;
   bottom: 14px;

@@ -11,7 +11,8 @@
  *   node scripts/build-image-variants.mjs --dry-run --limit 20
  *   node scripts/build-image-variants.mjs --dir /tmp/pics --widths 320,640
  *
- * 幂等：变体比源图新就跳过；源图更小（≤ 目标宽 5%）不放大，直接不生成该宽度。
+ * 幂等：变体比源图新就跳过；源图更小（≤ 目标宽 5%）不放大，直接不生成该宽度，
+ * 但最宽的那一档始终产出，保证前端 srcset 每档都能取到（否则 480 宽封面会让 640/1280 全 404）。
  */
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
@@ -95,7 +96,9 @@ export async function buildVariants({
       const sourceWidth = await widthOf(source)
       for (const width of widths) {
         // 源图本来就窄，放大只会更糊更占带宽；探不出宽度的（损坏或非常规格式）照常尝试，转换失败会记进 failed。
-        if (sourceWidth && sourceWidth <= width * 1.05) { stats.skipped += 1; continue }
+        // 唯一例外：最后一档（最宽的 MAX_FILL_WIDTH）始终产出，给 srcset 保底，
+        // 免得 480 宽的老封面一到 640/1280 就 404（480 ≤ 640*1.05 曾把两档全跳过）。
+        if (sourceWidth && sourceWidth <= width * 1.05 && width !== widths[widths.length - 1]) { stats.skipped += 1; continue }
         const target = join(targetDir, variantNameOf(file, width))
         if (existsSync(target) && statSync(target).mtimeMs >= sourceStat.mtimeMs) { stats.skipped += 1; continue }
         if (dryRun) { stats.generated += 1; continue }
