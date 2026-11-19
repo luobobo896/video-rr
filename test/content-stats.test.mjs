@@ -90,6 +90,15 @@ test('统计聚合和热播榜快照可生成', () => {
   assert.ok(published.items.length >= 1)
 })
 
+test('重算只处理窗口内有事件的内容，不扫全库', () => {
+  const inactive = Number(db.prepare("INSERT INTO dramas (title, category, status, content_type) VALUES ('无事件内容', 'TV', 'published', 'series')").run().lastInsertRowid)
+  const published = Number(db.prepare("SELECT COUNT(*) AS n FROM dramas WHERE status = 'published'").get().n)
+  const rebuilt = stats.rebuildContentStats({ days: 1 })
+  assert.ok(rebuilt.contents < published)
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM content_stats_daily WHERE content_id = ?').get(inactive).n, 0)
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM content_stats_total WHERE content_id = ?').get(inactive).n, 0)
+})
+
 test('心跳超过 45 秒过期，客户端不能缩短片长绕过阈值', () => {
   const uid = newUser()
   const content = db.prepare('SELECT * FROM dramas WHERE content_type IS NOT NULL LIMIT 1').get()

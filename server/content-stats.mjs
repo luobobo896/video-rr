@@ -212,11 +212,20 @@ function dailyForContent(contentId, date) {
 }
 
 export function rebuildContentStats({ days = 2 } = {}) {
-  const contents = all("SELECT id, content_type FROM dramas WHERE status = 'published'")
   const dates = []
   for (let i = 0; i < Math.max(1, Math.min(31, Number(days) || 2)); i += 1) {
     dates.push(new Date(Date.now() - i * 86400_000).toISOString().slice(0, 10))
   }
+  // 只重算窗口内真正有事件的内容。全库 10 万+ 部时逐部重算会把 Node 主线程占满，
+  // 而日聚合/总量只会随新事件变化；没有事件的内容保留上次结果即可。
+  const since = `${dates[dates.length - 1]} 00:00:00`
+  const contents = all(`SELECT d.id, d.content_type FROM dramas d
+    WHERE d.status = 'published' AND (
+      EXISTS (SELECT 1 FROM play_events p WHERE p.drama_id = d.id AND p.created_at >= ?)
+      OR EXISTS (SELECT 1 FROM content_click_events c WHERE c.content_id = d.id AND c.occurred_at >= ?)
+      OR EXISTS (SELECT 1 FROM content_view_sessions v WHERE v.content_id = d.id AND v.started_at >= ?)
+      OR EXISTS (SELECT 1 FROM content_favorite_events f WHERE f.content_id = d.id AND f.occurred_at >= ?)
+    )`, since, since, since, since)
   for (const content of contents) {
     for (const date of dates) {
       const row = dailyForContent(content.id, date)
