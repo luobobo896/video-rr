@@ -100,7 +100,8 @@ export async function buildVariants({
         // 例外二：比源图窄的档也照常产出——缩图不放大，且老库大量源图只有 360~480 宽，
         // 卡死中间档会让 srcset 中间候选永远 404，浏览器只能退回整张原图。
         const isWidest = width === widths[widths.length - 1]
-        if (sourceWidth && sourceWidth <= width * 1.05 && !isWidest && sourceWidth <= width) { stats.skipped += 1; continue }
+        const skipIfUpscale = sourceWidth && sourceWidth <= width * 1.05 && sourceWidth <= width
+        if (skipIfUpscale && !isWidest) { stats.skipped += 1; continue }
         const target = join(targetDir, variantNameOf(file, width))
         if (existsSync(target) && statSync(target).mtimeMs >= sourceStat.mtimeMs) { stats.skipped += 1; continue }
         if (dryRun) { stats.generated += 1; continue }
