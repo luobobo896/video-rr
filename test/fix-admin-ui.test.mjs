@@ -460,3 +460,29 @@ test('非路由的 path 不假装是页面，详情页与登录页都有中文�
   assert.equal(pageLabelOf('仙逆'), '非页面记录', '搜索词落在 path 里，不能当成页面')
   assert.equal(pageLabelOf('MH1794317247790EDDB'), '非页面记录')
 })
+
+// ------------------------------------------------- 埋点区间切换必须写回 hash
+test('埋点区间与事件类型切换先写 hash 再重渲染，四个区间不会卡在同一个值（静态断言）', () => {
+  const rangeHandler = sliceAround(appJs, "view.querySelectorAll('[data-range]').forEach", 120, 700)
+  assert.match(rangeHandler, /state\.params\.eventRange = button\.dataset\.range/)
+  assert.match(rangeHandler, /syncEventHash\(\)/, '换区间必须先写 hash，否则 pageEvents() 读回上一轮的旧 range')
+  assert.match(rangeHandler, /syncEventHash\(\)[\s\S]{0,40}pageEvents\(\)/, '写 hash 要排在 pageEvents() 之前')
+
+  const typeHandler = sliceAround(appJs, "$('#ev-type')?.addEventListener('change'", 60, 420)
+  assert.match(typeHandler, /state\.params\.eventType = event\.target\.value/)
+  assert.match(typeHandler, /syncEventHash\(\)[\s\S]{0,40}pageEvents\(\)/, '换类型同样要先写 hash')
+
+  // 反例守卫：handler 里不允许出现「只改 state 直接重渲染」的写法
+  for (const block of [rangeHandler, typeHandler]) {
+    assert.doesNotMatch(block, /listPages\.events = 1\s*\n\s*pageEvents\(\)/, '缺少 syncEventHash()')
+  }
+})
+
+test('概览「可播」按 HLS 或远程直链统计，远程片源不算不可播（静态断言）', () => {
+  const api = readFileSync(new URL('../server/api-admin.mjs', import.meta.url), 'utf8')
+  assert.match(
+    api,
+    /readyEpisodes: one\("SELECT COUNT\(\*\) AS n FROM episodes WHERE status = 'ready' AND \(hls_path IS NOT NULL OR \(remote_url IS NOT NULL AND remote_url <> ''\)\)"\)/,
+  )
+  assert.match(api, /SUM\(CASE WHEN status = 'ready' AND \(hls_path IS NOT NULL OR \(remote_url IS NOT NULL AND remote_url <> ''\)\) THEN 1 ELSE 0 END\) AS ready_episodes/)
+})

@@ -111,3 +111,31 @@ test('未知状态不会悄悄变成“全部”', async () => {
   const all = await callAdmin('/admin/api/dramas?pageSize=5')
   assert.equal(total, Number(all.data.total), '未知状态应被忽略，返回全量')
 })
+
+test('「可播」按 HLS 或远程直链统计：只有 remote_url 的集也算可播', async () => {
+  const drama = db.prepare("SELECT id FROM dramas WHERE title = '状态回归-已上架'").get()
+  const before = await callAdmin('/admin/api/stats')
+  const baseReady = Number(before.data.readyEpisodes)
+  const baseList = await callAdmin('/admin/api/dramas?status=published&pageSize=50')
+  const baseRow = baseList.data.list.find((item) => item.id === drama.id)
+  const baseRowReady = Number(baseRow.readyEpisodes ?? 0)
+  const baseRowEpisodes = Number(baseRow.episodeCount ?? 0)
+
+  const insert = db.prepare(
+    `INSERT INTO episodes (drama_id, no, status, hls_path, remote_url) VALUES (?, ?, 'ready', ?, ?)`
+  )
+  insert.run(drama.id, 901, '/media/hls/1/master.m3u8', null) // 本地 HLS 就绪
+  insert.run(drama.id, 902, null, 'https://cdn.example.com/a.m3u8') // 只有远程直链（生产主形态）
+  insert.run(drama.id, 903, null, null) // 两种源都没有 → 不可播
+
+  const stats = await callAdmin('/admin/api/stats')
+  assert.equal(stats.code, '0000', stats.msg)
+  assert.equal(Number(stats.data.readyEpisodes) - baseReady, 2, '只有 hls_path 的旧口径会把远程直链算成不可播')
+
+  const list = await callAdmin('/admin/api/dramas?status=published&pageSize=50')
+  const row = list.data.list.find((item) => item.id === drama.id)
+  assert.equal(Number(row.readyEpisodes) - baseRowReady, 2, '剧集库每行的可播数也要同一口径')
+  assert.equal(Number(row.episodeCount) - baseRowEpisodes, 3)
+
+  db.prepare('DELETE FROM episodes WHERE drama_id = ? AND no >= 901').run(drama.id)
+})

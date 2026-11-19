@@ -5940,14 +5940,18 @@ async function pageEvents() {
       ${pager('events', page, data.pageSize, data.total, '条')}
     </div>`
 
+  // 换区间/换类型必须先写回地址栏：pageEvents() 以 hash 为准还原筛选，
+  // 只改 state 再调它会读到上一轮的旧 range，于是四个区间全卡在同一个值上。
   view.querySelectorAll('[data-range]').forEach((button) => button.addEventListener('click', () => {
     state.params.eventRange = button.dataset.range
     listPages.events = 1
+    syncEventHash()
     pageEvents()
   }))
   $('#ev-type')?.addEventListener('change', (event) => {
     state.params.eventType = event.target.value
     listPages.events = 1
+    syncEventHash()
     pageEvents()
   })
   bindPager('events', async () => {

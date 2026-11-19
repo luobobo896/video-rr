@@ -558,7 +558,7 @@ const deny = (perm) => {
       offlineDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'offline'").n,
       hiddenDramas: one("SELECT COUNT(*) AS n FROM dramas WHERE status = 'hidden'").n,
       episodes: one('SELECT COUNT(*) AS n FROM episodes').n,
-      readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE status = 'ready' AND hls_path IS NOT NULL").n,
+      readyEpisodes: one("SELECT COUNT(*) AS n FROM episodes WHERE status = 'ready' AND (hls_path IS NOT NULL OR (remote_url IS NOT NULL AND remote_url <> ''))").n,
       tags: one("SELECT COUNT(*) AS n FROM tags WHERE status = 'active'").n,
       users: one('SELECT COUNT(*) AS n FROM users').n,
       activeUsers7d: one("SELECT COUNT(DISTINCT user_id) AS n FROM play_events WHERE created_at >= datetime('now','-7 days')").n,
@@ -858,8 +858,10 @@ const deny = (perm) => {
     const episodeStats = new Map()
     const policyMap = new Map()
     if (ids.length) {
+      // 可播 = 本地 HLS 就绪 或 有远程直链（remote_url 走 stream-proxy，同样能播）。
+      // 只认 hls_path 会把整库远程片源算成不可播（生产 123668/123717 集都是远程直链）。
       for (const stats of all(`SELECT drama_id, COUNT(*) AS episode_count,
-          SUM(CASE WHEN status = 'ready' AND hls_path IS NOT NULL THEN 1 ELSE 0 END) AS ready_episodes
+          SUM(CASE WHEN status = 'ready' AND (hls_path IS NOT NULL OR (remote_url IS NOT NULL AND remote_url <> '')) THEN 1 ELSE 0 END) AS ready_episodes
         FROM episodes WHERE drama_id IN (${marks}) GROUP BY drama_id`, ...ids)) {
         episodeStats.set(stats.drama_id, stats)
       }
