@@ -9,10 +9,11 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # - flock 一律带 -E 99：抢锁失败退出 99，脚本自身「上一轮仍在跑」也退 99，
 #   与「抓页失败」的 1 区分开（jable-health 把 99 当正常跳过，不告警不重试）
 # - MH_LOCK 让两个分片各用各的进程锁，否则同一路径的锁会让第 2 个分片永远退 99
+# - nice/ionice 让批量抓取让路给线上 API：导入会写同一块盘和 SQLite，不能和用户请求抢 IO
 # 部署：install -m 644 -o root -g root deploy/cron.d/video-refresh /etc/cron.d/video-refresh
 # 注意：文件末尾必须有换行，否则 cron 会报
 #   (*system*video-refresh) ERROR (Missing newline before EOF, this crontab file will be ignored)
 # 并把整份配置忽略掉。
-*/5 * * * * root cd /opt/video-rr && flock -n -E 99 /tmp/jable-refresh.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome MH_LOCK=/opt/video-rr/storage/.jable-import-0.lock MH_SHARD=0/2 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 45 --limit 600 >> /var/log/video-refresh.log 2>&1
-2-59/5 * * * * root cd /opt/video-rr && flock -n -E 99 /tmp/jable-refresh-2.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome-2 MH_LOCK=/opt/video-rr/storage/.jable-import-1.lock MH_SHARD=1/2 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 45 --limit 600 >> /var/log/video-refresh.log 2>&1
-3,13,23,33,43,53 * * * * root cd /opt/video-rr && MH_LOCK=/opt/video-rr/storage/.jable-import-0.lock /usr/bin/node scripts/jable-health.mjs --fix >> /var/log/video-refresh.log 2>&1
+*/5 * * * * root cd /opt/video-rr && flock -n -E 99 /tmp/jable-refresh.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome MH_LOCK=/opt/video-rr/storage/.jable-import-0.lock MH_SHARD=0/2 /usr/bin/nice -n 19 /usr/bin/ionice -c 3 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 45 --limit 600 >> /var/log/video-refresh.log 2>&1
+2-59/5 * * * * root cd /opt/video-rr && flock -n -E 99 /tmp/jable-refresh-2.lock env MH_EDGE=/usr/bin/chromium MH_CHROME_PROFILE=/opt/video-rr/storage/.jable-chrome-2 MH_LOCK=/opt/video-rr/storage/.jable-import-1.lock MH_SHARD=1/2 /usr/bin/nice -n 19 /usr/bin/ionice -c 3 xvfb-run -a node scripts/jable-import.mjs --refresh --max-left 45 --limit 600 >> /var/log/video-refresh.log 2>&1
+3,13,23,33,43,53 * * * * root cd /opt/video-rr && MH_LOCK=/opt/video-rr/storage/.jable-import-0.lock /usr/bin/nice -n 19 /usr/bin/ionice -c 3 /usr/bin/node scripts/jable-health.mjs --fix >> /var/log/video-refresh.log 2>&1
